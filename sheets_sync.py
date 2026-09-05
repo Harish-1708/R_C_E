@@ -222,6 +222,30 @@ class GspreadSheetsClient:
         except Exception:
             pass  # cosmetic only -- never worth failing the whole sync over
 
+    def update_single_cell(self, row_id: str, column_name: str, value: str, id_col: str = "id") -> bool:
+        """Update just one cell (column_name, for whichever row has
+        row_id in id_col) WITHOUT rewriting the whole tab. Used for
+        incremental updates during long-running steps like email
+        scraping, so progress is saved as it happens rather than only
+        at the very end -- if the run gets interrupted partway, emails
+        already found aren't lost.
+
+        Returns True if the row was found and updated, False if no row
+        with that id exists in the sheet yet.
+        """
+        header = self._ws.row_values(1)
+        if id_col not in header or column_name not in header:
+            return False
+        id_col_idx = header.index(id_col) + 1  # gspread is 1-indexed
+        target_col_idx = header.index(column_name) + 1
+
+        id_values = self._ws.col_values(id_col_idx)
+        for row_num, val in enumerate(id_values[1:], start=2):  # skip header row
+            if val == row_id:
+                self._ws.update_cell(row_num, target_col_idx, value)
+                return True
+        return False
+
 
 def get_or_create_worksheet(spreadsheet, title: str, cols: int = 30):
     """Fetch a worksheet by title, creating it (blank) if missing. Used
