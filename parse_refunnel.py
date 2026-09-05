@@ -73,6 +73,24 @@ MASTER_COLUMNS = [
 # identical whichever tab it's in -- just filtered by rights_status.
 USAGE_RIGHTS_COLUMNS = MASTER_COLUMNS
 
+# Trimmed columns for the Human Review tab -- just enough to identify
+# and evaluate a post at a glance. The "Reviewed" (or whatever you name
+# it) column is NOT listed here on purpose: you add that column
+# yourself directly in the sheet, and sheets_sync.py's existing "extra
+# manual columns" preservation logic (see sheets_sync.py docstring)
+# automatically carries your marks forward across daily reruns, keyed
+# by id -- no code change needed for that part.
+HUMAN_REVIEW_COLUMNS = [
+    "id",
+    "username",
+    "platform",
+    "rights_status",
+    "original_post_link",
+    "creator_email",
+    "followers",
+    "updated_at",
+]
+
 PAYMENT_COLUMNS = [
     "id",
     "creator",
@@ -215,6 +233,18 @@ def parse_payments_csv(path: str, result: Optional[ParseResult] = None) -> Parse
             }
 
     return result
+
+
+def build_human_review_rows(result: ParseResult) -> Dict[str, dict]:
+    """Combine all three usage-rights buckets (approved/requested/
+    declined) into one row-set for the Human Review tab, trimmed to
+    HUMAN_REVIEW_COLUMNS. NONE-status rows are excluded -- there's
+    nothing to review until a request exists."""
+    combined: Dict[str, dict] = {}
+    for bucket in (result.rights_approved, result.rights_requested, result.rights_declined):
+        for media_id, row in bucket.items():
+            combined[media_id] = {col: row.get(col, "") for col in HUMAN_REVIEW_COLUMNS}
+    return combined
 
 
 def apply_creator_emails(result: ParseResult, emails: Dict[str, str]) -> int:
