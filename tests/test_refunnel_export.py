@@ -11,7 +11,7 @@ import re
 
 import pytest
 
-from refunnel_export import scroll_to_load_all, ExportError, select_workspace
+from refunnel_export import scroll_to_load_all, ExportError, select_workspace, _safe_click
 
 
 class FakePage:
@@ -208,6 +208,52 @@ def test_sabotage_select_workspace_wrong_target_would_be_caught():
     with pytest.raises(AssertionError):
         assert page.active_workspace == "Swoveralls"
     assert page.active_workspace == "Kelson"
+
+
+# ---------- _safe_click safety-net tests ----------
+
+class _FakeClickLocator:
+    def __init__(self, text):
+        self._text = text
+        self.clicked = False
+
+    def inner_text(self, timeout=0):
+        return self._text
+
+    def click(self):
+        self.clicked = True
+
+
+def test_safe_click_allows_normal_button():
+    loc = _FakeClickLocator("Email")
+    _safe_click(loc)
+    assert loc.clicked is True
+
+
+def test_safe_click_refuses_send_request_button():
+    loc = _FakeClickLocator("Send request")
+    with pytest.raises(ExportError, match="Refusing to click"):
+        _safe_click(loc)
+    assert loc.clicked is False
+
+
+def test_safe_click_refuses_case_insensitively_and_with_extra_text():
+    loc = _FakeClickLocator("  SEND REQUEST NOW  ")
+    with pytest.raises(ExportError):
+        _safe_click(loc)
+    assert loc.clicked is False
+
+
+def test_sabotage_disabling_the_pattern_check_would_be_caught(monkeypatch):
+    # proves the refusal is actually driven by _DANGEROUS_BUTTON_PATTERN,
+    # not some hardcoded check -- neutering the pattern lets the click
+    # through, confirming the real pattern is what normally prevents it
+    import refunnel_export
+
+    monkeypatch.setattr(refunnel_export, "_DANGEROUS_BUTTON_PATTERN", re.compile(r"$nothing_matches_this^"))
+    loc = _FakeClickLocator("Send request")
+    _safe_click(loc)  # with the pattern neutered, this now (wrongly) succeeds
+    assert loc.clicked is True
 
 
 # ---------- sabotage tests ----------
