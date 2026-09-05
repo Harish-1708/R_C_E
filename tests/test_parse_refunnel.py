@@ -18,6 +18,7 @@ from parse_refunnel import (
     parse_payments_csv,
     rows_needing_email_scrape,
     apply_creator_emails,
+    apply_human_review_flags,
     build_human_review_rows,
     RIGHTS_STATUS_MAP,
     HUMAN_REVIEW_COLUMNS,
@@ -142,36 +143,63 @@ def test_apply_creator_emails_ignores_unknown_ids_and_blank_values():
     assert updated == 0
 
 
-def test_build_human_review_rows_combines_all_three_buckets():
+def test_apply_human_review_flags_moves_row_out_of_its_current_bucket():
     result = parse_media_csv(MEDIA_CSV)
-    review_rows = build_human_review_rows(result)
-    # sample file has 3 approved + 1 requested + 0 declined = 4
-    assert len(review_rows) == 4
-    assert set(review_rows.keys()) == (
-        set(result.rights_approved) | set(result.rights_requested) | set(result.rights_declined)
-    )
+    approved_id = next(iter(result.rights_approved))
+    moved = apply_human_review_flags(result, [approved_id])
+
+    assert moved == 1
+    assert approved_id not in result.rights_approved
+    assert approved_id in result.rights_reviewed
+    # stays in master regardless
+    assert approved_id in result.master
 
 
-def test_build_human_review_rows_excludes_none_status():
+def test_apply_human_review_flags_ignores_unknown_ids():
     result = parse_media_csv(MEDIA_CSV)
+    moved = apply_human_review_flags(result, ["not_a_real_id"])
+    assert moved == 0
+    assert "not_a_real_id" not in result.rights_reviewed
+
+
+def test_apply_human_review_flags_works_across_different_buckets():
+    result = parse_media_csv(MEDIA_CSV)
+    approved_id = next(iter(result.rights_approved))
+    requested_id = next(iter(result.rights_requested))
+    moved = apply_human_review_flags(result, [approved_id, requested_id])
+
+    assert moved == 2
+    assert approved_id not in result.rights_approved
+    assert requested_id not in result.rights_requested
+    assert {approved_id, requested_id} == set(result.rights_reviewed)
+
+
+def test_build_human_review_rows_reflects_reviewed_bucket_only():
+    result = parse_media_csv(MEDIA_CSV)
+    approved_id = next(iter(result.rights_approved))
+    apply_human_review_flags(result, [approved_id])
+
     review_rows = build_human_review_rows(result)
-    none_ids = {mid for mid, row in result.master.items() if row["rights_status"] == "NONE"}
-    assert none_ids.isdisjoint(review_rows)
+    assert set(review_rows.keys()) == {approved_id}
 
 
 def test_build_human_review_rows_only_has_trimmed_columns():
     result = parse_media_csv(MEDIA_CSV)
+    approved_id = next(iter(result.rights_approved))
+    apply_human_review_flags(result, [approved_id])
+
     review_rows = build_human_review_rows(result)
     for row in review_rows.values():
         assert set(row.keys()) == set(HUMAN_REVIEW_COLUMNS)
 
 
-def test_sabotage_human_review_wrong_bucket_count_would_be_caught():
+def test_sabotage_human_review_wrong_bucket_would_be_caught():
     result = parse_media_csv(MEDIA_CSV)
-    review_rows = build_human_review_rows(result)
+    requested_id = next(iter(result.rights_requested))
+    apply_human_review_flags(result, [requested_id])
     with pytest.raises(AssertionError):
-        assert len(review_rows) == 999  # deliberately wrong
-    assert len(review_rows) == 4  # confirms actual correct behavior
+        assert requested_id in result.rights_requested  # wrong -- it moved out
+    assert requested_id in result.rights_reviewed  # confirms actual correct behavior
 
 
 # ---------- malformed-input tests ----------
