@@ -34,10 +34,37 @@ so here's exactly what that means in practice:
 - **Payments**: same pattern -- new payments appear as new rows, keyed
   by their own id.
 - **`creator_email`** stays blank until email scraping is enabled (see
-  below) -- once it is, it fills in incrementally as it's found.
-- **Manual columns you add yourself** (a "Notes" column, the "Human
-  Review" tab's review-status column, etc.) are preserved across every
-  run -- see "Notes on design choices" below for how that works.
+  below) -- once it is, it fills in incrementally, and once found for a
+  post, it's never re-scraped again (the sync reads back whatever's
+  already in the sheet first).
+- **Rows move into Human Review once you mark them "Reviewed"** in
+  Master Data (see "How the Human Review tab actually works" below) --
+  and out of whichever Usage Rights tab they were in.
+- **Manual columns you add yourself** (a "Notes" column, the "Reviewed"
+  column itself) are preserved across every run -- see "Notes on design
+  choices" below for how that works.
+
+## How the Human Review tab actually works
+
+This changed from the first version, based on your feedback:
+
+1. Add a column literally named **"Reviewed"** to the **Master Data**
+   tab yourself, wherever you like -- it's not part of what this script
+   writes, so it survives every future sync untouched, the same way any
+   manual column does.
+2. Mark a row `Yes` (or `y` / `true` / `1`, case-insensitive) in that
+   column whenever you've reviewed that post.
+3. On the **next** sync, that row is automatically moved OUT of
+   whichever tab it was in (Approved / Requested / Declined) and INTO
+   the **Human Review** tab instead. It's removed from the other three
+   -- not duplicated. It stays in Master Data regardless; only its
+   Usage Rights tab placement changes.
+
+Nothing currently in Human Review by default -- it only ever contains
+what you've actively marked reviewed. See `apply_human_review_flags()`
+in `parse_refunnel.py` for the actual logic, and `read_column_values()`
+in `sheets_sync.py` for how your "Reviewed" values get read back each
+run.
 
 ## What I just added
 
@@ -49,13 +76,15 @@ so here's exactly what that means in practice:
   so it can never accidentally hit "Send request"). Still off by
   default (`SCRAPE_EMAILS_ENABLED = False`) -- see the checklist below
   for the one piece of evidence still needed before turning it on.
-- **A new "Human Review" tab.** Lists every post in Usage Rights -
-  Approved/Requested/Declined (not the NONE-status ones -- nothing to
-  review there yet) with just the essentials: id, username, platform,
-  status, link, email, followers, last updated. Add your own column
-  (e.g. "Reviewed") directly in the sheet -- it'll be preserved across
-  every future run automatically, the same way a "Notes" column would
-  be on any other tab.
+- **Won't re-scrape an email once it's found.** The sync now reads back
+  whatever's already in Master Data's `creator_email` column before
+  deciding what still needs scraping -- so a post only ever gets
+  scraped once, not every day.
+- **The Human Review tab is now flag-driven**, not automatic -- see
+  "How the Human Review tab actually works" above. (It used to just
+  combine all of Approved+Requested+Declined into one tab regardless of
+  whether you'd looked at them -- this was the wrong design, per your
+  feedback, and is now fixed.)
 - **Consistent row heights.** Every tab now uses CLIP text wrapping
   (long values stay on one line, truncated visually rather than
   wrapping the row taller) instead of the uneven wrapping you saw
@@ -96,8 +125,8 @@ refunnel-sync/
 
 | File | What it does | Tested how |
 |---|---|---|
-| `parse_refunnel.py` | Turns the 2 CSVs into 6 tabs' worth of rows, keyed by id | 24 automated tests against your real sample + full-scale CSVs |
-| `sheets_sync.py` | Rewrites each Sheet tab from parsed data, preserving manual columns, formats for consistent row heights | 8 automated tests against an in-memory fake Sheet |
+| `parse_refunnel.py` | Turns the 2 CSVs into 6 tabs' worth of rows, keyed by id; Human Review is flag-driven | 26 automated tests against your real sample + full-scale CSVs |
+| `sheets_sync.py` | Rewrites each Sheet tab from parsed data, preserving manual columns, formats for consistent row heights, reads back manual columns like "Reviewed" | 13 automated tests against an in-memory fake Sheet |
 | `gmail_otp.py` | Fetches a Refunnel login code from Gmail (fallback path only) | 7 automated tests against a fake Gmail client |
 | `refunnel_auth.py` | Saved-session reuse + fresh OTP login via Gmail fallback | **Not run against the live site** -- see below |
 | `refunnel_export.py` | Workspace switching, scroll-to-load-all, CSV export triggers, email scrape | Switching/scroll/safety-net logic has 16 automated tests against fakes; the actual browser clicks are **not run against the live site** |
@@ -108,7 +137,7 @@ refunnel-sync/
 
 Run all automated tests (from the repo root): `python -m pytest -v`
 Lint everything: `python -m pyflakes *.py scripts/*.py tests/*.py`
-(Both were run before delivery -- 65 tests pass, no lint warnings.)
+(Both were run before delivery -- 72 tests pass, no lint warnings.)
 
 ## Multi-workspace setup: `config/workspaces.yaml`
 
