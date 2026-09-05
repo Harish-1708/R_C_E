@@ -331,17 +331,18 @@ site. Please work through this checklist once real credentials exist:
   itself was already confirmed correct and is unchanged -- still worth a
   fresh real run to confirm the full 2078 now loads.
 - [ ] **Email scraping** (`scrape_creator_emails` in `refunnel_export.py`):
-  implemented for real from your screenshots of the actual flow (toggle
-  -> "Request usage-rights" -> Email tab -> read field -> Escape to
-  close), but ONE piece is still a guess: how a single post's card is
-  identified in the DOM (`div:has-text(username)`, which could be
-  ambiguous if a creator has multiple visible posts). `SCRAPE_EMAILS_ENABLED
-  = False` by default. Before enabling: send an HTML dump of one card
-  (right-click -> Inspect) the same way we nailed every other selector
-  in this project, so this can be pinned down exactly rather than left
-  to a text-match guess. It will never click "Send request" regardless
-  -- that's enforced by `_safe_click`'s pattern check, independent of
-  whatever selector logic runs above it.
+  now built entirely from a real, complete HTML trace of the whole flow
+  (card -> popover -> modal), not a guess -- `.usage-rights-request-card`,
+  the `role="menuitem"` popover item, the `.ur-tab-card` Email tab (active
+  by default), and `get_by_label("Creator email address")` are all
+  confirmed real selectors. `SCRAPE_EMAILS_ENABLED = False` by default
+  regardless -- this still needs a real run before trusting it, because
+  the page uses react-virtuoso (a virtualized grid that only keeps
+  nearby cards mounted), which no amount of HTML inspection can fully
+  verify without watching it actually scroll and load in a live
+  browser. It will never click "Send request" regardless of anything
+  else going wrong -- that's enforced by `_safe_click`'s pattern check,
+  independent of whatever selector logic runs above it.
 - [ ] **A full end-to-end run for Duderobe**: once the above are fixed,
   trigger the workflow manually once (Actions tab -> Run workflow,
   workspace = Duderobe) and check the Sheet updates correctly before
