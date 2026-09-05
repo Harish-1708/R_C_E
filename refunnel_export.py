@@ -60,55 +60,66 @@ class ExportError(RuntimeError):
     pass
 
 
-def select_workspace(page: Page, workspace_name: str, all_known_workspace_names: Iterable[str]) -> None:
+def select_workspace(
+    page: Page,
+    workspace_name: str,
+    all_known_workspace_names: Iterable[str],
+    timeout_ms: int = 15000,
+) -> None:
     """Switch Refunnel's active workspace, using the top-left
     workspace switcher (logo + name + chevron -> dropdown with a
     'Search Workspaces' box and a list of workspace names -- confirmed
     from your screenshot of the OPEN dropdown).
 
-    I have NOT seen the closed/collapsed trigger's markup -- only the
-    opened state. Since the trigger always shows whichever workspace is
-    *currently* active, and that's one of a known small set (your 4
-    workspaces), this opens the switcher by clicking whichever of those
-    names is currently visible at the top of the page, then picks the
-    target from the resulting list.
+    Waits (up to timeout_ms) for ANY of the known workspace names to
+    render as visible text before doing anything -- this also covers
+    the page still client-side rendering right after navigation, which
+    is the most likely reason an earlier version of this failed
+    immediately after a fresh page.goto().
 
     If workspace_name is already the active one, this is a no-op (skips
     opening the switcher at all).
     """
-    if page.get_by_text(workspace_name, exact=True).first.is_visible():
-        # Might already be showing as the active workspace (top-left) OR
-        # already be selected -- do a light check: if a "Search
-        # Workspaces" input is NOT present, assume we're already on the
-        # right workspace and skip switching.
+    all_known = list(all_known_workspace_names)
+    combined_css = ", ".join(f":text-is('{name}')" for name in all_known)
+    trigger = page.locator(combined_css).first
+
+    try:
+        trigger.wait_for(state="visible", timeout=timeout_ms)
+    except Exception as e:
+        raise ExportError(
+            f"None of the known workspace names ({', '.join(all_known)}) became visible "
+            f"within {timeout_ms}ms of loading the page. Either the page needs longer to "
+            f"render after navigation, or the workspace switcher doesn't show the plain "
+            f"workspace name the way this assumes -- send a screenshot of the top-left "
+            f"switcher's HTML (right-click -> Inspect) so I can fix the selector for real. "
+            f"Original error: {e}"
+        ) from e
+
+    active_text = trigger.inner_text().strip()
+
+    if active_text == workspace_name:
+        # Might already be on the target workspace -- confirm the dropdown
+        # isn't already open before treating this as a no-op.
         search_box_visible = page.get_by_placeholder(re.compile("search workspaces", re.I)).count() > 0
         if not search_box_visible:
             return
 
-    opened = False
-    for candidate_name in all_known_workspace_names:
-        trigger = page.get_by_text(candidate_name, exact=True).first
-        if trigger.count() and trigger.is_visible():
-            trigger.click()
-            try:
-                page.get_by_placeholder(re.compile("search workspaces", re.I)).wait_for(
-                    state="visible", timeout=3000
-                )
-                opened = True
-                break
-            except Exception:
-                continue
+    trigger.click()
 
-    if not opened:
-        raise ExportError(
-            "Couldn't open the workspace switcher -- none of the known workspace names "
-            "were found/clickable at the top of the page. The switcher's trigger element "
-            "may need a real selector; try `playwright codegen` to find it."
+    try:
+        page.get_by_placeholder(re.compile("search workspaces", re.I)).wait_for(
+            state="visible", timeout=5000
         )
+    except Exception as e:
+        raise ExportError(
+            f"Clicked what looked like the workspace switcher (was showing '{active_text}') "
+            f"but the 'Search Workspaces' dropdown never appeared. Original error: {e}"
+        ) from e
 
     target = page.get_by_text(workspace_name, exact=True).last  # .last to skip the trigger itself
     try:
-        target.wait_for(state="visible", timeout=3000)
+        target.wait_for(state="visible", timeout=5000)
         target.click()
     except Exception as e:
         raise ExportError(
