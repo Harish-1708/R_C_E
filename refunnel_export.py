@@ -216,13 +216,15 @@ def scroll_to_load_all(
 
 def export_payments_csv(page: Page, download_dir: str) -> str:
     """Click the Payments page's Export button and save the resulting
-    CSV. Confirmed from your screenshot: an 'Export' button with a
-    dropdown chevron sits top-right of the Payment History page."""
+    CSV. Confirmed from a real screenshot: an 'Export' button with a
+    dropdown chevron opens two choices, 'Export as CSV' and 'Export as
+    Excel' -- no confirmation modal like the media export has, so this
+    should download directly once the CSV option is clicked."""
     Path(download_dir).mkdir(parents=True, exist_ok=True)
 
     export_button = page.get_by_role("button", name=re.compile(r"^Export", re.I)).first
 
-    with page.expect_download(timeout=20000) as download_info:
+    with page.expect_download(timeout=30000) as download_info:
         export_button.click()
         # If it's a dropdown (chevron suggests format choice), a CSV
         # option likely appears -- click it if present. If the first
