@@ -146,10 +146,19 @@ def scroll_to_load_all(
     max_rounds: int = 400,
     scroll_pause_ms: int = 1200,
     idle_rounds_before_giving_up: int = 6,
+    scroll_container_selector: str = "#scrollableDiv",
 ) -> None:
     """Scroll until the page's own '<loaded> of <total> media' counter
     (visible in your screenshot) shows loaded == total, or growth stalls
     for idle_rounds_before_giving_up consecutive scrolls in a row.
+
+    Scrolls `scroll_container_selector` directly via JS (setting its
+    scrollTop), confirmed from a real HTML dump to be `#scrollableDiv`
+    -- the actual react-infinite-scroll-component container, separate
+    from the virtuoso grid used just for rendering. An earlier version
+    used `page.mouse.wheel()` at the mouse's default position, which
+    wasn't necessarily over this container at all -- confirmed by a
+    real run that only loaded 20 of 2078 items before giving up.
 
     Raises ExportError if it can't find the counter text at all --
     likely means the page structure changed and count_text_pattern needs
@@ -180,7 +189,11 @@ def scroll_to_load_all(
         if loaded >= total:
             return
 
-        page.mouse.wheel(0, 4000)
+        page.evaluate(
+            "(sel) => { const el = document.querySelector(sel); "
+            "if (el) { el.scrollTop = el.scrollHeight; } }",
+            scroll_container_selector,
+        )
         page.wait_for_timeout(scroll_pause_ms)
 
         new_loaded, _ = read_counts() or (loaded, total)
@@ -235,25 +248,23 @@ def export_media_csv(page: Page, download_dir: str) -> str:
     also has 'Save from a UGC link', 'Save a local file', and 'Bulk
     upload media', which are unrelated upload actions, not this export).
 
-    The '...' button itself has no visible text (just a dot icon), so
-    it's located by position -- immediately left of the 'Create
-    collection' button -- using Playwright's :left-of() layout
-    selector. That's still a slight guess (I haven't seen its exact
-    markup/aria-label), but the menu item text itself is confirmed real.
+    The '...' button is `<div class="upload-content-activator"><img
+    src=".../dottedMenuIconBlack....svg"></div>` -- confirmed from a
+    real HTML dump. (An earlier version located it by screen position
+    relative to 'Create collection', which turned out to be wrong -- it
+    matched the unrelated 'Sort by' button instead, since layout-based
+    matching doesn't require being on the same row.)
     """
     Path(download_dir).mkdir(parents=True, exist_ok=True)
 
     try:
-        more_menu_button = page.locator("button:left-of(:text('Create collection'))").first
-        more_menu_button.wait_for(state="visible", timeout=5000)
+        more_menu_button = page.locator(".upload-content-activator").first
+        more_menu_button.wait_for(state="visible", timeout=8000)
         more_menu_button.click()
     except Exception as e:
         raise ExportError(
-            "Couldn't find/click the '...' menu button next to 'Create collection'. "
-            "It's an icon-only button located by screen position, which is more "
-            "fragile than a text selector -- if this fails, try "
-            "`playwright codegen` on the Social Listening page to get its exact "
-            f"selector (e.g. an aria-label or data-testid). Original error: {e}"
+            "Couldn't find/click the '...' menu button (.upload-content-activator) next to "
+            f"'Create collection'. Original error: {e}"
         ) from e
 
     export_item = page.get_by_text(re.compile(r"Export Content CSV", re.I))
