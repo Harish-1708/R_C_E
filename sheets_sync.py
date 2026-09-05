@@ -65,6 +65,38 @@ def _index_by_id(header: List[str], data_rows: List[List[str]], id_col: str) -> 
     return out
 
 
+def read_column_values(client: SheetsClient, column_name: str, id_col: str = "id") -> Dict[str, str]:
+    """Read one column's current values from a sheet, keyed by id.
+
+    Used for reading back a MANUAL column that isn't part of our own
+    schema (e.g. a 'Reviewed' flag you type into Master Data yourself)
+    so its values can actually influence this run's logic -- not just
+    be preserved as inert extra data the way sync_tab()'s own
+    extra-column preservation does.
+
+    Returns {} if the sheet is empty or doesn't have that column yet
+    (e.g. you haven't added it, or it's the very first run) -- this is
+    treated as "nothing marked yet", not an error.
+    """
+    existing = client.read_all()
+    if not existing:
+        return {}
+    header = existing[0]
+    if id_col not in header or column_name not in header:
+        return {}
+    id_idx = header.index(id_col)
+    col_idx = header.index(column_name)
+    out: Dict[str, str] = {}
+    for raw_row in existing[1:]:
+        if id_idx >= len(raw_row):
+            continue
+        row_id = raw_row[id_idx]
+        if not row_id:
+            continue
+        out[row_id] = raw_row[col_idx] if col_idx < len(raw_row) else ""
+    return out
+
+
 def sync_tab(
     client: SheetsClient,
     known_columns: List[str],
