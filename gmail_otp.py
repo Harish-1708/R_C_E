@@ -2,86 +2,91 @@
 gmail_otp.py
 
 Fetches the latest Refunnel login code from Gmail, for the fallback path
-only (saved-session-expired case). Uses the Gmail API with OAuth
-credentials -- NOT full account access via IMAP/password, and NOT the
-same credential path as sending mail in outreach.py.
+only (saved-session-expired case). Uses plain IMAP with a Gmail **App
+Password** -- not the full OAuth client-id/secret/refresh-token flow.
 
 Setup (one-time, done by a human, not this script):
-    1. In Google Cloud Console, enable the Gmail API on the project
-       already used for email-outreach-automation (or a new one).
-    2. Create OAuth 2.0 credentials (Desktop app type is easiest for a
-       one-time consent flow).
-    3. Run the standard Google OAuth "installed app" flow ONCE locally
-       to grant `gmail.readonly` scope and obtain a refresh token.
-    4. Store client_id, client_secret, and refresh_token as GitHub
-       Actions secrets (GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET,
-       GMAIL_REFRESH_TOKEN). This script reads them from environment
-       variables of the same names.
+    1. Turn on 2-Step Verification on the Gmail account, if it isn't
+       already on (App Passwords require it).
+    2. Go to https://myaccount.google.com/apppasswords, create one for
+       "Mail" / "Other (custom name)" -- Google gives you a 16-character
+       password immediately, no consent screen, no project setup.
+    3. Store the Gmail address as GMAIL_ADDRESS and that 16-character
+       password as GMAIL_APP_PASSWORD (GitHub Actions secrets). This
+       script reads them from environment variables of the same names.
+
+That's the entire setup -- no Google Cloud Console project, no OAuth
+client, no refresh token to manage.
 
 This module is NOT exercised against a live Gmail account in this
-sandbox (no network access to Google's APIs here). It should be
-smoke-tested manually once real OAuth credentials exist -- see
-README "Testing the Gmail OTP fallback".
+sandbox (no network access to Gmail's IMAP server here). It should be
+smoke-tested manually once a real App Password exists -- see README
+"Testing the Gmail OTP fallback".
 """
 
 from __future__ import annotations
 
-import base64
+import email
+import email.utils
+import imaplib
 import os
 import re
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-# google-auth / google-api-python-client are the standard libraries for
-# this; add to requirements.txt:
-#   google-auth
-#   google-auth-oauthlib
-#   google-api-python-client
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
 
-
-# CONFIG -- adjust these once you've seen a real Refunnel login-code
-# email. I have not seen one, so these are reasonable defaults, not
-# confirmed values.
-DEFAULT_SENDER_QUERY = os.environ.get("REFUNNEL_OTP_SENDER_QUERY", "from:refunnel.com")
+DEFAULT_SENDER_QUERY = os.environ.get("REFUNNEL_OTP_SENDER_QUERY", "refunnel.com")
 # Most OTP emails use a 4-8 digit numeric code. Adjust if Refunnel's
 # format differs (e.g. alphanumeric).
 DEFAULT_CODE_PATTERN = os.environ.get("REFUNNEL_OTP_CODE_PATTERN", r"\b(\d{4,8})\b")
+
+IMAP_HOST = "imap.gmail.com"
 
 
 class OtpNotFoundError(RuntimeError):
     pass
 
 
-def _get_gmail_service():
-    creds = Credentials(
-        token=None,
-        refresh_token=os.environ["GMAIL_REFRESH_TOKEN"],
-        client_id=os.environ["GMAIL_CLIENT_ID"],
-        client_secret=os.environ["GMAIL_CLIENT_SECRET"],
-        token_uri="https://oauth2.googleapis.com/token",
-        scopes=["https://www.googleapis.com/auth/gmail.readonly"],
-    )
-    return build("gmail", "v1", credentials=creds)
+def _connect() -> imaplib.IMAP4_SSL:
+    """Log into Gmail over IMAP with an App Password. Separated out as
+    its own function so tests can monkeypatch it with a fake connection
+    instead of touching a real mailbox."""
+    imap = imaplib.IMAP4_SSL(IMAP_HOST)
+    imap.login(os.environ["GMAIL_ADDRESS"], os.environ["GMAIL_APP_PASSWORD"])
+    imap.select("INBOX")
+    return imap
 
 
-def _extract_body_text(message: dict) -> str:
-    """Gmail messages can be multipart with nested parts; walk them and
-    concatenate any text/plain or text/html bodies we find."""
-    def walk(part):
-        texts = []
-        body_data = part.get("body", {}).get("data")
-        mime_type = part.get("mimeType", "")
-        if body_data and mime_type in ("text/plain", "text/html"):
-            decoded = base64.urlsafe_b64decode(body_data + "==").decode("utf-8", errors="ignore")
-            texts.append(decoded)
-        for sub in part.get("parts", []) or []:
-            texts.extend(walk(sub))
-        return texts
+def _extract_body_text(message: email.message.Message) -> str:
+    """Walk a (possibly multipart) email and concatenate any text/plain
+    or text/html parts we find."""
+    texts = []
+    if message.is_multipart():
+        parts = message.walk()
+    else:
+        parts = [message]
 
-    payload = message.get("payload", {})
-    return "\n".join(walk(payload))
+    for part in parts:
+        content_type = part.get_content_type()
+        if content_type in ("text/plain", "text/html"):
+            payload = part.get_payload(decode=True)
+            if payload is None:
+                continue
+            charset = part.get_content_charset() or "utf-8"
+            texts.append(payload.decode(charset, errors="ignore"))
+
+    return "\n".join(texts)
+
+
+def _message_timestamp(message: email.message.Message) -> float:
+    date_header = message.get("Date")
+    if not date_header:
+        return 0.0
+    parsed = email.utils.parsedate_tz(date_header)
+    if parsed is None:
+        return 0.0
+    return email.utils.mktime_tz(parsed)
 
 
 def fetch_latest_code(
@@ -91,52 +96,60 @@ def fetch_latest_code(
     max_wait_seconds: int = 60,
     poll_interval_seconds: int = 5,
 ) -> str:
-    """Poll Gmail for the most recent message matching `sender_query`,
-    sent after `requested_after_ts` (defaults to "now" if not given),
-    and extract a code matching `code_pattern`.
+    """Poll Gmail (via IMAP) for the most recent message from
+    `sender_query`, sent after `requested_after_ts` (defaults to "now"
+    if not given), and extract a code matching `code_pattern`.
 
     Raises OtpNotFoundError if nothing turns up within max_wait_seconds
     -- the caller should treat that as a hard failure, not retry
-    forever, since silently looping risks masking a real problem
-    (wrong sender query, Refunnel changed their email format, etc).
+    forever, since silently looping risks masking a real problem (wrong
+    sender query, Refunnel changed their email format, etc).
     """
     if requested_after_ts is None:
         requested_after_ts = time.time()
 
-    service = _get_gmail_service()
     deadline = time.time() + max_wait_seconds
-
-    # Gmail search's "newer_than" is coarse (units of days/hours), so we
-    # search broadly (last 15 minutes) and then double-check the actual
-    # internalDate against requested_after_ts ourselves for precision.
-    query = f"{sender_query} newer_than:15m"
+    # IMAP's SINCE is day-granularity only, so search broadly (since
+    # yesterday) and filter precisely by the message's own Date header.
+    since_date = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%d-%b-%Y")
+    search_criteria = f'(FROM "{sender_query}" SINCE {since_date})'
 
     while time.time() < deadline:
-        results = service.users().messages().list(userId="me", q=query, maxResults=5).execute()
-        messages = results.get("messages", [])
+        imap = _connect()
+        try:
+            status, data = imap.search(None, search_criteria)
+            if status != "OK":
+                raise OtpNotFoundError(f"IMAP search failed: {status}")
 
-        candidates = []
-        for msg_meta in messages:
-            msg = service.users().messages().get(userId="me", id=msg_meta["id"], format="full").execute()
-            internal_ts = int(msg.get("internalDate", "0")) / 1000.0
-            if internal_ts >= requested_after_ts - 5:  # 5s slack for clock skew
-                candidates.append((internal_ts, msg))
+            msg_ids = data[0].split() if data and data[0] else []
+            candidates = []
+            for msg_id in msg_ids[-10:]:  # only need the most recent handful
+                status, msg_data = imap.fetch(msg_id, "(RFC822)")
+                if status != "OK" or not msg_data or not msg_data[0]:
+                    continue
+                raw_bytes = msg_data[0][1]
+                message = email.message_from_bytes(raw_bytes)
+                ts = _message_timestamp(message)
+                if ts >= requested_after_ts - 5:  # 5s slack for clock skew
+                    candidates.append((ts, message))
 
-        if candidates:
-            candidates.sort(key=lambda pair: pair[0], reverse=True)
-            _, newest = candidates[0]
-            body = _extract_body_text(newest)
-            match = re.search(code_pattern, body)
-            if match:
-                return match.group(1)
-            # found a matching email but couldn't extract a code -- this
-            # is worth surfacing distinctly, since it likely means
-            # code_pattern is wrong rather than "no email yet"
-            raise OtpNotFoundError(
-                "Found a matching email from Refunnel but couldn't extract a code from it "
-                "with the current pattern. Check the real email body and adjust "
-                "REFUNNEL_OTP_CODE_PATTERN."
-            )
+            if candidates:
+                candidates.sort(key=lambda pair: pair[0], reverse=True)
+                _, newest = candidates[0]
+                body = _extract_body_text(newest)
+                match = re.search(code_pattern, body)
+                if match:
+                    return match.group(1)
+                raise OtpNotFoundError(
+                    "Found a matching email from Refunnel but couldn't extract a code from it "
+                    "with the current pattern. Check the real email body and adjust "
+                    "REFUNNEL_OTP_CODE_PATTERN."
+                )
+        finally:
+            try:
+                imap.logout()
+            except Exception:
+                pass
 
         time.sleep(poll_interval_seconds)
 
