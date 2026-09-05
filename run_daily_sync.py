@@ -155,7 +155,9 @@ def main() -> int:
 
         if refunnel_export.SCRAPE_EMAILS_ENABLED:
             target_ids = parse_refunnel.rows_needing_email_scrape(result)
-            emails = refunnel_export.scrape_creator_emails(page, result.master, target_ids)
+            emails = refunnel_export.scrape_creator_emails(
+                page, result.master, target_ids, debug_dir=f"{download_dir}/debug"
+            )
             updated = parse_refunnel.apply_creator_emails(result, emails)
             print(f"Scraped {updated} new creator email(s) for usage-rights rows.")
 
