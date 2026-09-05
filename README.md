@@ -107,15 +107,16 @@ writing to Sheets:
    - The JSON key's full file content becomes the
      `GOOGLE_SERVICE_ACCOUNT_JSON` secret.
 
-**3. Gmail OAuth credentials** (for the OTP-login fallback only, shared
+**3. A Gmail App Password** (for the OTP-login fallback only, shared
 across all workspaces since it's the same Refunnel account):
-   - Enable the Gmail API on a Google Cloud project (can be the same
-     project as the service account, or a separate one).
-   - Create OAuth 2.0 credentials (Desktop app type) and run the
-     standard one-time consent flow to get a refresh token with
-     `gmail.readonly` scope.
-   - Store as `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`,
-     `GMAIL_REFRESH_TOKEN`.
+   - Turn on 2-Step Verification on the Gmail account, if it isn't
+     already (App Passwords require it).
+   - Go to https://myaccount.google.com/apppasswords, create one for
+     "Mail" -- Google hands you a 16-character password immediately.
+     No Cloud Console project, no OAuth consent screen, no refresh token
+     to manage.
+   - Store the Gmail address as `GMAIL_ADDRESS` and that password as
+     `GMAIL_APP_PASSWORD`.
 
 **4. An initial Refunnel login session** -- run this once, locally, on a
 machine with a display:
@@ -142,7 +143,7 @@ machine with a display:
 |---|---|---|
 | `REFUNNEL_EMAIL` | your Refunnel login email | 1 (shared) |
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | writing to all Sheets | 1 (shared) |
-| `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, `GMAIL_REFRESH_TOKEN` | OTP fallback | 1 each (shared) |
+| `GMAIL_ADDRESS`, `GMAIL_APP_PASSWORD` | OTP fallback (IMAP) | 1 each (shared) |
 | `INITIAL_REFUNNEL_SESSION_B64` | bootstrapping the first run | 1 (shared, one-time) |
 | `SPREADSHEET_ID_DUDEROBE` | Duderobe's target Sheet | 1 |
 | `SPREADSHEET_ID_SWOVERALLS` | Swoveralls' target Sheet | 1 (only needed once you enable/run that workspace) |
@@ -204,6 +205,7 @@ site. Please work through this checklist once real credentials exist:
 
 ## Testing the Gmail OTP fallback manually
 
+Set `GMAIL_ADDRESS` and `GMAIL_APP_PASSWORD` in your shell first, then:
 ```
 python -c "
 import time, gmail_otp
