@@ -154,9 +154,29 @@ def main() -> int:
             print(f"Loaded {preloaded} previously-found creator email(s) from the sheet -- won't re-scrape those.")
 
         if refunnel_export.SCRAPE_EMAILS_ENABLED:
+            # Write Master Data NOW, before scraping starts, so there
+            # are actual rows in the sheet for update_single_cell() to
+            # find. Each email found during scraping is then saved to
+            # the sheet immediately (one targeted cell update, not a
+            # full-tab rewrite) -- so if the run gets interrupted
+            # partway through scraping, emails already found aren't
+            # lost. The final full sync pass at the end (all 6 tabs,
+            # including Master Data again) reconciles everything
+            # regardless, so this is a safety net, not the only write.
+            print("Writing Master Data once before scraping starts, so progress can be saved incrementally...")
+            sheets_sync.sync_tab(master_client, parse_refunnel.MASTER_COLUMNS, result.master, max_shrink_fraction=0.1)
+
+            def _save_email_incrementally(media_id: str, email: str) -> None:
+                found = master_client.update_single_cell(media_id, "creator_email", email)
+                if not found:
+                    print(f"(incremental save: media_id={media_id!r} not found in Master Data yet -- "
+                          f"will still be saved in the final full sync at the end)")
+
             target_ids = parse_refunnel.rows_needing_email_scrape(result)
             emails = refunnel_export.scrape_creator_emails(
-                page, result.master, target_ids, debug_dir=f"{download_dir}/debug"
+                page, result.master, target_ids,
+                debug_dir=f"{download_dir}/debug",
+                on_email_found=_save_email_incrementally,
             )
             updated = parse_refunnel.apply_creator_emails(result, emails)
             print(f"Scraped {updated} new creator email(s) for usage-rights rows.")
