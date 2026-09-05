@@ -18,8 +18,10 @@ from openpyxl.utils import get_column_letter
 from parse_refunnel import (
     parse_media_csv,
     parse_payments_csv,
+    build_human_review_rows,
     MASTER_COLUMNS,
     PAYMENT_COLUMNS,
+    HUMAN_REVIEW_COLUMNS,
 )
 
 HEADER_FONT = Font(name="Arial", bold=True, color="FFFFFF")
@@ -63,6 +65,7 @@ def main():
     write_tab(wb, "Usage Rights - Approved", MASTER_COLUMNS, result.rights_approved)
     write_tab(wb, "Usage Rights - Requested", MASTER_COLUMNS, result.rights_requested)
     write_tab(wb, "Usage Rights - Declined", MASTER_COLUMNS, result.rights_declined)
+    write_tab(wb, "Human Review", HUMAN_REVIEW_COLUMNS, build_human_review_rows(result))
     write_tab(wb, "Payments", PAYMENT_COLUMNS, result.payments)
 
     out_path = "refunnel_sync_preview.xlsx"
@@ -73,6 +76,7 @@ def main():
     print("Usage Rights - Approved:", len(result.rights_approved), "rows")
     print("Usage Rights - Requested:", len(result.rights_requested), "rows")
     print("Usage Rights - Declined:", len(result.rights_declined), "rows")
+    print("Human Review:", len(build_human_review_rows(result)), "rows")
     print("Payments:", len(result.payments), "rows")
 
 
