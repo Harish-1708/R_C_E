@@ -325,21 +325,49 @@ def export_media_csv(page: Page, download_dir: str, scroll_container_selector: s
     return out_path
 
 
-def scrape_creator_emails(page: Page, media_ids: Iterable[str]) -> dict:
-    """For each media id needing an email (see
-    parse_refunnel.rows_needing_email_scrape), open its 'Request usage
-    rights' modal, select the Email tab to reveal the pre-filled
-    address, read it, and close WITHOUT sending anything.
+def _safe_click(locator) -> None:
+    """Click, but refuse if the element's own text matches
+    _DANGEROUS_BUTTON_PATTERN (looks like 'Send request') -- a hard
+    safety net independent of whatever locator logic got us here."""
+    try:
+        text = locator.inner_text(timeout=2000)
+    except Exception:
+        text = ""
+    if _DANGEROUS_BUTTON_PATTERN.search(text or ""):
+        raise ExportError(
+            f"Refusing to click an element whose text matches a dangerous "
+            f"send/submit pattern: {text!r}"
+        )
+    locator.click()
+
+
+def scrape_creator_emails(page: Page, media_rows: dict, media_ids: Iterable[str]) -> dict:
+    """For each media id needing an email, open its 'Request usage
+    rights' flow, select the Email tab to reveal the pre-filled
+    address, read it, and close WITHOUT sending anything -- closes via
+    the Escape key rather than hunting for a close button, since Escape
+    can't submit a form and works across virtually any modal
+    implementation.
 
     Returns {media_id: email} for whichever ones had an email available
     (some won't, per your note -- that's expected, not an error).
 
-    Gated behind SCRAPE_EMAILS_ENABLED. Not implemented beyond a stub
-    until you've confirmed the real selectors for: how to open a specific
-    post from the content grid, the '...' menu -> 'Request usage rights'
-    entry point, and the Email tab / address field inside that modal --
-    none of which I've seen in your screenshots except the modal's
-    inside (image 2), not how you get there.
+    Flow confirmed from real screenshots:
+      1. Each post card has a "Request usage rights" toggle under it.
+         Clicking it reveals a small menu whose TOP item is "Request
+         usage-rights" (distinct from "Request whitelisting-rights"
+         below it, and from "Set usage-rights labels" further down).
+      2. That opens a modal with three channel tabs: Email / TikTok DM /
+         TT Shop DM.
+      3. The Email tab shows a pre-filled "Creator email address" field.
+
+    STILL UNVERIFIED: which exact element identifies a single post's
+    card in the DOM (this uses a `div:has-text(username)` match, which
+    could be ambiguous if a creator has multiple posts visible at once).
+    Don't enable SCRAPE_EMAILS_ENABLED until you've sent an HTML dump of
+    one card (right-click -> Inspect) the same way we nailed down every
+    other selector in this project -- see README "Enabling email
+    scraping safely".
     """
     if not SCRAPE_EMAILS_ENABLED:
         print("scrape_creator_emails: SCRAPE_EMAILS_ENABLED is False, skipping. "
@@ -348,20 +376,47 @@ def scrape_creator_emails(page: Page, media_ids: Iterable[str]) -> dict:
 
     results: dict = {}
     for media_id in media_ids:
-        # --- everything below is unverified against the live site ---
-        # 1. locate the post card for media_id (likely needs a search/filter
-        #    by caption or a data attribute -- unknown)
-        # 2. open its "..." menu, click "Request usage rights"
-        # 3. click the "Email" tab (visible in your screenshot)
-        # 4. read the "Creator email address" input's value
-        # 5. close via the X -- assert we never click _DANGEROUS_BUTTON_PATTERN
-        #
-        # Left unimplemented on purpose rather than guessing selectors I
-        # have no evidence for. See README "Enabling email scraping safely"
-        # for how to fill this in with real selectors from playwright codegen.
-        raise NotImplementedError(
-            f"scrape_creator_emails is a stub for media_id={media_id!r} -- "
-            "needs real selectors from the live site before this can run."
-        )
+        row = media_rows.get(media_id)
+        if row is None:
+            continue
+        username = row.get("username", "")
+        if not username:
+            continue
+
+        try:
+            card = page.locator(f"div:has-text('{username}')").last
+            request_toggle = card.get_by_text(re.compile(r"Request usage rights", re.I)).first
+            _safe_click(request_toggle)
+
+            top_menu_item = page.get_by_text(re.compile(r"^Request usage-rights$", re.I)).first
+            top_menu_item.wait_for(state="visible", timeout=5000)
+            _safe_click(top_menu_item)
+
+            email_tab = page.get_by_text(re.compile(r"^Email$", re.I)).first
+            email_tab.wait_for(state="visible", timeout=5000)
+            _safe_click(email_tab)
+
+            email_input = page.get_by_label(re.compile(r"Creator email address", re.I))
+            if email_input.count() == 0:
+                email_input = page.locator(":below(:text('Creator email address'))").locator("input").first
+            email_input.wait_for(state="visible", timeout=5000)
+            email_value = (email_input.input_value() or "").strip()
+
+            if email_value:
+                results[media_id] = email_value
+
+        except Exception as e:
+            print(f"scrape_creator_emails: couldn't get email for media_id={media_id!r} "
+                  f"(username={username!r}): {e}")
+
+        finally:
+            # Always try to back out via Escape, regardless of success/
+            # failure above -- never clicks anything to close, so this
+            # can't accidentally submit anything either.
+            try:
+                page.keyboard.press("Escape")
+                page.wait_for_timeout(300)
+            except Exception:
+                pass
 
     return results
