@@ -16,7 +16,7 @@ Required environment variables (set as GitHub Actions secrets):
     GOOGLE_SERVICE_ACCOUNT_JSON -- path to (or inline JSON of) a service
                                    account with edit access to the sheet
     SPREADSHEET_ID            -- target Google Sheet's id
-    GMAIL_CLIENT_ID / GMAIL_CLIENT_SECRET / GMAIL_REFRESH_TOKEN
+    GMAIL_ADDRESS / GMAIL_APP_PASSWORD
                               -- only needed for the Gmail-OTP fallback
                                  path (see gmail_otp.py)
 
