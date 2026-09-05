@@ -109,6 +109,13 @@ class _FakeLocator:
     def _visible_now(self):
         if self._keys == ["__search_box__"]:
             return self._page.dropdown_open
+        if self._keys == ["__toggle_menu__"]:
+            return True  # the expand/collapse control is always present
+        if len(self._keys) > 1:
+            # the combined trigger locator -- genuinely absent from the
+            # DOM while the sidebar is collapsed, matching the real bug
+            if self._page.sidebar_collapsed:
+                return False
         if self._page.dropdown_open:
             # any key that's a real workspace name is visible in the open list
             return any(k in ALL_NAMES for k in self._keys)
@@ -127,6 +134,9 @@ class _FakeLocator:
     def click(self):
         if self._keys == ["__search_box__"]:
             return
+        if self._keys == ["__toggle_menu__"]:
+            self._page.sidebar_collapsed = False
+            return
         if not self._page.dropdown_open and self._page.active_workspace in self._keys:
             self._page.dropdown_open = True
         elif self._page.dropdown_open and any(k in ALL_NAMES for k in self._keys):
@@ -137,15 +147,19 @@ class _FakeLocator:
 
 
 class FakeWorkspacePage:
-    def __init__(self, active_workspace="Duderobe"):
+    def __init__(self, active_workspace="Duderobe", sidebar_collapsed=False):
         self.active_workspace = active_workspace
         self.dropdown_open = False
+        self.sidebar_collapsed = sidebar_collapsed
 
     def get_by_text(self, text, exact=True):
         return _FakeLocator(self, [text])
 
     def get_by_placeholder(self, _pattern):
         return _FakeLocator(self, ["__search_box__"])
+
+    def get_by_alt_text(self, text):
+        return _FakeLocator(self, ["__toggle_menu__"] if text == "Toggle menu" else ["__no_match__"])
 
     def locator(self, css_selector):
         # mimics page.locator(":text-is('A'), :text-is('B'), ...") by
@@ -171,11 +185,21 @@ def test_select_workspace_switches_to_target():
     assert page.dropdown_open is False  # closed again after picking
 
 
+def test_select_workspace_expands_collapsed_sidebar_then_switches():
+    # reproduces the real bug: sidebar starts collapsed, workspace name
+    # isn't in the DOM at all until the toggle is clicked
+    page = FakeWorkspacePage(active_workspace="Duderobe", sidebar_collapsed=True)
+    select_workspace(page, "Swoveralls", ALL_NAMES)
+    assert page.sidebar_collapsed is False
+    assert page.active_workspace == "Swoveralls"
+
+
 def test_select_workspace_raises_if_trigger_never_renders():
-    # simulates the page not having rendered ANY known workspace name
-    # yet (e.g. still loading) -- distinct failure mode from "found it
-    # but couldn't open it"
-    page = FakeWorkspacePage(active_workspace="SomeUnlistedWorkspace")
+    # distinct from the collapsed-sidebar case: here the sidebar is NOT
+    # collapsed, but none of the known names match anyway (e.g. wrong
+    # names configured) -- toggling wouldn't help, so this should still
+    # fail informatively rather than loop forever
+    page = FakeWorkspacePage(active_workspace="SomeUnlistedWorkspace", sidebar_collapsed=False)
     with pytest.raises(ExportError, match="became visible"):
         select_workspace(page, "Swoveralls", ALL_NAMES, timeout_ms=10)
 
