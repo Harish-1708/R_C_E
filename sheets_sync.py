@@ -97,16 +97,32 @@ def read_column_values(client: SheetsClient, column_name: str, id_col: str = "id
     return out
 
 
+class SuspiciousShrinkError(RuntimeError):
+    pass
+
+
 def sync_tab(
     client: SheetsClient,
     known_columns: List[str],
     target_rows: Dict[str, dict],
     id_col: str = "id",
     sort_key: Optional[str] = None,
+    max_shrink_fraction: Optional[float] = None,
 ) -> dict:
     """Rewrite one tab from `target_rows` (id -> row dict, using
     `known_columns` as keys), preserving any extra manual columns already
     present in the sheet.
+
+    max_shrink_fraction: opt-in safety net for tabs that should only
+    ever grow or hold steady (Master Data, Payments) -- NOT for tabs
+    that are expected to shrink by design (Usage Rights tabs lose rows
+    when you mark them Reviewed; that's normal). If set, and the
+    existing tab already has rows, and target_rows is smaller than
+    existing by more than this fraction, raises SuspiciousShrinkError
+    and does NOT touch the sheet at all. This exists because every tab
+    here is a full rewrite -- an incomplete data pull (e.g. a browser
+    scroll that stalled early) would otherwise silently delete real
+    rows a previous, complete run had correctly written.
 
     Returns a small summary dict, useful for logging:
         {"rows_written": int, "extra_columns_preserved": [str, ...]}
@@ -114,6 +130,19 @@ def sync_tab(
     existing = client.read_all()
     existing_header = existing[0] if existing else list(known_columns)
     existing_data = existing[1:] if len(existing) > 1 else []
+
+    if max_shrink_fraction is not None:
+        existing_count = len(existing_data)
+        new_count = len(target_rows)
+        if existing_count > 0 and new_count < existing_count * (1 - max_shrink_fraction):
+            raise SuspiciousShrinkError(
+                f"Refusing to overwrite -- new row count ({new_count}) is more than "
+                f"{max_shrink_fraction:.0%} smaller than what's already in the sheet "
+                f"({existing_count}). This usually means an incomplete data pull, not "
+                f"a real drop, so the sheet was NOT touched. If this shrink is genuinely "
+                f"expected, call sync_tab without max_shrink_fraction for this tab, or "
+                f"investigate why the real count dropped before re-running."
+            )
 
     extra_columns = [c for c in existing_header if c not in known_columns]
     existing_by_id = _index_by_id(existing_header, existing_data, id_col) if extra_columns else {}
