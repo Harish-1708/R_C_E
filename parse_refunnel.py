@@ -291,13 +291,28 @@ def apply_creator_emails(result: ParseResult, emails: Dict[str, str]) -> int:
 
 
 def rows_needing_email_scrape(result: ParseResult) -> List[str]:
-    """Return media ids whose rights_status is not NONE and don't yet
-    have a creator_email -- i.e. the targeted, small set the browser
-    automation should open the per-post modal for. Never includes NONE
-    rows, keeping the risky modal-click step scoped down."""
+    """Return media ids that still need a scraped email -- scoped to
+    ONLY rights_requested, not approved/declined.
+
+    Confirmed from a real debug screenshot: once a post's rights are
+    Approved, its card footer is replaced entirely with a status badge
+    ("Usage rights approved -- Via direct post permission") -- the
+    .usage-rights-request-card button this whole scraping flow depends
+    on simply doesn't exist on that card anymore. Every attempt on an
+    approved (or presumably declined, same reasoning) post was
+    therefore a guaranteed failure, not an intermittent one -- which is
+    why a real run took hours: dozens of guaranteed-fail attempts each
+    burning several seconds before giving up.
+
+    Requested posts are the only ones where the request is still
+    pending, so the request-card UI (and the pre-filled email inside
+    it) should still exist -- though this itself hasn't been visually
+    confirmed yet either; if it turns out Requested posts *also* show a
+    different footer, scrape_creator_emails's circuit breaker will stop
+    the run quickly rather than grinding through all of them.
+    """
     ids = []
-    for bucket in (result.rights_approved, result.rights_requested, result.rights_declined):
-        for media_id, row in bucket.items():
-            if not row.get("creator_email"):
-                ids.append(media_id)
+    for media_id, row in result.rights_requested.items():
+        if not row.get("creator_email"):
+            ids.append(media_id)
     return ids
