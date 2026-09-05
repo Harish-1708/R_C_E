@@ -11,7 +11,13 @@ import re
 
 import pytest
 
-from refunnel_export import scroll_to_load_all, ExportError, select_workspace, _safe_click
+from refunnel_export import (
+    scroll_to_load_all,
+    ExportError,
+    select_workspace,
+    _safe_click,
+    _order_ids_for_scraping,
+)
 
 
 class FakePage:
@@ -276,3 +282,30 @@ def test_sabotage_idle_threshold_ignored_would_be_caught():
     # with a working idle check, it stops after 3 idle rounds past the
     # last growth (index ~5), not after exhausting the whole schedule
     assert page.scroll_calls < 8
+
+
+# ---------- _order_ids_for_scraping tests ----------
+
+def test_order_ids_for_scraping_follows_feed_order_not_input_order():
+    media_rows = {"a": {}, "b": {}, "c": {}, "d": {}}  # feed/CSV order: a, b, c, d
+    result = _order_ids_for_scraping(media_rows, ["d", "b"])  # input order: d, b
+    assert result == ["b", "d"]  # follows feed order, not input order
+
+
+def test_order_ids_for_scraping_ignores_ids_not_in_media_rows():
+    media_rows = {"a": {}, "b": {}}
+    result = _order_ids_for_scraping(media_rows, ["b", "not_a_real_id"])
+    assert result == ["b"]
+
+
+def test_order_ids_for_scraping_empty_input_returns_empty():
+    media_rows = {"a": {}, "b": {}}
+    assert _order_ids_for_scraping(media_rows, []) == []
+
+
+def test_sabotage_order_ids_wrong_order_would_be_caught():
+    media_rows = {"x": {}, "y": {}, "z": {}}
+    result = _order_ids_for_scraping(media_rows, ["z", "x"])
+    with pytest.raises(AssertionError):
+        assert result == ["z", "x"]  # wrong -- input order, not feed order
+    assert result == ["x", "z"]  # confirms actual correct (feed-order) behavior
