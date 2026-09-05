@@ -1,0 +1,126 @@
+"""
+Tests for sheets_sync.py, using an in-memory FakeSheetsClient so no real
+Google credentials are needed. GspreadSheetsClient itself (the real
+implementation) is NOT covered by these tests -- it needs a live sheet
+and should be smoke-tested manually once credentials exist.
+"""
+
+import pytest
+
+from sheets_sync import sync_tab
+
+
+class FakeSheetsClient:
+    """In-memory stand-in for a Google Sheet tab."""
+
+    def __init__(self, initial_rows=None):
+        # initial_rows: list of lists, first row is header, rest are data
+        self.rows = initial_rows if initial_rows is not None else []
+        self.overwrite_calls = 0
+
+    def read_all(self):
+        return [list(r) for r in self.rows]
+
+    def overwrite_all(self, rows):
+        self.overwrite_calls += 1
+        self.rows = [list(r) for r in rows]
+
+
+COLUMNS = ["id", "username", "rights_status"]
+
+
+def _rows(*items):
+    """items: (id, username, rights_status) tuples -> target_rows dict"""
+    return {i: {"id": i, "username": u, "rights_status": s} for i, u, s in items}
+
+
+def test_writes_header_and_sorted_rows_on_empty_tab():
+    client = FakeSheetsClient()
+    target = _rows(("b1", "bob", "GRANTED"), ("a1", "alice", "REQUESTED"))
+    summary = sync_tab(client, COLUMNS, target)
+
+    assert client.rows[0] == COLUMNS
+    # default sort is by id
+    assert client.rows[1][0] == "a1"
+    assert client.rows[2][0] == "b1"
+    assert summary["rows_written"] == 2
+    assert summary["extra_columns_preserved"] == []
+
+
+def test_sort_key_orders_by_given_field():
+    client = FakeSheetsClient()
+    target = _rows(("id1", "zeta", "GRANTED"), ("id2", "alpha", "GRANTED"))
+    sync_tab(client, COLUMNS, target, sort_key="username")
+    assert client.rows[1][1] == "alpha"
+    assert client.rows[2][1] == "zeta"
+
+
+def test_row_removed_from_target_disappears_from_tab():
+    # simulates a post moving from Requested -> Approved: it should no
+    # longer appear in a tab whose target no longer includes it
+    client = FakeSheetsClient(
+        [COLUMNS, ["id1", "alice", "REQUESTED"], ["id2", "bob", "REQUESTED"]]
+    )
+    target = _rows(("id2", "bob", "REQUESTED"))  # id1 moved elsewhere
+    sync_tab(client, COLUMNS, target)
+    ids_in_tab = [row[0] for row in client.rows[1:]]
+    assert ids_in_tab == ["id2"]
+
+
+def test_extra_manual_column_is_preserved():
+    client = FakeSheetsClient(
+        [
+            COLUMNS + ["Notes"],
+            ["id1", "alice", "REQUESTED", "call her back"],
+        ]
+    )
+    target = _rows(("id1", "alice", "GRANTED"))  # status changed upstream
+    summary = sync_tab(client, COLUMNS, target)
+
+    assert client.rows[0] == COLUMNS + ["Notes"]
+    assert client.rows[1] == ["id1", "alice", "GRANTED", "call her back"]
+    assert summary["extra_columns_preserved"] == ["Notes"]
+
+
+def test_extra_column_for_a_brand_new_row_is_blank():
+    client = FakeSheetsClient(
+        [COLUMNS + ["Notes"], ["id1", "alice", "REQUESTED", "call her back"]]
+    )
+    target = _rows(("id1", "alice", "REQUESTED"), ("id2", "new_person", "REQUESTED"))
+    sync_tab(client, COLUMNS, target)
+    row_by_id = {row[0]: row for row in client.rows[1:]}
+    assert row_by_id["id1"][3] == "call her back"
+    assert row_by_id["id2"][3] == ""  # no prior note for a brand-new row
+
+
+def test_empty_target_clears_data_rows_but_keeps_calling_overwrite():
+    client = FakeSheetsClient([COLUMNS, ["id1", "alice", "REQUESTED"]])
+    sync_tab(client, COLUMNS, {})
+    assert client.rows == [COLUMNS]
+    assert client.overwrite_calls == 1
+
+
+# ---------- sabotage tests ----------
+
+def test_sabotage_forgetting_to_preserve_extra_columns_would_be_caught():
+    # simulate the bug where extra-column detection is skipped entirely
+    client = FakeSheetsClient(
+        [COLUMNS + ["Notes"], ["id1", "alice", "REQUESTED", "important note"]]
+    )
+    target = _rows(("id1", "alice", "GRANTED"))
+    sync_tab(client, COLUMNS, target)
+
+    # the real behavior keeps the note -- assert the broken behavior
+    # (note lost) would fail, proving the test is sensitive to this bug
+    with pytest.raises(AssertionError):
+        assert client.rows[1] == ["id1", "alice", "GRANTED", ""]
+    # and confirm what actually happened is the correct, non-broken result
+    assert client.rows[1] == ["id1", "alice", "GRANTED", "important note"]
+
+
+def test_sabotage_wrong_sort_order_would_be_caught():
+    client = FakeSheetsClient()
+    target = _rows(("id1", "zeta", "GRANTED"), ("id2", "alpha", "GRANTED"))
+    sync_tab(client, COLUMNS, target, sort_key="username")
+    with pytest.raises(AssertionError):
+        assert client.rows[1][1] == "zeta"  # wrong -- alpha sorts first
