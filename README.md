@@ -193,11 +193,12 @@ site. Please work through this checklist once real credentials exist:
   matters for the **automated** fallback path (`_perform_login`) -- test
   it by deliberately deleting `refunnel_session.json` and running
   `run_daily_sync.py` once to confirm the fallback actually logs in.
-- [x] **Media export button**: confirmed from a real screenshot -- the
-  '...' menu next to 'Create collection' on the Social Listening page,
-  then 'Export Content CSV'. The menu item text is solid; the '...'
-  button itself is still located by screen position (`:left-of()`) since
-  it has no visible label, so it's worth a quick manual check.
+- [x] **Media export button**: was located by screen position
+  (`:left-of()`), which turned out wrong -- a real run clicked "Sort by"
+  instead (also technically "left of" Create collection, just on a
+  different row). Fixed using a real class name confirmed from an HTML
+  dump: `.upload-content-activator`. The menu item text ('Export Content
+  CSV') was already confirmed separately and is unchanged.
 - [x] **Sidebar collapsed on load**: confirmed root cause of the actual
   failure, from a real screenshot + HTML dump -- the sidebar can load
   collapsed (`class="left-side-navbar collapsed"`), and while collapsed
@@ -217,10 +218,15 @@ site. Please work through this checklist once real credentials exist:
   If the payments export fails with a similar "nothing rendered"
   symptom, check this first: visit the real Payments page and send me
   its exact URL.
-- [ ] **Scroll-to-load-all counter text** (`count_text_pattern` in
-  `scroll_to_load_all`): based on the "80 of 2078 media" / "20 of 2078
-  media" text visible in your screenshots. Confirm the pattern still
-  matches on the live page.
+- [x] **Scroll-to-load-all mechanism**: a real run only loaded 20/2078
+  items before giving up. Root cause: `page.mouse.wheel()` scrolls
+  wherever the mouse happens to be, which was never necessarily over the
+  actual content area. Fixed to directly scroll the real container
+  instead, confirmed from an HTML dump: `#scrollableDiv` (a
+  react-infinite-scroll-component, separate from the virtuoso grid used
+  just for rendering). The "80 of 2078 media" counter text pattern
+  itself was already confirmed correct and is unchanged -- still worth a
+  fresh real run to confirm the full 2078 now loads.
 - [ ] **Email scraping** (`scrape_creator_emails` in `refunnel_export.py`):
   left as a stub on purpose -- I have no visibility into how you get from
   the content grid to a specific post's "Request usage rights" modal.
