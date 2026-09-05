@@ -18,7 +18,9 @@ from parse_refunnel import (
     parse_payments_csv,
     rows_needing_email_scrape,
     apply_creator_emails,
+    build_human_review_rows,
     RIGHTS_STATUS_MAP,
+    HUMAN_REVIEW_COLUMNS,
 )
 
 MEDIA_CSV = os.path.join(os.path.dirname(__file__), "fixtures", "sample_media.csv")
@@ -138,6 +140,38 @@ def test_apply_creator_emails_ignores_unknown_ids_and_blank_values():
     result = parse_media_csv(MEDIA_CSV)
     updated = apply_creator_emails(result, {"not_a_real_id": "x@example.com", "": "y@example.com"})
     assert updated == 0
+
+
+def test_build_human_review_rows_combines_all_three_buckets():
+    result = parse_media_csv(MEDIA_CSV)
+    review_rows = build_human_review_rows(result)
+    # sample file has 3 approved + 1 requested + 0 declined = 4
+    assert len(review_rows) == 4
+    assert set(review_rows.keys()) == (
+        set(result.rights_approved) | set(result.rights_requested) | set(result.rights_declined)
+    )
+
+
+def test_build_human_review_rows_excludes_none_status():
+    result = parse_media_csv(MEDIA_CSV)
+    review_rows = build_human_review_rows(result)
+    none_ids = {mid for mid, row in result.master.items() if row["rights_status"] == "NONE"}
+    assert none_ids.isdisjoint(review_rows)
+
+
+def test_build_human_review_rows_only_has_trimmed_columns():
+    result = parse_media_csv(MEDIA_CSV)
+    review_rows = build_human_review_rows(result)
+    for row in review_rows.values():
+        assert set(row.keys()) == set(HUMAN_REVIEW_COLUMNS)
+
+
+def test_sabotage_human_review_wrong_bucket_count_would_be_caught():
+    result = parse_media_csv(MEDIA_CSV)
+    review_rows = build_human_review_rows(result)
+    with pytest.raises(AssertionError):
+        assert len(review_rows) == 999  # deliberately wrong
+    assert len(review_rows) == 4  # confirms actual correct behavior
 
 
 # ---------- malformed-input tests ----------
