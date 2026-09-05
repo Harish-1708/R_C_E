@@ -1,9 +1,9 @@
 # Refunnel Rights & Payments Sync
 
 Pulls creator content + usage-rights status + payment history out of
-Refunnel (app.refunnel.com) and syncs it into a Google Sheet with 5 tabs:
+Refunnel (app.refunnel.com) and syncs it into a Google Sheet with 6 tabs:
 Master Data, Usage Rights - Approved, Usage Rights - Requested,
-Usage Rights - Declined, Payments.
+Usage Rights - Declined, Human Review, Payments.
 
 Runs daily via GitHub Actions, across **4 Refunnel workspaces**
 (Duderobe, Swoveralls, Defi Snacks, Kelson) -- each gets its own Google
@@ -11,6 +11,55 @@ Sheet. Only **Duderobe** runs on the automatic schedule right now; the
 other 3 are built and ready but scheduled runs are switched off for them
 (toggle in `config/workspaces.yaml`, see below). Any workspace can always
 be run manually regardless of that setting.
+
+## What updates every day
+
+Every tab is fully rewritten from Refunnel's current state each run --
+so here's exactly what that means in practice:
+
+- **New content appears automatically.** The row counts you've seen
+  (2078, etc.) aren't a ceiling -- that's just how many posts existed
+  in Refunnel at the moment that run happened. Whenever a new TikTok/IG
+  post tags or mentions the brand, it becomes a new row (keyed by its
+  own unique `id`) the next time the sync runs. Nothing caps this.
+- **Every field on an existing row refreshes to whatever Refunnel
+  currently reports** -- likes, comments, impressions, shares, emv,
+  gmv, and critically `rights_status` itself. So when you approve or
+  deny a usage-rights request inside Refunnel, that change shows up in
+  the Sheet on the next run.
+- **Rows move between tabs automatically as rights_status changes.** A
+  post that gets approved disappears from "Usage Rights - Requested"
+  and appears in "Usage Rights - Approved" on the next run -- you don't
+  need to do anything for that to happen.
+- **Payments**: same pattern -- new payments appear as new rows, keyed
+  by their own id.
+- **`creator_email`** stays blank until email scraping is enabled (see
+  below) -- once it is, it fills in incrementally as it's found.
+- **Manual columns you add yourself** (a "Notes" column, the "Human
+  Review" tab's review-status column, etc.) are preserved across every
+  run -- see "Notes on design choices" below for how that works.
+
+## What I just added
+
+- **Email scraping is implemented for real now** (see `scrape_creator_emails`
+  in `refunnel_export.py`), built directly from your screenshots of the
+  actual flow: click a post's "Request usage rights" toggle -> its top
+  menu item "Request usage-rights" -> the Email tab -> read the
+  pre-filled address -> close via the Escape key (never a button click,
+  so it can never accidentally hit "Send request"). Still off by
+  default (`SCRAPE_EMAILS_ENABLED = False`) -- see the checklist below
+  for the one piece of evidence still needed before turning it on.
+- **A new "Human Review" tab.** Lists every post in Usage Rights -
+  Approved/Requested/Declined (not the NONE-status ones -- nothing to
+  review there yet) with just the essentials: id, username, platform,
+  status, link, email, followers, last updated. Add your own column
+  (e.g. "Reviewed") directly in the sheet -- it'll be preserved across
+  every future run automatically, the same way a "Notes" column would
+  be on any other tab.
+- **Consistent row heights.** Every tab now uses CLIP text wrapping
+  (long values stay on one line, truncated visually rather than
+  wrapping the row taller) instead of the uneven wrapping you saw
+  before, plus a bolded, frozen header row.
 
 ## Layout
 
@@ -39,6 +88,7 @@ refunnel-sync/
         fixtures/
             sample_media.csv
             sample_payments.csv
+            real_media_2078.csv  <- a real full-scale export, kept as a regression fixture
     .github/workflows/refunnel-sync.yml
 ```
 
@@ -46,11 +96,11 @@ refunnel-sync/
 
 | File | What it does | Tested how |
 |---|---|---|
-| `parse_refunnel.py` | Turns the 2 CSVs into 5 tabs' worth of rows, keyed by id | 18 automated tests against your real sample CSVs |
-| `sheets_sync.py` | Rewrites each Sheet tab from parsed data, preserving manual columns | 8 automated tests against an in-memory fake Sheet |
+| `parse_refunnel.py` | Turns the 2 CSVs into 6 tabs' worth of rows, keyed by id | 24 automated tests against your real sample + full-scale CSVs |
+| `sheets_sync.py` | Rewrites each Sheet tab from parsed data, preserving manual columns, formats for consistent row heights | 8 automated tests against an in-memory fake Sheet |
 | `gmail_otp.py` | Fetches a Refunnel login code from Gmail (fallback path only) | 7 automated tests against a fake Gmail client |
 | `refunnel_auth.py` | Saved-session reuse + fresh OTP login via Gmail fallback | **Not run against the live site** -- see below |
-| `refunnel_export.py` | Workspace switching, scroll-to-load-all, CSV export triggers, (optional) email scrape | Switching/scroll logic has 11 automated tests against fakes; the actual browser clicks are **not run against the live site** |
+| `refunnel_export.py` | Workspace switching, scroll-to-load-all, CSV export triggers, email scrape | Switching/scroll/safety-net logic has 16 automated tests against fakes; the actual browser clicks are **not run against the live site** |
 | `scripts/determine_workspaces.py` | Decides which workspace(s) a run should sync, from `config/workspaces.yaml` + trigger type | 10 automated tests |
 | `run_daily_sync.py` | Orchestrates the above into one workspace's run | Syntax-checked only |
 | `build_preview_workbook.py` | One-off: builds a local xlsx to eyeball tab structure before wiring up live Sheets | Run, produced `refunnel_sync_preview.xlsx` |
@@ -58,7 +108,7 @@ refunnel-sync/
 
 Run all automated tests (from the repo root): `python -m pytest -v`
 Lint everything: `python -m pyflakes *.py scripts/*.py tests/*.py`
-(Both were run before delivery -- 54 tests pass, no lint warnings.)
+(Both were run before delivery -- 65 tests pass, no lint warnings.)
 
 ## Multi-workspace setup: `config/workspaces.yaml`
 
@@ -92,7 +142,7 @@ Everything here is a one-time setup step. Once done, the daily schedule
 just runs.
 
 **1. A Google Sheet per workspace you want to sync** (at minimum,
-Duderobe). The script creates the 5 tabs itself on first run if they
+Duderobe). The script creates the 6 tabs itself on first run if they
 don't exist -- you just need each Sheet's ID (the long string in its
 URL).
 
@@ -252,13 +302,17 @@ site. Please work through this checklist once real credentials exist:
   itself was already confirmed correct and is unchanged -- still worth a
   fresh real run to confirm the full 2078 now loads.
 - [ ] **Email scraping** (`scrape_creator_emails` in `refunnel_export.py`):
-  left as a stub on purpose -- I have no visibility into how you get from
-  the content grid to a specific post's "Request usage rights" modal.
-  `SCRAPE_EMAILS_ENABLED = False` by default; don't turn it on until
-  you've filled in real selectors and manually confirmed it only ever
-  reads the email field and closes via X, never touching "Send request".
-  Use `playwright codegen https://app.refunnel.com` to record the real
-  clicks and copy the selectors it captures.
+  implemented for real from your screenshots of the actual flow (toggle
+  -> "Request usage-rights" -> Email tab -> read field -> Escape to
+  close), but ONE piece is still a guess: how a single post's card is
+  identified in the DOM (`div:has-text(username)`, which could be
+  ambiguous if a creator has multiple visible posts). `SCRAPE_EMAILS_ENABLED
+  = False` by default. Before enabling: send an HTML dump of one card
+  (right-click -> Inspect) the same way we nailed every other selector
+  in this project, so this can be pinned down exactly rather than left
+  to a text-match guess. It will never click "Send request" regardless
+  -- that's enforced by `_safe_click`'s pattern check, independent of
+  whatever selector logic runs above it.
 - [ ] **A full end-to-end run for Duderobe**: once the above are fixed,
   trigger the workflow manually once (Actions tab -> Run workflow,
   workspace = Duderobe) and check the Sheet updates correctly before
@@ -287,8 +341,12 @@ within a couple minutes -- it should print the code it found.
   incrementally patched -- simpler and self-correcting (a status change
   just means the row isn't in that tab's target set anymore), at the cost
   of not being able to see intermediate history in the Sheet itself.
-- **Manual columns you add to any tab** (e.g. a "Notes" column) are
-  preserved across runs, matched back to rows by `id`.
+- **Manual columns you add to any tab** (e.g. a "Notes" column, or the
+  "Human Review" tab's own review-status column) are preserved across
+  runs, matched back to rows by `id`.
+- **CLIP text wrapping + a frozen, bolded header** on every tab, for
+  consistent row heights instead of one long caption blowing out a
+  single row's height next to short ones.
 - **Email scraping is scoped to only the handful of posts with a
   non-NONE rights_status**, not all ~2000+ media rows, and is designed to
   never click "Send request" -- see `_DANGEROUS_BUTTON_PATTERN` in
