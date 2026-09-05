@@ -218,15 +218,23 @@ def scroll_to_load_all(
         if new_loaded <= last_loaded:
             idle_rounds += 1
             if idle_rounds >= idle_rounds_before_giving_up:
-                # Not raising here -- partial data is still useful, and the
-                # caller's own row-count logging will make a short export
-                # obvious rather than silent. But it IS worth knowing this
-                # happened, so we print a loud warning.
-                print(
-                    f"WARNING: scroll_to_load_all stopped early at {new_loaded}/{total} "
-                    f"after {idle_rounds} rounds with no growth."
+                # Raising here on purpose, not warning-and-continuing --
+                # a real run silently proceeded with 820/2078 rows once,
+                # and since every downstream tab is a FULL REWRITE, that
+                # would have overwritten and destroyed ~1250 real rows
+                # already correctly in the sheet. An incomplete pull
+                # must abort the whole run, not produce a short CSV that
+                # looks successful. If this fires legitimately (e.g. a
+                # real content count dropped), the fix is to adjust
+                # idle_rounds_before_giving_up or investigate why growth
+                # actually stalled -- not to catch and ignore this.
+                raise ExportError(
+                    f"scroll_to_load_all stopped early at {new_loaded}/{total} after "
+                    f"{idle_rounds} rounds with no growth. Aborting rather than "
+                    f"continuing with a partial pull -- every sheet tab is a full "
+                    f"rewrite, so exporting/syncing this data would delete real rows "
+                    f"that a complete pull would have kept."
                 )
-                return
         else:
             idle_rounds = 0
         last_loaded = new_loaded
@@ -501,6 +509,17 @@ def scrape_creator_emails(
                 continue
 
             request_toggle = grid_item.locator(".usage-rights-request-card").first
+            try:
+                request_toggle.scroll_into_view_if_needed(timeout=8000)
+                request_toggle.wait_for(state="visible", timeout=8000)
+            except Exception as e:
+                raise ExportError(
+                    f"Card for media_id={media_id!r} was found in the DOM, but its "
+                    f".usage-rights-request-card button never became visible/clickable "
+                    f"within 8s even after scroll_into_view_if_needed() -- may be "
+                    f"obscured by an overlay, or genuinely off-screen for another reason. "
+                    f"Original error: {e}"
+                ) from e
             _safe_click(request_toggle)
             _pace(page)
 
@@ -525,6 +544,9 @@ def scrape_creator_emails(
 
         except Exception as e:
             print(f"scrape_creator_emails: couldn't get email for media_id={media_id!r}: {e}")
+            if debug_dir and not debug_snapshot_saved:
+                _save_scrape_failure_snapshot(page, debug_dir, media_id)
+                debug_snapshot_saved = True
 
         finally:
             # Always try to back out via Escape, regardless of success/
