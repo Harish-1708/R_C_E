@@ -123,22 +123,22 @@ def main() -> int:
         )
         page = context.new_page()
 
-        # --- 2. select the right workspace, then export ---
+        # --- 2. select the right workspace, then export media ---
         page.goto(refunnel_auth.REFUNNEL_SOCIAL_LISTENING_URL)
         refunnel_export.select_workspace(page, refunnel_workspace_name, known_workspace_names)
         refunnel_export.scroll_to_load_all(page)
         media_csv_path = refunnel_export.export_media_csv(page, download_dir)
 
-        page.goto(refunnel_auth.REFUNNEL_PAYMENTS_URL)
-        payments_csv_path = refunnel_export.export_payments_csv(page, download_dir)
-
-        # --- 3. parse ---
+        # --- 3. parse media, connect to sheets, and scrape emails --
+        # ALL of this must happen while `page` is STILL on the Social
+        # Listening grid, since scrape_creator_emails() searches for
+        # post cards there. A real run confirmed this the hard way: the
+        # scraper was previously called after navigating to the
+        # Payments page, so every single scroll-search failed -- there
+        # were no post cards to find on that page at all. Payments
+        # export now happens AFTER this block, not before it.
         result = parse_refunnel.parse_media_csv(media_csv_path)
-        result = parse_refunnel.parse_payments_csv(payments_csv_path, result=result)
 
-        # --- 4. connect to sheets early, so we can read back what's
-        # already there (previously-found emails, your manual Reviewed
-        # marks) before deciding what needs scraping or moving ---
         gc = gspread.service_account(filename=service_account_path)
         sh = gc.open_by_key(spreadsheet_id)
         master_ws = sheets_sync.get_or_create_worksheet(sh, "Master Data")
@@ -160,6 +160,11 @@ def main() -> int:
             )
             updated = parse_refunnel.apply_creator_emails(result, emails)
             print(f"Scraped {updated} new creator email(s) for usage-rights rows.")
+
+        # --- 4. NOW it's safe to navigate away and export payments ---
+        page.goto(refunnel_auth.REFUNNEL_PAYMENTS_URL)
+        payments_csv_path = refunnel_export.export_payments_csv(page, download_dir)
+        result = parse_refunnel.parse_payments_csv(payments_csv_path, result=result)
 
         # Move anything you've marked "Reviewed" (a manual column you
         # add to Master Data yourself) out of Approved/Requested/Declined
@@ -217,3 +222,4 @@ def main() -> int:
 if __name__ == "__main__":
     Path(DOWNLOAD_DIR).mkdir(exist_ok=True)
     sys.exit(main())
+
