@@ -136,24 +136,48 @@ def main() -> int:
         result = parse_refunnel.parse_media_csv(media_csv_path)
         result = parse_refunnel.parse_payments_csv(payments_csv_path, result=result)
 
+        # --- 4. connect to sheets early, so we can read back what's
+        # already there (previously-found emails, your manual Reviewed
+        # marks) before deciding what needs scraping or moving ---
+        gc = gspread.service_account(filename=service_account_path)
+        sh = gc.open_by_key(spreadsheet_id)
+        master_ws = sheets_sync.get_or_create_worksheet(sh, "Master Data")
+        master_client = sheets_sync.GspreadSheetsClient(master_ws)
+
+        # Don't re-scrape an email we already found on a previous run --
+        # load whatever's already in the sheet's creator_email column
+        # first, so rows_needing_email_scrape() only returns genuinely
+        # still-missing ones.
+        existing_emails = sheets_sync.read_column_values(master_client, "creator_email")
+        preloaded = parse_refunnel.apply_creator_emails(result, existing_emails)
+        if preloaded:
+            print(f"Loaded {preloaded} previously-found creator email(s) from the sheet -- won't re-scrape those.")
+
         if refunnel_export.SCRAPE_EMAILS_ENABLED:
             target_ids = parse_refunnel.rows_needing_email_scrape(result)
             emails = refunnel_export.scrape_creator_emails(page, result.master, target_ids)
             updated = parse_refunnel.apply_creator_emails(result, emails)
-            print(f"Scraped {updated} creator email(s) for usage-rights rows.")
+            print(f"Scraped {updated} new creator email(s) for usage-rights rows.")
+
+        # Move anything you've marked "Reviewed" (a manual column you
+        # add to Master Data yourself) out of Approved/Requested/Declined
+        # and into Human Review instead.
+        reviewed_values = sheets_sync.read_column_values(master_client, "Reviewed")
+        reviewed_ids = {mid for mid, val in reviewed_values.items() if val.strip().lower() in ("yes", "y", "true", "1")}
+        moved = parse_refunnel.apply_human_review_flags(result, reviewed_ids)
+        if moved:
+            print(f"Moved {moved} reviewed row(s) into Human Review.")
 
         print(
             f"Parsed: {len(result.master)} media rows "
             f"({len(result.rights_approved)} approved, "
             f"{len(result.rights_requested)} requested, "
-            f"{len(result.rights_declined)} declined), "
+            f"{len(result.rights_declined)} declined, "
+            f"{len(result.rights_reviewed)} reviewed), "
             f"{len(result.payments)} payment rows."
         )
 
-        # --- 4. push to sheets ---
-        gc = gspread.service_account(filename=service_account_path)
-        sh = gc.open_by_key(spreadsheet_id)
-
+        # --- 5. push to sheets ---
         human_review_rows = parse_refunnel.build_human_review_rows(result)
 
         tab_plan = [
