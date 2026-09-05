@@ -7,7 +7,7 @@ and should be smoke-tested manually once credentials exist.
 
 import pytest
 
-from sheets_sync import sync_tab
+from sheets_sync import sync_tab, read_column_values
 
 
 class FakeSheetsClient:
@@ -124,3 +124,44 @@ def test_sabotage_wrong_sort_order_would_be_caught():
     sync_tab(client, COLUMNS, target, sort_key="username")
     with pytest.raises(AssertionError):
         assert client.rows[1][1] == "zeta"  # wrong -- alpha sorts first
+
+
+# ---------- read_column_values tests ----------
+
+def test_read_column_values_returns_values_keyed_by_id():
+    client = FakeSheetsClient(
+        [
+            ["id", "username", "Reviewed"],
+            ["id1", "alice", "Yes"],
+            ["id2", "bob", "No"],
+        ]
+    )
+    values = read_column_values(client, "Reviewed")
+    assert values == {"id1": "Yes", "id2": "No"}
+
+
+def test_read_column_values_missing_column_returns_empty_dict():
+    client = FakeSheetsClient([["id", "username"], ["id1", "alice"]])
+    assert read_column_values(client, "Reviewed") == {}
+
+
+def test_read_column_values_empty_sheet_returns_empty_dict():
+    client = FakeSheetsClient([])
+    assert read_column_values(client, "Reviewed") == {}
+
+
+def test_read_column_values_skips_rows_with_blank_id():
+    client = FakeSheetsClient(
+        [["id", "Reviewed"], ["", "Yes"], ["id1", "Yes"]]
+    )
+    assert read_column_values(client, "Reviewed") == {"id1": "Yes"}
+
+
+def test_sabotage_read_column_values_wrong_column_would_be_caught():
+    client = FakeSheetsClient(
+        [["id", "username", "Reviewed"], ["id1", "alice", "Yes"]]
+    )
+    values = read_column_values(client, "Reviewed")
+    with pytest.raises(AssertionError):
+        assert values["id1"] == "alice"  # wrong column's value
+    assert values["id1"] == "Yes"
