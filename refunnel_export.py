@@ -241,7 +241,7 @@ def export_payments_csv(page: Page, download_dir: str) -> str:
     return out_path
 
 
-def export_media_csv(page: Page, download_dir: str) -> str:
+def export_media_csv(page: Page, download_dir: str, scroll_container_selector: str = "#scrollableDiv") -> str:
     """Export the media/content CSV via Social Listening -> All Brand
     Mentions -> the '...' menu next to 'Create collection' -> 'Export
     Content CSV' (confirmed from a real screenshot of that menu -- it
@@ -249,13 +249,28 @@ def export_media_csv(page: Page, download_dir: str) -> str:
     upload media', which are unrelated upload actions, not this export).
 
     The '...' button is `<div class="upload-content-activator"><img
-    src=".../dottedMenuIconBlack....svg"></div>` -- confirmed from a
-    real HTML dump. (An earlier version located it by screen position
-    relative to 'Create collection', which turned out to be wrong -- it
-    matched the unrelated 'Sort by' button instead, since layout-based
-    matching doesn't require being on the same row.)
+    src=".../dottedMenuIconBlack....svg"></div>` -- confirmed unique
+    (exactly one match) from a real HTML dump. (An earlier version
+    located it by screen position relative to 'Create collection',
+    which turned out to be wrong -- it matched the unrelated 'Sort by'
+    button instead, since layout-based matching doesn't require being
+    on the same row.)
+
+    Confirmed from two real HTML dumps taken before/after scrolling: the
+    header containing this button is a STICKY header that hides itself
+    (`content-header-section content-header-visible` -> `...-hidden`)
+    once you've scrolled down -- e.g. right after scroll_to_load_all()
+    loads everything. So this scrolls the container back to the top
+    first, to bring the header (and this button) back before looking
+    for it.
     """
     Path(download_dir).mkdir(parents=True, exist_ok=True)
+
+    page.evaluate(
+        "(sel) => { const el = document.querySelector(sel); if (el) { el.scrollTop = 0; } }",
+        scroll_container_selector,
+    )
+    page.wait_for_timeout(1000)  # let the sticky-header show/hide transition settle
 
     try:
         more_menu_button = page.locator(".upload-content-activator").first
@@ -264,7 +279,9 @@ def export_media_csv(page: Page, download_dir: str) -> str:
     except Exception as e:
         raise ExportError(
             "Couldn't find/click the '...' menu button (.upload-content-activator) next to "
-            f"'Create collection'. Original error: {e}"
+            "'Create collection', even after scrolling back to the top. If this keeps "
+            "happening, the sticky-header transition may need more than 1000ms to settle -- "
+            f"try increasing that wait. Original error: {e}"
         ) from e
 
     export_item = page.get_by_text(re.compile(r"Export Content CSV", re.I))
