@@ -1,0 +1,121 @@
+name: Refunnel Sync
+
+on:
+  schedule:
+    - cron: "0 3 * * *"  # 03:00 UTC daily -- adjust to whenever suits you
+  workflow_dispatch:
+    inputs:
+      workspace:
+        description: >
+          Which workspace to run manually. "all-enabled" = the same set
+          that runs on schedule. "all" = every configured workspace,
+          ignoring each one's schedule_enabled setting. Or type an exact
+          workspace name (e.g. "Swoveralls") to run just that one --
+          this works even if that workspace's schedule is off.
+        required: false
+        default: all-enabled
+        type: string
+
+jobs:
+  determine-workspaces:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml
+      - id: set-matrix
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          WORKSPACE_INPUT: ${{ github.event.inputs.workspace }}
+        run: |
+          MATRIX=$(python scripts/determine_workspaces.py)
+          echo "Selected workspaces: $MATRIX"
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+  sync:
+    needs: determine-workspaces
+    if: needs.determine-workspaces.outputs.matrix != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        workspace: ${{ fromJson(needs.determine-workspaces.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright's browser
+        run: python -m playwright install --with-deps chromium
+
+      # --- Session persistence across runs ---
+      # One Refunnel login session is shared across all workspaces (same
+      # account, switching workspace happens inside the app after login),
+      # so this cache key is workspace-agnostic on purpose.
+      - name: Restore saved Refunnel session
+        id: restore_session
+        uses: actions/cache/restore@v4
+        with:
+          path: refunnel_session.json
+          key: refunnel-session-${{ github.run_id }}
+          restore-keys: |
+            refunnel-session-
+
+      - name: Bootstrap session from secret (first run only)
+        if: steps.restore_session.outputs.cache-hit != 'true'
+        env:
+          INITIAL_REFUNNEL_SESSION_B64: ${{ secrets.INITIAL_REFUNNEL_SESSION_B64 }}
+        run: |
+          if [ -n "$INITIAL_REFUNNEL_SESSION_B64" ]; then
+            echo "$INITIAL_REFUNNEL_SESSION_B64" | base64 -d > refunnel_session.json
+            echo "Seeded session from INITIAL_REFUNNEL_SESSION_B64 secret."
+          else
+            echo "No cached session and no bootstrap secret set -- the run will fall back to a fresh Gmail-OTP login."
+          fi
+
+      - name: Run the sync for ${{ matrix.workspace.name }}
+        env:
+          REFUNNEL_EMAIL: ${{ secrets.REFUNNEL_EMAIL }}
+          WORKSPACE_NAME: ${{ matrix.workspace.name }}
+          REFUNNEL_WORKSPACE_NAME: ${{ matrix.workspace.refunnel_workspace_name }}
+          KNOWN_WORKSPACE_NAMES: "Duderobe,Swoveralls,Defi Snacks,Kelson"
+          SPREADSHEET_ID: ${{ secrets[matrix.workspace.spreadsheet_id_secret] }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: service_account.json
+          GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GMAIL_CLIENT_ID: ${{ secrets.GMAIL_CLIENT_ID }}
+          GMAIL_CLIENT_SECRET: ${{ secrets.GMAIL_CLIENT_SECRET }}
+          GMAIL_REFRESH_TOKEN: ${{ secrets.GMAIL_REFRESH_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          echo "$GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT" > service_account.json
+          python run_daily_sync.py
+
+      # Save whatever session file exists now (freshly refreshed if the
+      # fallback login ran, unchanged otherwise) for the next scheduled run.
+      # Only one matrix branch's save actually "wins" per run_id (GitHub
+      # Actions cache keys are immutable once written) -- that's fine,
+      # they'd all be saving an equivalent session anyway.
+      - name: Save Refunnel session for next run
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: refunnel_session.json
+          key: refunnel-session-${{ github.run_id }}
+
+      - name: Upload downloaded CSVs (debugging aid, 7-day retention)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: refunnel-csv-exports-${{ matrix.workspace.name }}
+          path: downloads/${{ matrix.workspace.name }}/
+          retention-days: 7
+          if-no-files-found: ignore
