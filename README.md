@@ -215,6 +215,18 @@ site. Please work through this checklist once real credentials exist:
   device" before expecting the download. Bonus confirmation from that
   same screenshot: it showed "2078 of 2078 media" loaded, proving
   `scroll_to_load_all()` is working correctly end-to-end.
+- [x] **The whole media export now works end-to-end**: a real run
+  produced an actual downloaded CSV (2078 rows) for the first time.
+  Running it through `parse_refunnel.py` surfaced one real bug: the
+  actual `rights_status` enum value is `DENIED`, not `DECLINED` as
+  originally guessed -- fixed in `RIGHTS_STATUS_MAP`, confirmed against
+  the real 2 denied rows in that export, and that file is now a
+  permanent test fixture (`tests/fixtures/real_media_2078.csv`).
+- [ ] **Payments page URL**: confirmed wrong by a real run -- page.goto
+  to the guessed `/dashboard/payments` left the browser on the same
+  Social Listening URL, meaning that route doesn't exist and the app's
+  router silently ignored it. Needs the real URL: visit the Payments
+  page yourself and send me its exact address.
 - [x] **Sidebar collapsed on load**: confirmed root cause of the actual
   failure, from a real screenshot + HTML dump -- the sidebar can load
   collapsed (`class="left-side-navbar collapsed"`), and while collapsed
@@ -229,11 +241,6 @@ site. Please work through this checklist once real credentials exist:
   `/dashboard/content/social-listening`, found in analytics data embedded
   in a session export you shared. Fixed in `refunnel_auth.py`
   (`REFUNNEL_SOCIAL_LISTENING_URL`).
-- [ ] **Payments page URL**: still a guess (`/dashboard/payments`,
-  following the same pattern as above) -- not confirmed the same way.
-  If the payments export fails with a similar "nothing rendered"
-  symptom, check this first: visit the real Payments page and send me
-  its exact URL.
 - [x] **Scroll-to-load-all mechanism**: a real run only loaded 20/2078
   items before giving up. Root cause: `page.mouse.wheel()` scrolls
   wherever the mouse happens to be, which was never necessarily over the
