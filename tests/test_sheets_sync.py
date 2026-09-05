@@ -7,7 +7,7 @@ and should be smoke-tested manually once credentials exist.
 
 import pytest
 
-from sheets_sync import sync_tab, read_column_values, SuspiciousShrinkError
+from sheets_sync import sync_tab, read_column_values, SuspiciousShrinkError, GspreadSheetsClient
 
 
 class FakeSheetsClient:
@@ -225,3 +225,68 @@ def test_sabotage_shrink_threshold_ignored_would_be_caught():
     with pytest.raises(AssertionError):
         assert client.overwrite_calls == 1  # wrong -- it should have been refused
     assert client.overwrite_calls == 0  # confirms actual correct behavior
+
+
+# ---------- update_single_cell tests ----------
+
+class FakeWorksheet:
+    """Minimal gspread-shaped fake: row_values / col_values / update_cell."""
+
+    def __init__(self, rows):
+        self.rows = [list(r) for r in rows]  # rows[0] is the header
+        self.update_cell_calls = []
+
+    def row_values(self, row_num):
+        return self.rows[row_num - 1]
+
+    def col_values(self, col_num):
+        return [row[col_num - 1] if col_num - 1 < len(row) else "" for row in self.rows]
+
+    def update_cell(self, row_num, col_num, value):
+        self.update_cell_calls.append((row_num, col_num, value))
+        while len(self.rows[row_num - 1]) < col_num:
+            self.rows[row_num - 1].append("")
+        self.rows[row_num - 1][col_num - 1] = value
+
+
+def test_update_single_cell_updates_the_right_row_and_column():
+    ws = FakeWorksheet([
+        ["id", "username", "creator_email"],
+        ["id1", "alice", ""],
+        ["id2", "bob", ""],
+    ])
+    client = GspreadSheetsClient(ws)
+    found = client.update_single_cell("id2", "creator_email", "bob@example.com")
+    assert found is True
+    assert ws.rows[2] == ["id2", "bob", "bob@example.com"]
+    assert ws.rows[1] == ["id1", "alice", ""]  # untouched
+    assert ws.update_cell_calls == [(3, 3, "bob@example.com")]
+
+
+def test_update_single_cell_returns_false_if_id_not_found():
+    ws = FakeWorksheet([["id", "creator_email"], ["id1", ""]])
+    client = GspreadSheetsClient(ws)
+    found = client.update_single_cell("not_a_real_id", "creator_email", "x@example.com")
+    assert found is False
+    assert ws.update_cell_calls == []
+
+
+def test_update_single_cell_returns_false_if_column_missing():
+    ws = FakeWorksheet([["id", "username"], ["id1", "alice"]])
+    client = GspreadSheetsClient(ws)
+    found = client.update_single_cell("id1", "creator_email", "x@example.com")
+    assert found is False
+    assert ws.update_cell_calls == []
+
+
+def test_sabotage_update_single_cell_wrong_row_would_be_caught():
+    ws = FakeWorksheet([
+        ["id", "username", "creator_email"],
+        ["id1", "alice", ""],
+        ["id2", "bob", ""],
+    ])
+    client = GspreadSheetsClient(ws)
+    client.update_single_cell("id1", "creator_email", "alice@example.com")
+    with pytest.raises(AssertionError):
+        assert ws.rows[2][2] == "alice@example.com"  # wrong row -- that's id2/bob's row
+    assert ws.rows[1][2] == "alice@example.com"  # confirms actual correct behavior
