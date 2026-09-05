@@ -18,6 +18,7 @@ from openpyxl.utils import get_column_letter
 from parse_refunnel import (
     parse_media_csv,
     parse_payments_csv,
+    apply_human_review_flags,
     build_human_review_rows,
     MASTER_COLUMNS,
     PAYMENT_COLUMNS,
@@ -57,6 +58,17 @@ def write_tab(wb, title, columns, rows_dict, sort_key="id"):
 def main():
     result = parse_media_csv("tests/fixtures/sample_media.csv")
     result = parse_payments_csv("tests/fixtures/sample_payments.csv", result=result)
+
+    # Human Review starts empty every run -- rows only land there once
+    # you mark them "Reviewed" in Master Data yourself. To actually show
+    # what that looks like in this preview, simulate marking the first
+    # approved row as reviewed (a real run would read this from your
+    # sheet's own "Reviewed" column instead -- see run_daily_sync.py).
+    if result.rights_approved:
+        simulated_reviewed_id = next(iter(result.rights_approved))
+        apply_human_review_flags(result, [simulated_reviewed_id])
+        print(f"(preview only: simulated marking {simulated_reviewed_id} as Reviewed, "
+              f"so you can see it move into Human Review below)")
 
     wb = Workbook()
     wb.remove(wb.active)  # drop the default blank sheet
