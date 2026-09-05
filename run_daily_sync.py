@@ -62,6 +62,39 @@ def notify_failure(message: str) -> None:
         print(f"(also failed to post Slack notification: {e})", file=sys.stderr)
 
 
+def _save_debug_snapshot(page, workspace_name: str) -> None:
+    """On failure, capture what the browser actually saw -- a screenshot
+    and the raw HTML -- so we can tell "wrong page", "Cloudflare/bot
+    challenge", "still on login", etc. apart without guessing blind.
+    Never lets a screenshot failure hide the real error."""
+    if page is None:
+        print("No page object available at failure time -- nothing to snapshot "
+              "(failure happened before or during login).", file=sys.stderr)
+        return
+
+    debug_dir = Path(DOWNLOAD_DIR) / workspace_name / "debug"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        print(f"Page URL at failure: {page.url}", file=sys.stderr)
+    except Exception as e:
+        print(f"Couldn't read page.url: {e}", file=sys.stderr)
+
+    try:
+        screenshot_path = debug_dir / "failure_screenshot.png"
+        page.screenshot(path=str(screenshot_path), full_page=True)
+        print(f"Saved failure screenshot to {screenshot_path}", file=sys.stderr)
+    except Exception as e:
+        print(f"Couldn't save failure screenshot: {e}", file=sys.stderr)
+
+    try:
+        html_path = debug_dir / "failure_page.html"
+        html_path.write_text(page.content(), encoding="utf-8")
+        print(f"Saved failure page HTML to {html_path}", file=sys.stderr)
+    except Exception as e:
+        print(f"Couldn't save failure page HTML: {e}", file=sys.stderr)
+
+
 def main() -> int:
     email = os.environ.get("REFUNNEL_EMAIL")
     spreadsheet_id = os.environ.get("SPREADSHEET_ID")
@@ -81,7 +114,7 @@ def main() -> int:
         )
         return 1
 
-    p = browser = context = None
+    p = browser = context = page = None
     try:
         print(f"=== Syncing workspace: {workspace_name} (Refunnel workspace: {refunnel_workspace_name}) ===")
         # --- 1. auth ---
@@ -140,6 +173,7 @@ def main() -> int:
 
     except Exception as e:
         notify_failure(f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
+        _save_debug_snapshot(page, workspace_name)
         return 1
 
     finally:
