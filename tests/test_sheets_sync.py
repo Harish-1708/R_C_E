@@ -7,7 +7,7 @@ and should be smoke-tested manually once credentials exist.
 
 import pytest
 
-from sheets_sync import sync_tab, read_column_values
+from sheets_sync import sync_tab, read_column_values, SuspiciousShrinkError
 
 
 class FakeSheetsClient:
@@ -165,3 +165,63 @@ def test_sabotage_read_column_values_wrong_column_would_be_caught():
     with pytest.raises(AssertionError):
         assert values["id1"] == "alice"  # wrong column's value
     assert values["id1"] == "Yes"
+
+
+# ---------- shrink-protection tests ----------
+
+def _many_rows(n, prefix="id"):
+    return _rows(*[(f"{prefix}{i}", f"user{i}", "GRANTED") for i in range(n)])
+
+
+def test_shrink_protection_blocks_a_big_unexpected_drop():
+    existing_rows = [COLUMNS] + [[f"id{i}", f"user{i}", "GRANTED"] for i in range(100)]
+    client = FakeSheetsClient(existing_rows)
+    target = _many_rows(20)  # 80% drop -- way past a 10% allowance
+    with pytest.raises(SuspiciousShrinkError, match="Refusing to overwrite"):
+        sync_tab(client, COLUMNS, target, max_shrink_fraction=0.1)
+    # sheet must be untouched -- still the original 100 rows
+    assert client.rows == existing_rows
+    assert client.overwrite_calls == 0
+
+
+def test_shrink_protection_allows_growth():
+    existing_rows = [COLUMNS] + [[f"id{i}", f"user{i}", "GRANTED"] for i in range(100)]
+    client = FakeSheetsClient(existing_rows)
+    target = _many_rows(150)  # grew -- should sail through
+    sync_tab(client, COLUMNS, target, max_shrink_fraction=0.1)
+    assert client.overwrite_calls == 1
+    assert len(client.rows) - 1 == 150
+
+
+def test_shrink_protection_allows_small_shrink_within_tolerance():
+    existing_rows = [COLUMNS] + [[f"id{i}", f"user{i}", "GRANTED"] for i in range(100)]
+    client = FakeSheetsClient(existing_rows)
+    target = _many_rows(95)  # 5% drop -- within a 10% allowance
+    sync_tab(client, COLUMNS, target, max_shrink_fraction=0.1)
+    assert client.overwrite_calls == 1
+
+
+def test_shrink_protection_does_nothing_when_not_requested():
+    existing_rows = [COLUMNS] + [[f"id{i}", f"user{i}", "GRANTED"] for i in range(100)]
+    client = FakeSheetsClient(existing_rows)
+    target = _many_rows(5)  # huge drop, but max_shrink_fraction not set for this tab
+    sync_tab(client, COLUMNS, target)  # no max_shrink_fraction -- should just work
+    assert client.overwrite_calls == 1
+
+
+def test_shrink_protection_does_not_block_first_ever_write():
+    client = FakeSheetsClient()  # empty sheet, never written before
+    target = _many_rows(5)
+    sync_tab(client, COLUMNS, target, max_shrink_fraction=0.1)
+    assert client.overwrite_calls == 1
+
+
+def test_sabotage_shrink_threshold_ignored_would_be_caught():
+    existing_rows = [COLUMNS] + [[f"id{i}", f"user{i}", "GRANTED"] for i in range(100)]
+    client = FakeSheetsClient(existing_rows)
+    target = _many_rows(20)
+    with pytest.raises(SuspiciousShrinkError):
+        sync_tab(client, COLUMNS, target, max_shrink_fraction=0.1)
+    with pytest.raises(AssertionError):
+        assert client.overwrite_calls == 1  # wrong -- it should have been refused
+    assert client.overwrite_calls == 0  # confirms actual correct behavior
