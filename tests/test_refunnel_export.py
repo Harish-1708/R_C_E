@@ -15,7 +15,7 @@ from refunnel_export import scroll_to_load_all, ExportError, select_workspace
 
 
 class FakePage:
-    """Simulates a page where each 'scroll' (mouse.wheel call) reveals
+    """Simulates a page where each scroll (evaluate() call) reveals
     more items, up to a schedule the test controls."""
 
     def __init__(self, load_schedule, total):
@@ -24,24 +24,16 @@ class FakePage:
         self.load_schedule = load_schedule
         self.total = total
         self._read_index = 0
-        self.wheel_calls = 0
+        self.scroll_calls = 0
 
     def inner_text(self, _selector):
         idx = min(self._read_index, len(self.load_schedule) - 1)
         loaded = self.load_schedule[idx]
         return f"{loaded} of {self.total} media"
 
-    class _Mouse:
-        def __init__(self, outer):
-            self._outer = outer
-
-        def wheel(self, _x, _y):
-            self._outer.wheel_calls += 1
-            self._outer._read_index += 1
-
-    @property
-    def mouse(self):
-        return FakePage._Mouse(self)
+    def evaluate(self, _script, _arg=None):
+        self.scroll_calls += 1
+        self._read_index += 1
 
     def wait_for_timeout(self, _ms):
         pass
@@ -76,7 +68,7 @@ def test_raises_if_counter_text_not_found():
 def test_does_not_scroll_at_all_if_already_fully_loaded():
     page = FakePage(load_schedule=[2078], total=2078)
     scroll_to_load_all(page, scroll_pause_ms=0)
-    assert page.wheel_calls == 0
+    assert page.scroll_calls == 0
 
 
 # ---------- select_workspace tests (fake workspace switcher) ----------
@@ -224,12 +216,12 @@ def test_sabotage_off_by_one_stop_condition_would_be_caught():
     # if the stop condition were `loaded > total` instead of `>=`, a
     # page that loads exactly to total (never exceeding it) would loop
     # until max_rounds. Prove our test would catch that by checking
-    # wheel_calls stayed small (didn't run away).
+    # scroll_calls stayed small (didn't run away).
     page = FakePage(load_schedule=[80, 400, 900, 1500, 2078], total=2078)
     scroll_to_load_all(page, scroll_pause_ms=0, idle_rounds_before_giving_up=10)
-    assert page.wheel_calls < 10  # should stop almost immediately once loaded==total
+    assert page.scroll_calls < 10  # should stop almost immediately once loaded==total
     with pytest.raises(AssertionError):
-        assert page.wheel_calls > 100  # would only be true if the loop ran away
+        assert page.scroll_calls > 100  # would only be true if the loop ran away
 
 
 def test_sabotage_idle_threshold_ignored_would_be_caught():
@@ -237,4 +229,4 @@ def test_sabotage_idle_threshold_ignored_would_be_caught():
     scroll_to_load_all(page, scroll_pause_ms=0, idle_rounds_before_giving_up=3)
     # with a working idle check, it stops after 3 idle rounds past the
     # last growth (index ~5), not after exhausting the whole schedule
-    assert page.wheel_calls < 8
+    assert page.scroll_calls < 8
