@@ -7,6 +7,8 @@ export_media_csv, scrape_creator_emails all need a live site and are
 untested here; see README).
 """
 
+import re
+
 import pytest
 
 from refunnel_export import scroll_to_load_all, ExportError, select_workspace
@@ -83,9 +85,12 @@ ALL_NAMES = ["Duderobe", "Swoveralls", "Defi Snacks", "Kelson"]
 
 
 class _FakeLocator:
-    def __init__(self, page, key):
+    def __init__(self, page, keys):
         self._page = page
-        self._key = key  # either a workspace name, or "__search_box__"
+        # keys is a list -- a single-item list for a specific-name
+        # locator (get_by_text), or multiple items for the combined
+        # ":text-is(...), :text-is(...)" trigger locator.
+        self._keys = keys if isinstance(keys, list) else [keys]
 
     @property
     def first(self):
@@ -102,24 +107,33 @@ class _FakeLocator:
         return self._visible_now()
 
     def _visible_now(self):
-        if self._key == "__search_box__":
+        if self._keys == ["__search_box__"]:
             return self._page.dropdown_open
         if self._page.dropdown_open:
-            return self._key in ALL_NAMES  # any name is visible in the open list
-        return self._key == self._page.active_workspace  # only the active trigger shows
+            # any key that's a real workspace name is visible in the open list
+            return any(k in ALL_NAMES for k in self._keys)
+        # closed: visible only if it's the currently active workspace's trigger
+        return self._page.active_workspace in self._keys
 
     def wait_for(self, state="visible", timeout=0):
         if state == "visible" and not self._visible_now():
-            raise TimeoutError(f"{self._key!r} never became visible")
+            raise TimeoutError(f"{self._keys!r} never became visible")
+
+    def inner_text(self):
+        if not self._visible_now():
+            raise RuntimeError(f"{self._keys!r} is not visible -- can't read its text")
+        return self._page.active_workspace
 
     def click(self):
-        if self._key == "__search_box__":
+        if self._keys == ["__search_box__"]:
             return
-        if not self._page.dropdown_open and self._key == self._page.active_workspace:
+        if not self._page.dropdown_open and self._page.active_workspace in self._keys:
             self._page.dropdown_open = True
-        elif self._page.dropdown_open and self._key in ALL_NAMES:
-            self._page.active_workspace = self._key
-            self._page.dropdown_open = False
+        elif self._page.dropdown_open and any(k in ALL_NAMES for k in self._keys):
+            # a specific single-name locator was clicked from the open list
+            if len(self._keys) == 1:
+                self._page.active_workspace = self._keys[0]
+                self._page.dropdown_open = False
 
 
 class FakeWorkspacePage:
@@ -128,10 +142,16 @@ class FakeWorkspacePage:
         self.dropdown_open = False
 
     def get_by_text(self, text, exact=True):
-        return _FakeLocator(self, text)
+        return _FakeLocator(self, [text])
 
     def get_by_placeholder(self, _pattern):
-        return _FakeLocator(self, "__search_box__")
+        return _FakeLocator(self, ["__search_box__"])
+
+    def locator(self, css_selector):
+        # mimics page.locator(":text-is('A'), :text-is('B'), ...") by
+        # pulling the quoted names back out of the generated CSS string
+        names = re.findall(r":text-is\('([^']+)'\)", css_selector)
+        return _FakeLocator(self, names)
 
     def wait_for_timeout(self, _ms):
         pass
@@ -151,10 +171,13 @@ def test_select_workspace_switches_to_target():
     assert page.dropdown_open is False  # closed again after picking
 
 
-def test_select_workspace_raises_if_switcher_never_opens():
+def test_select_workspace_raises_if_trigger_never_renders():
+    # simulates the page not having rendered ANY known workspace name
+    # yet (e.g. still loading) -- distinct failure mode from "found it
+    # but couldn't open it"
     page = FakeWorkspacePage(active_workspace="SomeUnlistedWorkspace")
-    with pytest.raises(ExportError, match="Couldn't open the workspace switcher"):
-        select_workspace(page, "Swoveralls", ALL_NAMES)
+    with pytest.raises(ExportError, match="became visible"):
+        select_workspace(page, "Swoveralls", ALL_NAMES, timeout_ms=10)
 
 
 def test_select_workspace_raises_if_target_not_in_list():
