@@ -1,0 +1,31 @@
+# Which Refunnel workspaces this pipeline knows about, and whether each
+# one runs automatically on the daily schedule.
+#
+# To turn scheduled runs on/off for a workspace: change schedule_enabled
+# below and commit. Every workspace can always be run manually regardless
+# of this setting (via the Actions tab -> Run workflow -> pick a
+# workspace), matching "off by default, manual anytime."
+#
+# spreadsheet_id_secret must match a real GitHub Actions secret name
+# holding that workspace's target Google Sheet ID.
+
+workspaces:
+  - name: Duderobe
+    refunnel_workspace_name: Duderobe
+    spreadsheet_id_secret: SPREADSHEET_ID_DUDEROBE
+    schedule_enabled: true
+
+  - name: Swoveralls
+    refunnel_workspace_name: Swoveralls
+    spreadsheet_id_secret: SPREADSHEET_ID_SWOVERALLS
+    schedule_enabled: false
+
+  - name: Defi Snacks
+    refunnel_workspace_name: Defi Snacks
+    spreadsheet_id_secret: SPREADSHEET_ID_DEFI_SNACKS
+    schedule_enabled: false
+
+  - name: Kelson
+    refunnel_workspace_name: Kelson
+    spreadsheet_id_secret: SPREADSHEET_ID_KELSON
+    schedule_enabled: false
