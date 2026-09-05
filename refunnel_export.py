@@ -37,6 +37,7 @@ access to app.refunnel.com from this sandbox).
 
 from __future__ import annotations
 
+import random
 import re
 import time
 from pathlib import Path
@@ -54,6 +55,23 @@ SCRAPE_EMAILS_ENABLED = False
 # accessible name matches this, as a hard safety net independent of
 # whatever selector logic runs above it.
 _DANGEROUS_BUTTON_PATTERN = re.compile(r"send\s*request", re.I)
+
+# Pacing between actions in the email-scraping loop -- purely to avoid
+# a bursty, machine-speed click pattern (a reasonable-load courtesy),
+# NOT an attempt to evade any bot-detection. Each value is a (min, max)
+# range in milliseconds; _pace() picks a random point in that range so
+# the interval isn't perfectly uniform. Tune these directly if you want
+# it faster/slower -- see README "Pacing and its time cost" for what
+# changing them does to total run time.
+EMAIL_SCRAPE_ACTION_PACE_MS = (400, 900)      # between clicks within one post's flow
+EMAIL_SCRAPE_ITEM_PACE_MS = (600, 1200)       # between finishing one post and starting the next
+SCROLL_SEARCH_PACE_MS = (200, 400)            # between scroll-search steps in _scroll_until_card_found
+
+
+def _pace(page: Page, ms_range: tuple = EMAIL_SCRAPE_ACTION_PACE_MS) -> None:
+    """Wait a randomized amount of time within ms_range. Not a security
+    measure -- just avoids machine-speed clicking."""
+    page.wait_for_timeout(random.randint(ms_range[0], ms_range[1]))
 
 
 class ExportError(RuntimeError):
@@ -357,7 +375,7 @@ def _scroll_until_card_found(
     scroll_container_selector: str,
     max_rounds: int = 200,
     scroll_step: int = 800,
-    pause_ms: int = 150,
+    pace_ms_range: tuple = SCROLL_SEARCH_PACE_MS,
 ):
     """react-virtuoso (the grid library this page uses) only keeps
     nearby cards mounted in the DOM, unmounting far-off ones as you
@@ -365,21 +383,54 @@ def _scroll_until_card_found(
     media_id may simply not exist in the DOM yet/anymore. This scrolls
     `scroll_container_selector` forward in small steps until a card
     containing that media_id's thumbnail (matched by image src, which
-    embeds the id) appears, or gives up. Returns the matching Locator,
-    or None.
+    embeds the id) appears, or gives up.
+
+    Returns (locator_or_none, diagnostics_dict). diagnostics_dict has
+    scrollTop/scrollHeight/clientHeight read from the container right
+    when this gives up (or None if that read itself failed) -- this
+    tells us whether scrolling is actually moving the container at all
+    (scrollTop stuck near 0 would mean the scrollTop assignment isn't
+    taking effect on this element), separate from "moved fine but the
+    card still never rendered."
     """
     selector = f"div.rf-virtuoso-item:has(img[src*='{media_id}'])"
     for _ in range(max_rounds):
         card = page.locator(selector)
         if card.count() > 0:
-            return card.first
+            return card.first, None
         page.evaluate(
             "(args) => { const el = document.querySelector(args.sel); "
             "if (el) { el.scrollTop += args.step; } }",
             {"sel": scroll_container_selector, "step": scroll_step},
         )
-        page.wait_for_timeout(pause_ms)
-    return None
+        _pace(page, pace_ms_range)
+
+    try:
+        diagnostics = page.evaluate(
+            "(sel) => { const el = document.querySelector(sel); "
+            "return el ? {scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, "
+            "clientHeight: el.clientHeight} : null; }",
+            scroll_container_selector,
+        )
+    except Exception as e:
+        diagnostics = {"diagnostic_read_failed": str(e)}
+
+    return None, diagnostics
+
+
+def _save_scrape_failure_snapshot(page: Page, debug_dir: str, media_id: str) -> None:
+    """One-time diagnostic capture for scrape_creator_emails -- a
+    screenshot and the raw page HTML, saved once (not per-failure) so
+    we can actually see what's on screen when the scroll-search gives
+    up, instead of guessing from log lines alone."""
+    try:
+        out_dir = Path(debug_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(out_dir / f"scrape_failure_{media_id}.png"), full_page=True)
+        (out_dir / f"scrape_failure_{media_id}.html").write_text(page.content(), encoding="utf-8")
+        print(f"Saved scrape-failure debug snapshot for media_id={media_id!r} to {out_dir}")
+    except Exception as e:
+        print(f"Couldn't save scrape-failure debug snapshot: {e}")
 
 
 def scrape_creator_emails(
@@ -387,6 +438,7 @@ def scrape_creator_emails(
     media_rows: dict,
     media_ids: Iterable[str],
     scroll_container_selector: str = "#scrollableDiv",
+    debug_dir: Optional[str] = None,
 ) -> dict:
     """For each media id needing an email, open its 'Request usage
     rights' flow, read the pre-filled email, and close WITHOUT sending
@@ -395,6 +447,12 @@ def scrape_creator_emails(
 
     Returns {media_id: email} for whichever ones had an email available
     (some won't -- that's expected, not an error).
+
+    If debug_dir is given, the FIRST time a card can't be located, this
+    saves a screenshot + the scroll container's scrollTop/scrollHeight/
+    clientHeight to debug_dir -- one snapshot, not one per failure, so
+    it doesn't flood the artifact upload. Every failure still logs
+    those same numbers to stdout regardless.
 
     Flow -- confirmed from a real, complete HTML trace of the whole
     interaction (card -> popover -> modal):
@@ -430,26 +488,33 @@ def scrape_creator_emails(
     page.wait_for_timeout(500)
 
     results: dict = {}
+    debug_snapshot_saved = False
     for media_id in _order_ids_for_scraping(media_rows, media_ids):
         try:
-            grid_item = _scroll_until_card_found(page, media_id, scroll_container_selector)
+            grid_item, diagnostics = _scroll_until_card_found(page, media_id, scroll_container_selector)
             if grid_item is None:
                 print(f"scrape_creator_emails: couldn't locate media_id={media_id!r} on the page "
-                      f"after scrolling through everything.")
+                      f"after scrolling through everything. Container state: {diagnostics}")
+                if debug_dir and not debug_snapshot_saved:
+                    _save_scrape_failure_snapshot(page, debug_dir, media_id)
+                    debug_snapshot_saved = True
                 continue
 
             request_toggle = grid_item.locator(".usage-rights-request-card").first
             _safe_click(request_toggle)
+            _pace(page)
 
             top_menu_item = page.get_by_role("menuitem", name=re.compile(r"^Request usage-rights$", re.I)).first
             top_menu_item.wait_for(state="visible", timeout=5000)
             _safe_click(top_menu_item)
+            _pace(page)
 
             # Email tab is active by default, but click it explicitly in
             # case that ever changes.
             email_tab = page.locator(".ur-tab-card", has_text="Email").first
             email_tab.wait_for(state="visible", timeout=5000)
             _safe_click(email_tab)
+            _pace(page)
 
             email_input = page.get_by_label(re.compile(r"Creator email address", re.I))
             email_input.wait_for(state="visible", timeout=5000)
@@ -467,8 +532,12 @@ def scrape_creator_emails(
             # can't accidentally submit anything either.
             try:
                 page.keyboard.press("Escape")
-                page.wait_for_timeout(300)
             except Exception:
                 pass
+            # Pace between posts, not just within one -- this is the
+            # bigger contributor to total added time since it runs once
+            # per item rather than once per click. See README "Pacing
+            # and its time cost".
+            _pace(page, EMAIL_SCRAPE_ITEM_PACE_MS)
 
     return results
