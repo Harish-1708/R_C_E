@@ -187,19 +187,24 @@ def main() -> int:
         # --- 5. push to sheets ---
         human_review_rows = parse_refunnel.build_human_review_rows(result)
 
+        # max_shrink_fraction is only set for tabs that should only ever
+        # grow or hold steady (Master Data, Payments) -- Usage Rights
+        # tabs and Human Review are expected to shrink by design (rows
+        # move out when marked Reviewed, or between status tabs), so a
+        # shrink there is normal, not a sign of an incomplete pull.
         tab_plan = [
-            ("Master Data", parse_refunnel.MASTER_COLUMNS, result.master),
-            ("Usage Rights - Approved", parse_refunnel.MASTER_COLUMNS, result.rights_approved),
-            ("Usage Rights - Requested", parse_refunnel.MASTER_COLUMNS, result.rights_requested),
-            ("Usage Rights - Declined", parse_refunnel.MASTER_COLUMNS, result.rights_declined),
-            ("Human Review", parse_refunnel.HUMAN_REVIEW_COLUMNS, human_review_rows),
-            ("Payments", parse_refunnel.PAYMENT_COLUMNS, result.payments),
+            ("Master Data", parse_refunnel.MASTER_COLUMNS, result.master, 0.1),
+            ("Usage Rights - Approved", parse_refunnel.MASTER_COLUMNS, result.rights_approved, None),
+            ("Usage Rights - Requested", parse_refunnel.MASTER_COLUMNS, result.rights_requested, None),
+            ("Usage Rights - Declined", parse_refunnel.MASTER_COLUMNS, result.rights_declined, None),
+            ("Human Review", parse_refunnel.HUMAN_REVIEW_COLUMNS, human_review_rows, None),
+            ("Payments", parse_refunnel.PAYMENT_COLUMNS, result.payments, 0.1),
         ]
 
-        for title, columns, rows in tab_plan:
+        for title, columns, rows, max_shrink_fraction in tab_plan:
             ws = sheets_sync.get_or_create_worksheet(sh, title)
             client = sheets_sync.GspreadSheetsClient(ws)
-            summary = sheets_sync.sync_tab(client, columns, rows)
+            summary = sheets_sync.sync_tab(client, columns, rows, max_shrink_fraction=max_shrink_fraction)
             print(f"{title}: wrote {summary['rows_written']} rows "
                   f"(preserved columns: {summary['extra_columns_preserved']})")
 
@@ -222,4 +227,3 @@ def main() -> int:
 if __name__ == "__main__":
     Path(DOWNLOAD_DIR).mkdir(exist_ok=True)
     sys.exit(main())
-
