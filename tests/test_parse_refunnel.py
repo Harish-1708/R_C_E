@@ -23,6 +23,7 @@ from parse_refunnel import (
 
 MEDIA_CSV = os.path.join(os.path.dirname(__file__), "fixtures", "sample_media.csv")
 PAYMENTS_CSV = os.path.join(os.path.dirname(__file__), "fixtures", "sample_payments.csv")
+REAL_MEDIA_CSV = os.path.join(os.path.dirname(__file__), "fixtures", "real_media_2078.csv")
 
 
 # ---------- real-data tests ----------
@@ -185,6 +186,45 @@ def test_unrecognized_rights_status_lands_in_master_only():
         assert "weird_1" not in result.rights_declined
     finally:
         os.unlink(path)
+
+
+def test_denied_rights_status_routes_to_declined_tab():
+    # confirmed from a real 2078-row export: the real enum value is
+    # "DENIED", not "DECLINED" -- an earlier version of RIGHTS_STATUS_MAP
+    # used the wrong literal and silently routed 0 rows here even when
+    # real denied rows existed
+    with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["id", "rights_status", "platform", "username"])
+        w.writerow(["denied_1", "DENIED", "TIKTOK", "someone"])
+        path = f.name
+    try:
+        result = parse_media_csv(path)
+        assert "denied_1" in result.rights_declined
+        assert "denied_1" not in result.rights_approved
+        assert "denied_1" not in result.rights_requested
+    finally:
+        os.unlink(path)
+
+
+# ---------- full-scale real-data regression test ----------
+# A second, larger real export (2078 rows) -- kept separate from the
+# smaller sample above since existing tests hardcode counts against
+# that one. This one exists specifically to catch full-scale issues the
+# small sample wouldn't (e.g. it's what surfaced the DENIED vs DECLINED
+# bug above in the first place).
+
+def test_real_2078_row_export_parses_with_expected_distribution():
+    result = parse_media_csv(REAL_MEDIA_CSV)
+    assert result.media_rows_seen == 2078
+    assert result.skipped_media_rows == 0
+    assert len(result.master) == 2078
+    assert len(result.rights_approved) == 60
+    assert len(result.rights_requested) == 732
+    assert len(result.rights_declined) == 2
+    none_count = sum(1 for row in result.master.values() if row["rights_status"] == "NONE")
+    assert none_count == 1284
+    assert none_count + 60 + 732 + 2 == 2078
 
 
 # ---------- sabotage tests: prove the tests actually catch bugs ----------
