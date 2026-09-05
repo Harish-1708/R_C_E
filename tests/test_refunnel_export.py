@@ -17,6 +17,7 @@ from refunnel_export import (
     select_workspace,
     _safe_click,
     _order_ids_for_scraping,
+    _pace,
 )
 
 
@@ -52,13 +53,13 @@ def test_stops_once_loaded_reaches_total():
     assert "2078 of 2078" in page.inner_text("body")
 
 
-def test_stops_early_after_idle_rounds_with_no_growth(capsys):
-    # loads to 500 then stalls forever
+def test_raises_if_stalls_before_reaching_total():
+    # loads to 500 then stalls forever -- must ABORT, not continue with
+    # partial data, since every sheet tab is a full rewrite and a short
+    # pull would delete real rows already correctly there
     page = FakePage(load_schedule=[80, 300, 500, 500, 500, 500, 500, 500, 500, 500], total=2078)
-    scroll_to_load_all(page, scroll_pause_ms=0, idle_rounds_before_giving_up=3)
-    captured = capsys.readouterr()
-    assert "stopped early" in captured.out
-    assert "500/2078" in captured.out
+    with pytest.raises(ExportError, match="stopped early"):
+        scroll_to_load_all(page, scroll_pause_ms=0, idle_rounds_before_giving_up=3)
 
 
 def test_raises_if_counter_text_not_found():
@@ -278,8 +279,9 @@ def test_sabotage_off_by_one_stop_condition_would_be_caught():
 
 def test_sabotage_idle_threshold_ignored_would_be_caught():
     page = FakePage(load_schedule=[80, 300, 500, 500, 500, 500, 500, 500, 500, 500], total=2078)
-    scroll_to_load_all(page, scroll_pause_ms=0, idle_rounds_before_giving_up=3)
-    # with a working idle check, it stops after 3 idle rounds past the
+    with pytest.raises(ExportError):
+        scroll_to_load_all(page, scroll_pause_ms=0, idle_rounds_before_giving_up=3)
+    # with a working idle check, it gives up after 3 idle rounds past the
     # last growth (index ~5), not after exhausting the whole schedule
     assert page.scroll_calls < 8
 
@@ -309,3 +311,35 @@ def test_sabotage_order_ids_wrong_order_would_be_caught():
     with pytest.raises(AssertionError):
         assert result == ["z", "x"]  # wrong -- input order, not feed order
     assert result == ["x", "z"]  # confirms actual correct (feed-order) behavior
+
+
+# ---------- _pace tests ----------
+
+class _FakePacePage:
+    def __init__(self):
+        self.waited_ms = []
+
+    def wait_for_timeout(self, ms):
+        self.waited_ms.append(ms)
+
+
+def test_pace_stays_within_configured_range():
+    page = _FakePacePage()
+    for _ in range(50):
+        _pace(page, (400, 900))
+    assert all(400 <= ms <= 900 for ms in page.waited_ms)
+
+
+def test_pace_uses_default_range_when_unspecified():
+    page = _FakePacePage()
+    _pace(page)
+    assert 400 <= page.waited_ms[0] <= 900  # EMAIL_SCRAPE_ACTION_PACE_MS default
+
+
+def test_sabotage_pace_out_of_range_would_be_caught():
+    page = _FakePacePage()
+    for _ in range(50):
+        _pace(page, (400, 900))
+    with pytest.raises(AssertionError):
+        assert any(ms > 900 for ms in page.waited_ms)  # none should exceed the range
+    assert all(ms <= 900 for ms in page.waited_ms)  # confirms actual correct behavior
