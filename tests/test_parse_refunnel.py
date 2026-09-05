@@ -101,25 +101,28 @@ def test_media_and_payments_can_merge_into_one_result():
     assert len(result.payments) == 3
 
 
-def test_rows_needing_email_scrape_excludes_none_status():
+def test_rows_needing_email_scrape_only_includes_requested():
     result = parse_media_csv(MEDIA_CSV)
     ids = rows_needing_email_scrape(result)
-    # only the 3 granted + 1 requested rows lack an email so far
-    assert len(ids) == 4
+    # sample file has 3 approved + 1 requested + 0 declined -- only the
+    # 1 requested row qualifies, confirmed from real evidence that
+    # approved/declined cards don't have the request button at all
+    assert len(ids) == 1
     for media_id in ids:
-        assert result.master[media_id]["rights_status"] != "NONE"
+        assert result.master[media_id]["rights_status"] == "REQUESTED"
+        assert media_id in result.rights_requested
+        assert media_id not in result.rights_approved
+        assert media_id not in result.rights_declined
 
 
-def test_rows_needing_email_scrape_shrinks_once_emails_supplied():
-    # simulate the modal-scrape step having found 2 of the 4 emails
+def test_rows_needing_email_scrape_shrinks_once_email_supplied():
     result = parse_media_csv(MEDIA_CSV)
     ids_before = rows_needing_email_scrape(result)
-    partial_emails = {ids_before[0]: "found@example.com", ids_before[1]: "also@example.com"}
+    partial_emails = {ids_before[0]: "found@example.com"}
     result2 = parse_media_csv(MEDIA_CSV, creator_emails=partial_emails)
     ids_after = rows_needing_email_scrape(result2)
-    assert len(ids_after) == 2
+    assert len(ids_after) == 0
     assert ids_before[0] not in ids_after
-    assert ids_before[1] not in ids_after
 
 
 def test_apply_creator_emails_updates_master_and_shared_bucket():
@@ -332,3 +335,4 @@ def test_sabotage_blank_id_check_would_be_caught():
         assert result.skipped_media_rows == 2
     finally:
         os.unlink(path)
+
