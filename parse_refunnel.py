@@ -11,7 +11,7 @@ Tabs produced:
     - master            (every media/content row, always kept, never deleted)
     - rights_approved    (media rows where rights_status == GRANTED)
     - rights_requested   (media rows where rights_status == REQUESTED)
-    - rights_declined    (media rows where rights_status == DECLINED)
+    - rights_declined    (media rows where rights_status == DENIED)
     - payments           (every payment row)
 
 Every row set is returned as a dict keyed by a stable id, so the sheet-sync
@@ -29,14 +29,15 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 
-# Refunnel's rights_status enum values, as confirmed from a real export.
-# DECLINED did not appear in the sample (0 rows) but is included on the
-# assumption it exists as a fourth enum value -- if Refunnel uses a
-# different literal for it, update RIGHTS_STATUS_MAP below.
+# Refunnel's rights_status enum values. Confirmed from a real 2078-row
+# export: NONE, REQUESTED, GRANTED, and DENIED -- note the last one is
+# "DENIED", not "DECLINED" as an earlier guess assumed (that guess was
+# wrong and silently routed 0 rows to the Declined tab even when real
+# denied rows existed -- fixed once real data surfaced the actual value).
 RIGHTS_STATUS_MAP = {
     "GRANTED": "rights_approved",
     "REQUESTED": "rights_requested",
-    "DECLINED": "rights_declined",
+    "DENIED": "rights_declined",
     # "NONE" -> stays in master only, no usage-rights tab
 }
 
