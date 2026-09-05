@@ -1,0 +1,9 @@
+playwright>=1.45
+gspread>=6.0
+google-auth>=2.30
+google-auth-oauthlib>=1.2
+google-api-python-client>=2.130
+requests>=2.31
+PyYAML>=6.0
+pytest>=8.0
+pyflakes>=3.2
