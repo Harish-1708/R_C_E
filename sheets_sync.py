@@ -31,6 +31,8 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Protocol
 
+from gspread.utils import rowcol_to_a1
+
 
 class SheetsClient(Protocol):
     """Minimal interface a tab-writer needs. One implementation per tab
@@ -139,6 +141,25 @@ class GspreadSheetsClient:
         # value_input_option="RAW" avoids Sheets trying to reinterpret
         # things like a caption that starts with "=" as a formula.
         self._ws.update(rows, value_input_option="RAW")
+
+        # Uneven row heights (a long caption wrapping to several lines
+        # right next to single-line rows) were flagged as hard to read.
+        # CLIP keeps every row a single, consistent height -- the full
+        # value is still there, just truncated visually until the
+        # column's widened or the cell's opened.
+        last_row = len(rows)
+        last_col = len(rows[0]) if rows else 1
+        full_range = f"A1:{rowcol_to_a1(last_row, last_col)}"
+        self._ws.format(full_range, {"wrapStrategy": "CLIP"})
+
+        # Bold header + frozen header row, so it stays visible on scroll
+        # and reads clearly as a header rather than a data row.
+        header_range = f"A1:{rowcol_to_a1(1, last_col)}"
+        self._ws.format(header_range, {"textFormat": {"bold": True}})
+        try:
+            self._ws.freeze(rows=1)
+        except Exception:
+            pass  # cosmetic only -- never worth failing the whole sync over
 
 
 def get_or_create_worksheet(spreadsheet, title: str, cols: int = 30):
