@@ -197,8 +197,24 @@ site. Please work through this checklist once real credentials exist:
   (`:left-of()`), which turned out wrong -- a real run clicked "Sort by"
   instead (also technically "left of" Create collection, just on a
   different row). Fixed using a real class name confirmed from an HTML
-  dump: `.upload-content-activator`. The menu item text ('Export Content
-  CSV') was already confirmed separately and is unchanged.
+  dump: `.upload-content-activator` -- confirmed genuinely unique (one
+  match in the page). The menu item text ('Export Content CSV') was
+  already confirmed separately and is unchanged.
+- [x] **Sticky header hides on scroll**: a follow-up real run then found
+  that same button correctly, but reported it as "hidden" -- confirmed
+  from two HTML dumps (before/after scrolling) that the header
+  containing it toggles `content-header-visible` -> `-hidden` once
+  scrolled down, i.e. exactly what `scroll_to_load_all()` does right
+  before this runs. Fixed: `export_media_csv` now scrolls the container
+  back to the top first.
+- [x] **Missing export-confirmation modal**: clicking 'Export Content
+  CSV' doesn't download immediately -- a real screenshot showed it opens
+  an "Export data in CSV format" modal with two choices, "Download to
+  device" (immediate, what we want) vs "Export to email" (async, emails
+  a link later). Fixed: `export_media_csv` now clicks "Download to
+  device" before expecting the download. Bonus confirmation from that
+  same screenshot: it showed "2078 of 2078 media" loaded, proving
+  `scroll_to_load_all()` is working correctly end-to-end.
 - [x] **Sidebar collapsed on load**: confirmed root cause of the actual
   failure, from a real screenshot + HTML dump -- the sidebar can load
   collapsed (`class="left-side-navbar collapsed"`), and while collapsed
