@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 
 # Refunnel's rights_status enum values. Confirmed from a real 2078-row
@@ -112,6 +112,9 @@ class ParseResult:
     rights_approved: Dict[str, dict] = field(default_factory=dict)
     rights_requested: Dict[str, dict] = field(default_factory=dict)
     rights_declined: Dict[str, dict] = field(default_factory=dict)
+    # Rows moved here (out of the three buckets above) once you mark
+    # them reviewed -- see apply_human_review_flags().
+    rights_reviewed: Dict[str, dict] = field(default_factory=dict)
     payments: Dict[str, dict] = field(default_factory=dict)
 
     # Simple counters for a post-run summary line, useful for logging /
@@ -235,16 +238,34 @@ def parse_payments_csv(path: str, result: Optional[ParseResult] = None) -> Parse
     return result
 
 
+def apply_human_review_flags(result: ParseResult, reviewed_ids: Iterable[str]) -> int:
+    """Move rows marked reviewed (via a manual 'Reviewed' column you add
+    to Master Data yourself -- mark it 'Yes' for any row) OUT of
+    whichever of the three rights-status tabs they're currently in, and
+    into the Human Review tab instead. The row itself is untouched in
+    Master Data -- this only changes which Usage Rights tab (if any) it
+    shows up in. Returns how many rows were moved, for logging.
+    """
+    moved = 0
+    for media_id in reviewed_ids:
+        row = result.master.get(media_id)
+        if row is None:
+            continue
+        result.rights_approved.pop(media_id, None)
+        result.rights_requested.pop(media_id, None)
+        result.rights_declined.pop(media_id, None)
+        result.rights_reviewed[media_id] = row
+        moved += 1
+    return moved
+
+
 def build_human_review_rows(result: ParseResult) -> Dict[str, dict]:
-    """Combine all three usage-rights buckets (approved/requested/
-    declined) into one row-set for the Human Review tab, trimmed to
-    HUMAN_REVIEW_COLUMNS. NONE-status rows are excluded -- there's
-    nothing to review until a request exists."""
-    combined: Dict[str, dict] = {}
-    for bucket in (result.rights_approved, result.rights_requested, result.rights_declined):
-        for media_id, row in bucket.items():
-            combined[media_id] = {col: row.get(col, "") for col in HUMAN_REVIEW_COLUMNS}
-    return combined
+    """Rows moved into Human Review by apply_human_review_flags(),
+    trimmed to HUMAN_REVIEW_COLUMNS."""
+    return {
+        media_id: {col: row.get(col, "") for col in HUMAN_REVIEW_COLUMNS}
+        for media_id, row in result.rights_reviewed.items()
+    }
 
 
 def apply_creator_emails(result: ParseResult, emails: Dict[str, str]) -> int:
