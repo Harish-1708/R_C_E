@@ -138,7 +138,7 @@ def main() -> int:
 
         if refunnel_export.SCRAPE_EMAILS_ENABLED:
             target_ids = parse_refunnel.rows_needing_email_scrape(result)
-            emails = refunnel_export.scrape_creator_emails(page, target_ids)
+            emails = refunnel_export.scrape_creator_emails(page, result.master, target_ids)
             updated = parse_refunnel.apply_creator_emails(result, emails)
             print(f"Scraped {updated} creator email(s) for usage-rights rows.")
 
@@ -154,11 +154,14 @@ def main() -> int:
         gc = gspread.service_account(filename=service_account_path)
         sh = gc.open_by_key(spreadsheet_id)
 
+        human_review_rows = parse_refunnel.build_human_review_rows(result)
+
         tab_plan = [
             ("Master Data", parse_refunnel.MASTER_COLUMNS, result.master),
             ("Usage Rights - Approved", parse_refunnel.MASTER_COLUMNS, result.rights_approved),
             ("Usage Rights - Requested", parse_refunnel.MASTER_COLUMNS, result.rights_requested),
             ("Usage Rights - Declined", parse_refunnel.MASTER_COLUMNS, result.rights_declined),
+            ("Human Review", parse_refunnel.HUMAN_REVIEW_COLUMNS, human_review_rows),
             ("Payments", parse_refunnel.PAYMENT_COLUMNS, result.payments),
         ]
 
