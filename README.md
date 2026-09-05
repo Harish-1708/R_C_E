@@ -222,11 +222,12 @@ site. Please work through this checklist once real credentials exist:
   originally guessed -- fixed in `RIGHTS_STATUS_MAP`, confirmed against
   the real 2 denied rows in that export, and that file is now a
   permanent test fixture (`tests/fixtures/real_media_2078.csv`).
-- [ ] **Payments page URL**: confirmed wrong by a real run -- page.goto
-  to the guessed `/dashboard/payments` left the browser on the same
-  Social Listening URL, meaning that route doesn't exist and the app's
-  router silently ignored it. Needs the real URL: visit the Payments
-  page yourself and send me its exact address.
+- [x] **Payments page URL**: confirmed wrong by a real run, then fixed
+  with the real URL you sent from your address bar --
+  `/dashboard/payments/history` (the guess was missing `/history`).
+  Payment export itself has no confirmation modal (unlike media), so it
+  should just work now that navigation lands in the right place --
+  still worth confirming on a real run.
 - [x] **Sidebar collapsed on load**: confirmed root cause of the actual
   failure, from a real screenshot + HTML dump -- the sidebar can load
   collapsed (`class="left-side-navbar collapsed"`), and while collapsed
