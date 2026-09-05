@@ -447,6 +447,7 @@ def scrape_creator_emails(
     media_ids: Iterable[str],
     scroll_container_selector: str = "#scrollableDiv",
     debug_dir: Optional[str] = None,
+    max_consecutive_failures: int = 8,
 ) -> dict:
     """For each media id needing an email, open its 'Request usage
     rights' flow, read the pre-filled email, and close WITHOUT sending
@@ -461,6 +462,18 @@ def scrape_creator_emails(
     clientHeight to debug_dir -- one snapshot, not one per failure, so
     it doesn't flood the artifact upload. Every failure still logs
     those same numbers to stdout regardless.
+
+    max_consecutive_failures: circuit breaker -- if this many attempts
+    IN A ROW fail, stop scraping the remaining ids and return whatever
+    was found so far, rather than grinding through everything. This
+    exists because a real run confirmed that once a post's usage rights
+    are Approved (or presumably Declined), its card footer is replaced
+    entirely with a status badge -- there's no request button to click
+    at all, so every such attempt is a GUARANTEED failure, not an
+    intermittent one. rows_needing_email_scrape() already excludes
+    approved/declined for exactly this reason, but if some other status
+    or edge case turns out to behave the same way, this stops a
+    multi-hour run before it happens rather than after.
 
     Flow -- confirmed from a real, complete HTML trace of the whole
     interaction (card -> popover -> modal):
@@ -497,6 +510,7 @@ def scrape_creator_emails(
 
     results: dict = {}
     debug_snapshot_saved = False
+    consecutive_failures = 0
     for media_id in _order_ids_for_scraping(media_rows, media_ids):
         try:
             grid_item, diagnostics = _scroll_until_card_found(page, media_id, scroll_container_selector)
@@ -506,18 +520,28 @@ def scrape_creator_emails(
                 if debug_dir and not debug_snapshot_saved:
                     _save_scrape_failure_snapshot(page, debug_dir, media_id)
                     debug_snapshot_saved = True
+                consecutive_failures += 1
+                if consecutive_failures >= max_consecutive_failures:
+                    print(
+                        f"scrape_creator_emails: {consecutive_failures} failures in a row -- "
+                        f"stopping early rather than grinding through the remaining ids. "
+                        f"Returning the {len(results)} email(s) found before this happened."
+                    )
+                    break
                 continue
 
             request_toggle = grid_item.locator(".usage-rights-request-card").first
             try:
-                request_toggle.scroll_into_view_if_needed(timeout=8000)
-                request_toggle.wait_for(state="visible", timeout=8000)
+                request_toggle.scroll_into_view_if_needed(timeout=4000)
+                request_toggle.wait_for(state="visible", timeout=4000)
             except Exception as e:
                 raise ExportError(
                     f"Card for media_id={media_id!r} was found in the DOM, but its "
                     f".usage-rights-request-card button never became visible/clickable "
-                    f"within 8s even after scroll_into_view_if_needed() -- may be "
-                    f"obscured by an overlay, or genuinely off-screen for another reason. "
+                    f"within 4s even after scroll_into_view_if_needed() -- may be "
+                    f"obscured by an overlay, or this post's rights status has already "
+                    f"been resolved (Approved/Declined cards replace this button with a "
+                    f"status badge instead -- confirmed from a real screenshot). "
                     f"Original error: {e}"
                 ) from e
             _safe_click(request_toggle)
@@ -541,12 +565,24 @@ def scrape_creator_emails(
 
             if email_value:
                 results[media_id] = email_value
+                consecutive_failures = 0
 
         except Exception as e:
             print(f"scrape_creator_emails: couldn't get email for media_id={media_id!r}: {e}")
             if debug_dir and not debug_snapshot_saved:
                 _save_scrape_failure_snapshot(page, debug_dir, media_id)
                 debug_snapshot_saved = True
+            consecutive_failures += 1
+            if consecutive_failures >= max_consecutive_failures:
+                print(
+                    f"scrape_creator_emails: {consecutive_failures} failures in a row -- "
+                    f"stopping early rather than grinding through the remaining ids. This "
+                    f"pattern usually means every remaining post shares the same problem "
+                    f"(e.g. a status whose card doesn't have this button at all), not bad "
+                    f"luck on individual posts. Returning the {len(results)} email(s) "
+                    f"found before this happened."
+                )
+                break
 
         finally:
             # Always try to back out via Escape, regardless of success/
