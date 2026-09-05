@@ -38,7 +38,17 @@ from playwright.sync_api import BrowserContext, Page, sync_playwright
 
 import gmail_otp
 
-REFUNNEL_LOGIN_URL = "https://app.refunnel.com/login"
+REFUNNEL_BASE_URL = "https://app.refunnel.com"
+REFUNNEL_LOGIN_URL = f"{REFUNNEL_BASE_URL}/login"
+# Confirmed from real analytics data embedded in a session export you
+# shared -- the actual dashboard path includes /dashboard/content/, not
+# just the page name.
+REFUNNEL_SOCIAL_LISTENING_URL = f"{REFUNNEL_BASE_URL}/dashboard/content/social-listening"
+# NOT yet confirmed the same way -- guessed from the same naming pattern
+# (a /dashboard/ prefix). If payments export fails with a similar
+# "nothing rendered" symptom, this is the first thing to check -- visit
+# the Payments page for real and copy its exact URL.
+REFUNNEL_PAYMENTS_URL = f"{REFUNNEL_BASE_URL}/dashboard/payments"
 # A URL/path Refunnel redirects logged-in users to, used to sanity-check
 # whether a session is still valid. Adjust if your dashboard's home
 # route is different.
