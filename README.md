@@ -159,6 +159,28 @@ by flipping its `schedule_enabled`).
 **No Refunnel API key is needed anywhere** -- there isn't one; everything
 goes through the browser-automation + CSV export path described below.
 
+## Debugging a failed run
+
+On any failure, `run_daily_sync.py` now saves a screenshot
+(`failure_screenshot.png`) and the raw page HTML (`failure_page.html`)
+into `downloads/<workspace>/debug/` -- and that whole `downloads/`
+folder is already uploaded as a workflow artifact (Actions tab -> the
+failed run -> Artifacts section -> `refunnel-csv-exports-<workspace>`),
+so you don't need to add anything to see it.
+
+This matters because "nothing rendered in time" can mean several
+different things that look identical from the error message alone:
+still on a login page, a wrong URL, or -- worth specifically checking
+for, since this site uses Cloudflare (`__cf_bm` cookie seen in your
+session export) -- a bot-detection challenge page instead of the real
+dashboard. Headless browsers running from datacenter IPs (like GitHub
+Actions runners) get challenged by Cloudflare far more often than a
+real browser on a home connection does, independent of whether the
+session/cookies are valid. If the screenshot shows a "Checking your
+browser..." / CAPTCHA-style page instead of Refunnel's actual UI, that
+confirms it, and the fix is different from a selector problem -- send
+me that screenshot if so.
+
 ## What's genuinely unverified -- please test before trusting the schedule
 
 I don't have network access to app.refunnel.com or Google's APIs from my
