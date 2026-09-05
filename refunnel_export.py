@@ -71,11 +71,13 @@ def select_workspace(
     'Search Workspaces' box and a list of workspace names -- confirmed
     from your screenshot of the OPEN dropdown).
 
-    Waits (up to timeout_ms) for ANY of the known workspace names to
-    render as visible text before doing anything -- this also covers
-    the page still client-side rendering right after navigation, which
-    is the most likely reason an earlier version of this failed
-    immediately after a fresh page.goto().
+    Confirmed from a real failure's HTML dump: the left sidebar can load
+    in a COLLAPSED state (`class="left-side-navbar collapsed"`), and in
+    that state the workspace name isn't in the DOM at all -- not just
+    hidden by CSS. There's a real expand control for it though: an
+    `<img alt="Toggle menu">`. So this checks briefly for a known
+    workspace name, and if the sidebar looks collapsed, clicks that
+    toggle and waits again with the full time budget.
 
     If workspace_name is already the active one, this is a no-op (skips
     opening the switcher at all).
@@ -85,16 +87,24 @@ def select_workspace(
     trigger = page.locator(combined_css).first
 
     try:
-        trigger.wait_for(state="visible", timeout=timeout_ms)
-    except Exception as e:
-        raise ExportError(
-            f"None of the known workspace names ({', '.join(all_known)}) became visible "
-            f"within {timeout_ms}ms of loading the page. Either the page needs longer to "
-            f"render after navigation, or the workspace switcher doesn't show the plain "
-            f"workspace name the way this assumes -- send a screenshot of the top-left "
-            f"switcher's HTML (right-click -> Inspect) so I can fix the selector for real. "
-            f"Original error: {e}"
-        ) from e
+        trigger.wait_for(state="visible", timeout=3000)
+    except Exception:
+        try:
+            page.get_by_alt_text("Toggle menu").click()
+        except Exception as e:
+            raise ExportError(
+                "Sidebar looked collapsed (no workspace name found in the page at all) and "
+                f"clicking the 'Toggle menu' expand control also failed. Original error: {e}"
+            ) from e
+        try:
+            trigger.wait_for(state="visible", timeout=timeout_ms)
+        except Exception as e:
+            raise ExportError(
+                f"Clicked the sidebar expand toggle but still no known workspace name "
+                f"({', '.join(all_known)}) became visible within {timeout_ms}ms. The sidebar "
+                f"may use a different expand control than expected, or something else is "
+                f"blocking rendering. Original error: {e}"
+            ) from e
 
     active_text = trigger.inner_text().strip()
 
