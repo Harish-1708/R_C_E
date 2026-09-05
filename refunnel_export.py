@@ -244,9 +244,14 @@ def export_payments_csv(page: Page, download_dir: str) -> str:
 def export_media_csv(page: Page, download_dir: str, scroll_container_selector: str = "#scrollableDiv") -> str:
     """Export the media/content CSV via Social Listening -> All Brand
     Mentions -> the '...' menu next to 'Create collection' -> 'Export
-    Content CSV' (confirmed from a real screenshot of that menu -- it
-    also has 'Save from a UGC link', 'Save a local file', and 'Bulk
-    upload media', which are unrelated upload actions, not this export).
+    Content CSV' -> a confirmation modal -> 'Download to device'
+    (confirmed from real screenshots; the menu also has 'Save from a
+    UGC link', 'Save a local file', and 'Bulk upload media', which are
+    unrelated upload actions, not this export; the modal's other option,
+    'Export to email', is async/emails a link later -- we want the
+    immediate one instead, and its own text confirms it only includes
+    "content currently loaded on the page", which is exactly why
+    scroll_to_load_all() runs first).
 
     The '...' button is `<div class="upload-content-activator"><img
     src=".../dottedMenuIconBlack....svg"></div>` -- confirmed unique
@@ -292,9 +297,25 @@ def export_media_csv(page: Page, download_dir: str, scroll_container_selector: s
             "The '...' menu opened but 'Export Content CSV' wasn't found in it -- "
             f"the menu's wording or structure may have changed. Original error: {e}"
         ) from e
+    export_item.first.click()
 
-    with page.expect_download(timeout=20000) as download_info:
-        export_item.first.click()
+    # Clicking "Export Content CSV" opens a confirmation modal ("Export
+    # data in CSV format") with two options -- "Download to device"
+    # (immediate, only what's currently loaded -- what we want, since
+    # scroll_to_load_all() already loaded everything) vs "Export to
+    # email" (async, emails a link later). Confirmed from a real
+    # screenshot of that modal.
+    download_option = page.get_by_text(re.compile(r"Download to device", re.I))
+    try:
+        download_option.first.wait_for(state="visible", timeout=8000)
+    except Exception as e:
+        raise ExportError(
+            "Clicked 'Export Content CSV' but the 'Download to device' confirmation modal "
+            f"never appeared. Original error: {e}"
+        ) from e
+
+    with page.expect_download(timeout=30000) as download_info:
+        download_option.first.click()
     download = download_info.value
 
     out_path = str(Path(download_dir) / f"media_content-{int(time.time())}.csv")
