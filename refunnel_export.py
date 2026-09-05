@@ -47,7 +47,7 @@ from playwright.sync_api import Page
 
 # Turn this on only after you've manually verified scrape_creator_email()
 # against the real site -- see module docstring and README.
-SCRAPE_EMAILS_ENABLED = False
+SCRAPE_EMAILS_ENABLED = True
 
 # Refunnel's "Request usage rights" flow has a "Send request" button
 # (confirmed from your screenshot). We refuse to click anything whose
@@ -341,64 +341,117 @@ def _safe_click(locator) -> None:
     locator.click()
 
 
-def scrape_creator_emails(page: Page, media_rows: dict, media_ids: Iterable[str]) -> dict:
+def _order_ids_for_scraping(media_rows: dict, media_ids: Iterable[str]) -> list:
+    """Process ids in the same order they appear in media_rows (CSV/feed
+    order), not whatever order media_ids happens to be in. Since we
+    scroll forward monotonically to bring virtualized cards into view
+    (see scrape_creator_emails), matching the feed's own order means one
+    forward pass covers everything instead of scrolling back and forth."""
+    wanted = set(media_ids)
+    return [mid for mid in media_rows if mid in wanted]
+
+
+def _scroll_until_card_found(
+    page: Page,
+    media_id: str,
+    scroll_container_selector: str,
+    max_rounds: int = 200,
+    scroll_step: int = 800,
+    pause_ms: int = 150,
+):
+    """react-virtuoso (the grid library this page uses) only keeps
+    nearby cards mounted in the DOM, unmounting far-off ones as you
+    scroll -- confirmed from a real HTML dump. So a card matching
+    media_id may simply not exist in the DOM yet/anymore. This scrolls
+    `scroll_container_selector` forward in small steps until a card
+    containing that media_id's thumbnail (matched by image src, which
+    embeds the id) appears, or gives up. Returns the matching Locator,
+    or None.
+    """
+    selector = f"div.rf-virtuoso-item:has(img[src*='{media_id}'])"
+    for _ in range(max_rounds):
+        card = page.locator(selector)
+        if card.count() > 0:
+            return card.first
+        page.evaluate(
+            "(args) => { const el = document.querySelector(args.sel); "
+            "if (el) { el.scrollTop += args.step; } }",
+            {"sel": scroll_container_selector, "step": scroll_step},
+        )
+        page.wait_for_timeout(pause_ms)
+    return None
+
+
+def scrape_creator_emails(
+    page: Page,
+    media_rows: dict,
+    media_ids: Iterable[str],
+    scroll_container_selector: str = "#scrollableDiv",
+) -> dict:
     """For each media id needing an email, open its 'Request usage
-    rights' flow, select the Email tab to reveal the pre-filled
-    address, read it, and close WITHOUT sending anything -- closes via
-    the Escape key rather than hunting for a close button, since Escape
-    can't submit a form and works across virtually any modal
-    implementation.
+    rights' flow, read the pre-filled email, and close WITHOUT sending
+    anything -- closes via the Escape key rather than a close button,
+    since Escape can't submit a form.
 
     Returns {media_id: email} for whichever ones had an email available
-    (some won't, per your note -- that's expected, not an error).
+    (some won't -- that's expected, not an error).
 
-    Flow confirmed from real screenshots:
-      1. Each post card has a "Request usage rights" toggle under it.
-         Clicking it reveals a small menu whose TOP item is "Request
-         usage-rights" (distinct from "Request whitelisting-rights"
-         below it, and from "Set usage-rights labels" further down).
-      2. That opens a modal with three channel tabs: Email / TikTok DM /
-         TT Shop DM.
-      3. The Email tab shows a pre-filled "Creator email address" field.
+    Flow -- confirmed from a real, complete HTML trace of the whole
+    interaction (card -> popover -> modal):
+      1. Each post card (a react-virtuoso grid item, matched here by its
+         thumbnail image src containing the media id) has a
+         `.usage-rights-request-card` toggle. Clicking it reveals a
+         popover whose menu items include a top one with the exact text
+         "Request usage-rights" (`role="menuitem"`), distinct from
+         "Request whitelisting-rights" below it.
+      2. That opens a modal (`.usageRightsModal`) with three channel
+         tabs (`.ur-tab-card`): Email / TikTok DM / TT Shop DM -- Email
+         is active by default.
+      3. The email field has a real, properly-linked
+         `<label>Creator email address</label>`, so `get_by_label()`
+         finds it directly.
+      4. The confirmed "Send request" button (`.ur-bottom-btn`) is never
+         clicked -- `_safe_click`'s pattern check refuses it regardless.
 
-    STILL UNVERIFIED: which exact element identifies a single post's
-    card in the DOM (this uses a `div:has-text(username)` match, which
-    could be ambiguous if a creator has multiple posts visible at once).
-    Don't enable SCRAPE_EMAILS_ENABLED until you've sent an HTML dump of
-    one card (right-click -> Inspect) the same way we nailed down every
-    other selector in this project -- see README "Enabling email
-    scraping safely".
+    Since react-virtuoso virtualizes the grid, a target card may not be
+    mounted in the DOM at all if scroll_to_load_all() already scrolled
+    past it -- _scroll_until_card_found() scrolls forward to bring it
+    back before interacting with it.
     """
     if not SCRAPE_EMAILS_ENABLED:
         print("scrape_creator_emails: SCRAPE_EMAILS_ENABLED is False, skipping. "
               "See refunnel_export.py module docstring.")
         return {}
 
-    results: dict = {}
-    for media_id in media_ids:
-        row = media_rows.get(media_id)
-        if row is None:
-            continue
-        username = row.get("username", "")
-        if not username:
-            continue
+    page.evaluate(
+        "(sel) => { const el = document.querySelector(sel); if (el) { el.scrollTop = 0; } }",
+        scroll_container_selector,
+    )
+    page.wait_for_timeout(500)
 
+    results: dict = {}
+    for media_id in _order_ids_for_scraping(media_rows, media_ids):
         try:
-            card = page.locator(f"div:has-text('{username}')").last
-            request_toggle = card.get_by_text(re.compile(r"Request usage rights", re.I)).first
+            grid_item = _scroll_until_card_found(page, media_id, scroll_container_selector)
+            if grid_item is None:
+                print(f"scrape_creator_emails: couldn't locate media_id={media_id!r} on the page "
+                      f"after scrolling through everything.")
+                continue
+
+            request_toggle = grid_item.locator(".usage-rights-request-card").first
             _safe_click(request_toggle)
 
-            top_menu_item = page.get_by_text(re.compile(r"^Request usage-rights$", re.I)).first
+            top_menu_item = page.get_by_role("menuitem", name=re.compile(r"^Request usage-rights$", re.I)).first
             top_menu_item.wait_for(state="visible", timeout=5000)
             _safe_click(top_menu_item)
 
-            email_tab = page.get_by_text(re.compile(r"^Email$", re.I)).first
+            # Email tab is active by default, but click it explicitly in
+            # case that ever changes.
+            email_tab = page.locator(".ur-tab-card", has_text="Email").first
             email_tab.wait_for(state="visible", timeout=5000)
             _safe_click(email_tab)
 
             email_input = page.get_by_label(re.compile(r"Creator email address", re.I))
-            if email_input.count() == 0:
-                email_input = page.locator(":below(:text('Creator email address'))").locator("input").first
             email_input.wait_for(state="visible", timeout=5000)
             email_value = (email_input.input_value() or "").strip()
 
@@ -406,8 +459,7 @@ def scrape_creator_emails(page: Page, media_rows: dict, media_ids: Iterable[str]
                 results[media_id] = email_value
 
         except Exception as e:
-            print(f"scrape_creator_emails: couldn't get email for media_id={media_id!r} "
-                  f"(username={username!r}): {e}")
+            print(f"scrape_creator_emails: couldn't get email for media_id={media_id!r}: {e}")
 
         finally:
             # Always try to back out via Escape, regardless of success/
