@@ -177,15 +177,22 @@ site. Please work through this checklist once real credentials exist:
   button itself is still located by screen position (`:left-of()`) since
   it has no visible label, so it's worth a quick manual check.
 - [ ] **Workspace switcher** (`select_workspace` in `refunnel_export.py`):
-  built from your screenshot of the *opened* dropdown (search box +
-  workspace list); the collapsed trigger's markup is still unconfirmed.
-  First attempt (Sept 5) failed immediately on a real run -- fixed to
-  properly *wait* for the page to finish rendering before giving up
-  (likely just a timing issue, not a wrong selector), but this still
-  needs a real run to confirm. If it fails again with "None of the
-  known workspace names ... became visible", right-click the top-left
-  switcher on the live page -> Inspect -> send me that element's HTML
-  so I can target it precisely instead of by visible text.
+  built from your screenshot of the *opened* dropdown; the collapsed
+  trigger's markup is still unconfirmed. The Sept 5 run's failure turned
+  out to be caused by a **wrong navigation URL**, not the switcher logic
+  itself (see below) -- the page it landed on never rendered a workspace
+  name at all. Now that the URL is fixed, this needs a fresh real run to
+  actually test the switcher logic for the first time.
+- [x] **Social Listening page URL**: was guessed (`/social-listening`),
+  actually confirmed wrong by a real run -- the real path is
+  `/dashboard/content/social-listening`, found in analytics data embedded
+  in a session export you shared. Fixed in `refunnel_auth.py`
+  (`REFUNNEL_SOCIAL_LISTENING_URL`).
+- [ ] **Payments page URL**: still a guess (`/dashboard/payments`,
+  following the same pattern as above) -- not confirmed the same way.
+  If the payments export fails with a similar "nothing rendered"
+  symptom, check this first: visit the real Payments page and send me
+  its exact URL.
 - [ ] **Scroll-to-load-all counter text** (`count_text_pattern` in
   `scroll_to_load_all`): based on the "80 of 2078 media" / "20 of 2078
   media" text visible in your screenshots. Confirm the pattern still
