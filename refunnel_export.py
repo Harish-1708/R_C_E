@@ -41,7 +41,7 @@ import random
 import re
 import time
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 from playwright.sync_api import Page
 
@@ -447,7 +447,8 @@ def scrape_creator_emails(
     media_ids: Iterable[str],
     scroll_container_selector: str = "#scrollableDiv",
     debug_dir: Optional[str] = None,
-    max_consecutive_failures: int = 8,
+    max_consecutive_failures: int = 25,
+    on_email_found: Optional[Callable[[str, str], None]] = None,
 ) -> dict:
     """For each media id needing an email, open its 'Request usage
     rights' flow, read the pre-filled email, and close WITHOUT sending
@@ -463,17 +464,31 @@ def scrape_creator_emails(
     it doesn't flood the artifact upload. Every failure still logs
     those same numbers to stdout regardless.
 
-    max_consecutive_failures: circuit breaker -- if this many attempts
-    IN A ROW fail, stop scraping the remaining ids and return whatever
-    was found so far, rather than grinding through everything. This
-    exists because a real run confirmed that once a post's usage rights
-    are Approved (or presumably Declined), its card footer is replaced
-    entirely with a status badge -- there's no request button to click
-    at all, so every such attempt is a GUARANTEED failure, not an
-    intermittent one. rows_needing_email_scrape() already excludes
-    approved/declined for exactly this reason, but if some other status
-    or edge case turns out to behave the same way, this stops a
-    multi-hour run before it happens rather than after.
+    on_email_found(media_id, email): if given, called immediately after
+    each email is successfully found -- before moving to the next post.
+    Use this to save progress to the sheet AS IT HAPPENS (e.g. via
+    GspreadSheetsClient.update_single_cell) rather than only at the very
+    end, so a later interruption doesn't lose emails already found. A
+    failure inside this callback is caught and logged, not allowed to
+    abort the whole scraping loop.
+
+    Every individual post failing is ALREADY handled by design -- one
+    bad post (page didn't load, element timing, whatever) just gets
+    skipped and the loop moves to the next id. That's the normal,
+    expected behavior and needs no special handling.
+
+    max_consecutive_failures is a separate, LAST-RESORT circuit breaker
+    for a genuinely systemic pattern, not for occasional one-off
+    failures -- default 25 is deliberately generous so isolated
+    failures never trigger it. It exists because a real run confirmed
+    that once a post's usage rights are Approved (or presumably
+    Declined), its card footer is replaced entirely with a status badge
+    -- there's no request button to click at all, so every such attempt
+    is a GUARANTEED failure, not intermittent bad luck.
+    rows_needing_email_scrape() already excludes approved/declined for
+    exactly this reason, but if some other status or edge case turns
+    out to behave the same way, this stops a multi-hour run before it
+    happens rather than after.
 
     Flow -- confirmed from a real, complete HTML trace of the whole
     interaction (card -> popover -> modal):
@@ -566,6 +581,13 @@ def scrape_creator_emails(
             if email_value:
                 results[media_id] = email_value
                 consecutive_failures = 0
+                if on_email_found:
+                    try:
+                        on_email_found(media_id, email_value)
+                    except Exception as e:
+                        print(f"scrape_creator_emails: on_email_found callback failed for "
+                              f"media_id={media_id!r} (email was still found, just not "
+                              f"saved incrementally): {e}")
 
         except Exception as e:
             print(f"scrape_creator_emails: couldn't get email for media_id={media_id!r}: {e}")
