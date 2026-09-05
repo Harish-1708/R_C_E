@@ -44,11 +44,12 @@ REFUNNEL_LOGIN_URL = f"{REFUNNEL_BASE_URL}/login"
 # shared -- the actual dashboard path includes /dashboard/content/, not
 # just the page name.
 REFUNNEL_SOCIAL_LISTENING_URL = f"{REFUNNEL_BASE_URL}/dashboard/content/social-listening"
-# NOT yet confirmed the same way -- guessed from the same naming pattern
-# (a /dashboard/ prefix). If payments export fails with a similar
-# "nothing rendered" symptom, this is the first thing to check -- visit
-# the Payments page for real and copy its exact URL.
-REFUNNEL_PAYMENTS_URL = f"{REFUNNEL_BASE_URL}/dashboard/payments"
+# Confirmed for real (you sent the exact URL from your address bar):
+# https://app.refunnel.com/dashboard/payments/history -- the earlier
+# guess (`/dashboard/payments`, missing `/history`) was wrong, which is
+# why a real run stayed on the Social Listening page and never found
+# an Export button at all.
+REFUNNEL_PAYMENTS_URL = f"{REFUNNEL_BASE_URL}/dashboard/payments/history"
 # A URL/path Refunnel redirects logged-in users to, used to sanity-check
 # whether a session is still valid. Adjust if your dashboard's home
 # route is different.
