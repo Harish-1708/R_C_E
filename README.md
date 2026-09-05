@@ -198,13 +198,15 @@ site. Please work through this checklist once real credentials exist:
   then 'Export Content CSV'. The menu item text is solid; the '...'
   button itself is still located by screen position (`:left-of()`) since
   it has no visible label, so it's worth a quick manual check.
-- [ ] **Workspace switcher** (`select_workspace` in `refunnel_export.py`):
-  built from your screenshot of the *opened* dropdown; the collapsed
-  trigger's markup is still unconfirmed. The Sept 5 run's failure turned
-  out to be caused by a **wrong navigation URL**, not the switcher logic
-  itself (see below) -- the page it landed on never rendered a workspace
-  name at all. Now that the URL is fixed, this needs a fresh real run to
-  actually test the switcher logic for the first time.
+- [x] **Sidebar collapsed on load**: confirmed root cause of the actual
+  failure, from a real screenshot + HTML dump -- the sidebar can load
+  collapsed (`class="left-side-navbar collapsed"`), and while collapsed
+  the workspace name isn't in the DOM at all, not just hidden. Fixed:
+  `select_workspace` now clicks the sidebar's own `<img alt="Toggle
+  menu">` expand control if no workspace name appears within 3s, then
+  waits again with the full time budget. Still worth confirming on a
+  real run that this actually resolves it end-to-end (the toggle click
+  itself hasn't been exercised against the live site).
 - [x] **Social Listening page URL**: was guessed (`/social-listening`),
   actually confirmed wrong by a real run -- the real path is
   `/dashboard/content/social-listening`, found in analytics data embedded
