@@ -178,11 +178,14 @@ site. Please work through this checklist once real credentials exist:
   it has no visible label, so it's worth a quick manual check.
 - [ ] **Workspace switcher** (`select_workspace` in `refunnel_export.py`):
   built from your screenshot of the *opened* dropdown (search box +
-  workspace list), but I've never seen the collapsed trigger's actual
-  markup -- it's located by clicking whichever known workspace name is
-  currently showing at the top of the page. Test by running against a
-  non-default workspace (e.g. Swoveralls) and confirming it actually
-  switches before the export runs.
+  workspace list); the collapsed trigger's markup is still unconfirmed.
+  First attempt (Sept 5) failed immediately on a real run -- fixed to
+  properly *wait* for the page to finish rendering before giving up
+  (likely just a timing issue, not a wrong selector), but this still
+  needs a real run to confirm. If it fails again with "None of the
+  known workspace names ... became visible", right-click the top-left
+  switcher on the live page -> Inspect -> send me that element's HTML
+  so I can target it precisely instead of by visible text.
 - [ ] **Scroll-to-load-all counter text** (`count_text_pattern` in
   `scroll_to_load_all`): based on the "80 of 2078 media" / "20 of 2078
   media" text visible in your screenshots. Confirm the pattern still
