@@ -42,8 +42,19 @@ REFUNNEL_BASE_URL = "https://app.refunnel.com"
 REFUNNEL_LOGIN_URL = f"{REFUNNEL_BASE_URL}/login"
 # Confirmed from real analytics data embedded in a session export you
 # shared -- the actual dashboard path includes /dashboard/content/, not
-# just the page name.
-REFUNNEL_SOCIAL_LISTENING_URL = f"{REFUNNEL_BASE_URL}/dashboard/content/social-listening"
+# just the page name. The insights_timeline param is added on purpose:
+# with no date filter at all, Refunnel defaults to "Last 3 months"
+# (confirmed from every real screenshot's filter dropdown), capping
+# Master Data around ~2065-2088 rows even though you confirmed 2771
+# exist under "Last 12 months". This matches that exact filter, so the
+# daily pull actually covers what you were seeing manually. Note this
+# is still a ROLLING 12-month window, not "all time" -- content older
+# than 12 months would eventually age out of a fresh export, but
+# Master Data's never_delete=True protection means it's never actually
+# lost from the sheet even if a later pull no longer includes it.
+REFUNNEL_SOCIAL_LISTENING_URL = (
+    f"{REFUNNEL_BASE_URL}/dashboard/content/social-listening?insights_timeline=%22last12months%22"
+)
 # Confirmed for real (you sent the exact URL from your address bar):
 # https://app.refunnel.com/dashboard/payments/history -- the earlier
 # guess (`/dashboard/payments`, missing `/history`) was wrong, which is
