@@ -108,30 +108,55 @@ def sync_tab(
     id_col: str = "id",
     sort_key: Optional[str] = None,
     max_shrink_fraction: Optional[float] = None,
+    never_delete: bool = False,
 ) -> dict:
     """Rewrite one tab from `target_rows` (id -> row dict, using
     `known_columns` as keys), preserving any extra manual columns already
     present in the sheet.
 
+    never_delete: for tabs that should ONLY ever gain rows or have
+    existing ones updated -- never lose one (Master Data, Payments). If
+    True, any id that's in the sheet already but NOT in this run's
+    target_rows is carried forward unchanged rather than dropped. This
+    is a stronger guarantee than max_shrink_fraction (which just refuses
+    a suspiciously large drop) -- with never_delete, a row can only be
+    removed by an explicit "forget this" action elsewhere, never by
+    simply not appearing in one day's pull. Do NOT set this for tabs
+    that are supposed to lose rows by design (Usage Rights tabs when a
+    status changes; Human Review's source tabs when something's
+    reviewed) -- those still need the normal full-rewrite behavior.
+
     max_shrink_fraction: opt-in safety net for tabs that should only
-    ever grow or hold steady (Master Data, Payments) -- NOT for tabs
-    that are expected to shrink by design (Usage Rights tabs lose rows
-    when you mark them Reviewed; that's normal). If set, and the
-    existing tab already has rows, and target_rows is smaller than
-    existing by more than this fraction, raises SuspiciousShrinkError
-    and does NOT touch the sheet at all. This exists because every tab
-    here is a full rewrite -- an incomplete data pull (e.g. a browser
-    scroll that stalled early) would otherwise silently delete real
-    rows a previous, complete run had correctly written.
+    ever grow or hold steady -- NOT for tabs that are expected to shrink
+    by design (Usage Rights tabs lose rows when you mark them
+    Reviewed; that's normal). Ignored when never_delete is True, since
+    a shrink is already structurally impossible in that mode. If set,
+    and the existing tab already has rows, and target_rows is smaller
+    than existing by more than this fraction, raises
+    SuspiciousShrinkError and does NOT touch the sheet at all. This
+    exists because every tab here is a full rewrite -- an incomplete
+    data pull (e.g. a browser scroll that stalled early) would
+    otherwise silently delete real rows a previous, complete run had
+    correctly written.
 
     Returns a small summary dict, useful for logging:
-        {"rows_written": int, "extra_columns_preserved": [str, ...]}
+        {"rows_written": int, "extra_columns_preserved": [str, ...],
+         "rows_carried_forward": int}
     """
     existing = client.read_all()
     existing_header = existing[0] if existing else list(known_columns)
     existing_data = existing[1:] if len(existing) > 1 else []
 
-    if max_shrink_fraction is not None:
+    rows_carried_forward = 0
+    if never_delete:
+        existing_by_id_full = _index_by_id(existing_header, existing_data, id_col)
+        merged = dict(target_rows)
+        for row_id, old_row in existing_by_id_full.items():
+            if row_id not in merged:
+                merged[row_id] = {col: old_row.get(col, "") for col in known_columns}
+                rows_carried_forward += 1
+        target_rows = merged
+    elif max_shrink_fraction is not None:
         existing_count = len(existing_data)
         new_count = len(target_rows)
         if existing_count > 0 and new_count < existing_count * (1 - max_shrink_fraction):
@@ -169,6 +194,7 @@ def sync_tab(
     return {
         "rows_written": len(ids),
         "extra_columns_preserved": extra_columns,
+        "rows_carried_forward": rows_carried_forward,
     }
 
 
