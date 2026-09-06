@@ -164,7 +164,7 @@ def main() -> int:
             # including Master Data again) reconciles everything
             # regardless, so this is a safety net, not the only write.
             print("Writing Master Data once before scraping starts, so progress can be saved incrementally...")
-            sheets_sync.sync_tab(master_client, parse_refunnel.MASTER_COLUMNS, result.master, max_shrink_fraction=0.1)
+            sheets_sync.sync_tab(master_client, parse_refunnel.MASTER_COLUMNS, result.master, never_delete=True)
 
             def _save_email_incrementally(media_id: str, email: str) -> None:
                 found = master_client.update_single_cell(media_id, "creator_email", email)
@@ -212,21 +212,30 @@ def main() -> int:
         # tabs and Human Review are expected to shrink by design (rows
         # move out when marked Reviewed, or between status tabs), so a
         # shrink there is normal, not a sign of an incomplete pull.
+        # never_delete=True for Master Data and Payments: an id already
+        # in the sheet is carried forward even if it's missing from
+        # this run's pull, so a bad export can never quietly delete
+        # real rows -- only add new ones or update existing ones.
+        # Usage Rights tabs and Human Review are NOT protected this way
+        # on purpose -- rows moving out of them (a status changing, a
+        # post marked Reviewed) is correct, intended behavior, not data
+        # loss.
         tab_plan = [
-            ("Master Data", parse_refunnel.MASTER_COLUMNS, result.master, 0.1),
-            ("Usage Rights - Approved", parse_refunnel.MASTER_COLUMNS, result.rights_approved, None),
-            ("Usage Rights - Requested", parse_refunnel.MASTER_COLUMNS, result.rights_requested, None),
-            ("Usage Rights - Declined", parse_refunnel.MASTER_COLUMNS, result.rights_declined, None),
-            ("Human Review", parse_refunnel.HUMAN_REVIEW_COLUMNS, human_review_rows, None),
-            ("Payments", parse_refunnel.PAYMENT_COLUMNS, result.payments, 0.1),
+            ("Master Data", parse_refunnel.MASTER_COLUMNS, result.master, True),
+            ("Usage Rights - Approved", parse_refunnel.MASTER_COLUMNS, result.rights_approved, False),
+            ("Usage Rights - Requested", parse_refunnel.MASTER_COLUMNS, result.rights_requested, False),
+            ("Usage Rights - Declined", parse_refunnel.MASTER_COLUMNS, result.rights_declined, False),
+            ("Human Review", parse_refunnel.HUMAN_REVIEW_COLUMNS, human_review_rows, False),
+            ("Payments", parse_refunnel.PAYMENT_COLUMNS, result.payments, True),
         ]
 
-        for title, columns, rows, max_shrink_fraction in tab_plan:
+        for title, columns, rows, never_delete in tab_plan:
             ws = sheets_sync.get_or_create_worksheet(sh, title)
             client = sheets_sync.GspreadSheetsClient(ws)
-            summary = sheets_sync.sync_tab(client, columns, rows, max_shrink_fraction=max_shrink_fraction)
+            summary = sheets_sync.sync_tab(client, columns, rows, never_delete=never_delete)
             print(f"{title}: wrote {summary['rows_written']} rows "
-                  f"(preserved columns: {summary['extra_columns_preserved']})")
+                  f"(preserved columns: {summary['extra_columns_preserved']}, "
+                  f"carried forward: {summary['rows_carried_forward']})")
 
         return 0
 
