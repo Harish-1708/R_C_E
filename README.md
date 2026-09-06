@@ -85,10 +85,21 @@ run.
   combine all of Approved+Requested+Declined into one tab regardless of
   whether you'd looked at them -- this was the wrong design, per your
   feedback, and is now fixed.)
-- **Consistent row heights.** Every tab now uses CLIP text wrapping
-  (long values stay on one line, truncated visually rather than
-  wrapping the row taller) instead of the uneven wrapping you saw
-  before, plus a bolded, frozen header row.
+- **Consistent row heights, for real this time.** CLIP text wrapping
+  alone wasn't enough -- confirmed from a real sheet screenshot that
+  the actual cause was captions containing genuine embedded newline
+  characters (from the original post's own line breaks), which force
+  multi-line rendering regardless of wrap setting. Every cell value now
+  has embedded newlines collapsed to a single space before being
+  written (`_flatten_cell` in `sheets_sync.py`), so every row is
+  uniformly single-line. CLIP + a bolded, frozen header still apply on
+  top.
+- **Newest content at the top.** Master Data and the media-derived tabs
+  now sort by `created_at` descending (Human Review by `updated_at`
+  descending) -- safe because those are ISO-format timestamps, which
+  sort correctly as plain strings. Payments is left on the default
+  id-based sort, since its date field ("Sep 4, 2026") does NOT sort
+  correctly as a plain string across month/year boundaries.
 
 ## Layout
 
