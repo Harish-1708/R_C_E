@@ -276,19 +276,27 @@ def main() -> int:
         # on purpose -- rows moving out of them (a status changing, a
         # post marked Reviewed) is correct, intended behavior, not data
         # loss.
+        # sort_key/sort_reverse puts newest content at the top -- safe
+        # here because created_at/updated_at are ISO-format timestamps,
+        # which sort correctly as plain strings. Payments' date field
+        # ("Sep 4, 2026") does NOT sort correctly that way, so it's left
+        # on the default id-based sort rather than risk a wrong order.
         tab_plan = [
-            ("Master Data", parse_refunnel.MASTER_COLUMNS, result.master, True),
-            ("Usage Rights - Approved", parse_refunnel.MASTER_COLUMNS, result.rights_approved, False),
-            ("Usage Rights - Requested", parse_refunnel.MASTER_COLUMNS, result.rights_requested, False),
-            ("Usage Rights - Declined", parse_refunnel.MASTER_COLUMNS, result.rights_declined, False),
-            ("Human Review", parse_refunnel.HUMAN_REVIEW_COLUMNS, human_review_rows, False),
-            ("Payments", parse_refunnel.PAYMENT_COLUMNS, result.payments, True),
+            ("Master Data", parse_refunnel.MASTER_COLUMNS, result.master, True, "created_at"),
+            ("Usage Rights - Approved", parse_refunnel.MASTER_COLUMNS, result.rights_approved, False, "created_at"),
+            ("Usage Rights - Requested", parse_refunnel.MASTER_COLUMNS, result.rights_requested, False, "created_at"),
+            ("Usage Rights - Declined", parse_refunnel.MASTER_COLUMNS, result.rights_declined, False, "created_at"),
+            ("Human Review", parse_refunnel.HUMAN_REVIEW_COLUMNS, human_review_rows, False, "updated_at"),
+            ("Payments", parse_refunnel.PAYMENT_COLUMNS, result.payments, True, None),
         ]
 
-        for title, columns, rows, never_delete in tab_plan:
+        for title, columns, rows, never_delete, sort_key in tab_plan:
             ws = sheets_sync.get_or_create_worksheet(sh, title)
             client = sheets_sync.GspreadSheetsClient(ws)
-            summary = sheets_sync.sync_tab(client, columns, rows, never_delete=never_delete)
+            summary = sheets_sync.sync_tab(
+                client, columns, rows, never_delete=never_delete,
+                sort_key=sort_key, sort_reverse=(sort_key is not None),
+            )
             print(f"{title}: wrote {summary['rows_written']} rows "
                   f"(preserved columns: {summary['extra_columns_preserved']}, "
                   f"carried forward: {summary['rows_carried_forward']})")
