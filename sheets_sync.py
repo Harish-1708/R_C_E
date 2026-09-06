@@ -32,6 +32,7 @@ from __future__ import annotations
 from typing import Dict, List, Optional, Protocol
 
 from gspread.utils import rowcol_to_a1
+import gspread.exceptions
 
 
 class SheetsClient(Protocol):
@@ -275,8 +276,19 @@ class GspreadSheetsClient:
 
 def get_or_create_worksheet(spreadsheet, title: str, cols: int = 30):
     """Fetch a worksheet by title, creating it (blank) if missing. Used
-    for the one-time "create the sheet from scratch" setup step."""
+    for the one-time "create the sheet from scratch" setup step.
+
+    Only catches WorksheetNotFound specifically -- confirmed from a real
+    run that catching a bare Exception here is a real bug: a transient
+    503 from Google's side (nothing to do with whether the sheet
+    exists) was being misread as "doesn't exist yet", triggering an
+    attempt to create a duplicate, which then failed for real because
+    the sheet was there all along. Any other error (a genuine outage, a
+    permissions problem, etc.) now propagates and fails the run
+    honestly instead of masking itself as a confusing "already exists"
+    error one level down.
+    """
     try:
         return spreadsheet.worksheet(title)
-    except Exception:
+    except gspread.exceptions.WorksheetNotFound:
         return spreadsheet.add_worksheet(title=title, rows=1000, cols=cols)
