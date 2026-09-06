@@ -368,6 +368,26 @@ site. Please work through this checklist once real credentials exist:
   wrapped in its own try/except. Additionally, `run_daily_sync.py` now
   catches a scraping-level crash entirely and continues to the rest of
   the pipeline rather than aborting the whole run.
+- [x] **A crashed browser no longer poisons the rest of the run
+  either.** A second real run showed the *next* problem once the above
+  was fixed: the circuit breaker correctly stopped scraping after the
+  browser crashed, but the following step (navigating to Payments)
+  then failed too, since it tried to reuse the same already-dead page.
+  `run_daily_sync.py` now checks whether the page survived scraping
+  (`page.evaluate("() => 1")`) and, if not, closes out the dead
+  browser and gets a fresh logged-in session (reusing the saved
+  cookies -- no full re-login needed) before continuing to Payments.
+- [ ] **Still open: the browser itself crashes periodically during
+  very long scraping sessions** (confirmed twice now, both times deep
+  into the widened ~2065-post scan). The fixes above make each crash
+  survivable rather than fatal, but don't reduce how often it happens
+  -- a long-lived single Chromium instance doing thousands of DOM
+  interactions is exactly the kind of load that leads to this. A more
+  complete fix would periodically restart the browser *during*
+  scraping (not just recover once after), keeping memory bounded
+  throughout -- not yet built, since it requires restructuring
+  `scrape_creator_emails`'s loop to support swapping out `page`
+  mid-scan. Worth building if crashes keep recurring after this fix.
 - [x] **Other tabs are now copied from Master Data's actual sheet
   state, not from a fragile in-memory intermediate.** Master Data is
   the only tab any scraping/email logic touches directly (via the
