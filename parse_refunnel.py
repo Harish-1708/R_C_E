@@ -320,28 +320,24 @@ def find_duplicate_post_links(result: ParseResult) -> Dict[str, List[str]]:
 
 
 def rows_needing_email_scrape(result: ParseResult) -> List[str]:
-    """Return media ids that still need a scraped email -- scoped to
-    ONLY rights_requested, not approved/declined.
+    """Return media ids that still need a scraped email -- REQUESTED and
+    NONE-status rows only, never Approved/Declined.
 
-    Confirmed from a real debug screenshot: once a post's rights are
-    Approved, its card footer is replaced entirely with a status badge
-    ("Usage rights approved -- Via direct post permission") -- the
-    .usage-rights-request-card button this whole scraping flow depends
-    on simply doesn't exist on that card anymore. Every attempt on an
-    approved (or presumably declined, same reasoning) post was
-    therefore a guaranteed failure, not an intermittent one -- which is
-    why a real run took hours: dozens of guaranteed-fail attempts each
-    burning several seconds before giving up.
+    NONE-status posts (never had any usage-rights action) use the exact
+    same button class as originally discovered -- confirmed real: the
+    very first pre-filled-email screenshot in this whole project was a
+    never-requested post. So this covers the two statuses confirmed to
+    still have a working request-card UI.
 
-    Requested posts are the only ones where the request is still
-    pending, so the request-card UI (and the pre-filled email inside
-    it) should still exist -- though this itself hasn't been visually
-    confirmed yet either; if it turns out Requested posts *also* show a
-    different footer, scrape_creator_emails's circuit breaker will stop
-    the run quickly rather than grinding through all of them.
+    Approved (and presumably Declined) are excluded on purpose -- a real
+    debug screenshot confirmed their card footer is replaced entirely
+    with a status badge ("Usage rights approved -- Via direct post
+    permission"), with no request-card button at all. Every attempt on
+    one was a guaranteed failure, not intermittent bad luck -- which is
+    why an early run took hours grinding through them.
     """
     ids = []
-    for media_id, row in result.rights_requested.items():
-        if not row.get("creator_email"):
+    for media_id, row in result.master.items():
+        if row.get("rights_status") in ("REQUESTED", "NONE") and not row.get("creator_email"):
             ids.append(media_id)
     return ids
