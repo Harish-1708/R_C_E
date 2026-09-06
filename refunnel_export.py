@@ -632,7 +632,15 @@ def scrape_creator_emails(
             # Pace between posts, not just within one -- this is the
             # bigger contributor to total added time since it runs once
             # per item rather than once per click. See README "Pacing
-            # and its time cost".
-            _pace(page, EMAIL_SCRAPE_ITEM_PACE_MS)
+            # and its time cost". Wrapped in its own try/except too --
+            # confirmed from a real crash log that this specific call,
+            # unguarded, is exactly where a dead/crashed page's error
+            # escaped the per-item error boundary entirely, aborting
+            # the whole function instead of being caught and counted
+            # toward the circuit breaker like every other failure here.
+            try:
+                _pace(page, EMAIL_SCRAPE_ITEM_PACE_MS)
+            except Exception:
+                pass
 
     return results
