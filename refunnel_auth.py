@@ -32,6 +32,7 @@ completes; see README "Testing the login flow".
 from __future__ import annotations
 
 import time
+from datetime import date, timedelta
 from pathlib import Path
 
 from playwright.sync_api import BrowserContext, Page, sync_playwright
@@ -52,9 +53,31 @@ REFUNNEL_LOGIN_URL = f"{REFUNNEL_BASE_URL}/login"
 # than 12 months would eventually age out of a fresh export, but
 # Master Data's never_delete=True protection means it's never actually
 # lost from the sheet even if a later pull no longer includes it.
-REFUNNEL_SOCIAL_LISTENING_URL = (
-    f"{REFUNNEL_BASE_URL}/dashboard/content/social-listening?insights_timeline=%22last12months%22"
-)
+#
+# Confirmed for real: the first attempt at this (just adding
+# insights_timeline alone, no explicit from_date/to_date) did NOT
+# actually widen the pull -- Master Data stayed capped around
+# ~2088 rows instead of reaching the ~2771 you saw manually. Fixed
+# using the exact URL you captured from your address bar after
+# manually selecting "Last 12 months": Refunnel's "last12months" preset
+# ALSO sets explicit from_date/to_date bounds (to_date = today,
+# from_date = exactly 365 days earlier), plus sort_by and snv params --
+# all of which are now included, not just insights_timeline alone.
+# from_date/to_date are computed fresh each call so this stays a true
+# rolling window, not a date frozen at whatever day this was written.
+def refunnel_social_listening_url() -> str:
+    today = date.today()
+    from_date = today - timedelta(days=365)
+    return (
+        f"{REFUNNEL_BASE_URL}/dashboard/content/social-listening"
+        f"?sort_by=%22BY_DATE%22"
+        f"&from_date=%22{from_date.isoformat()}%22"
+        f"&to_date=%22{today.isoformat()}%22"
+        f"&snv=true"
+        f"&insights_timeline=%22last12months%22"
+    )
+
+
 # Confirmed for real (you sent the exact URL from your address bar):
 # https://app.refunnel.com/dashboard/payments/history -- the earlier
 # guess (`/dashboard/payments`, missing `/history`) was wrong, which is
