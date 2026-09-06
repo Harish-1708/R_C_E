@@ -18,6 +18,7 @@ from parse_refunnel import (
     parse_payments_csv,
     rows_needing_email_scrape,
     apply_creator_emails,
+    propagate_emails_by_username,
     apply_human_review_flags,
     build_human_review_rows,
     find_duplicate_post_links,
@@ -404,3 +405,65 @@ def test_sabotage_find_duplicate_post_links_missed_dupe_would_be_caught():
         assert "https://tiktok.com/@x/video/999" in dupes  # confirms actual correct behavior
     finally:
         os.unlink(path)
+
+
+# ---------- propagate_emails_by_username tests ----------
+
+def _fake_result_for_propagation():
+    from parse_refunnel import ParseResult
+    result = ParseResult()
+    result.master = {
+        "id1": {"id": "id1", "username": "alice", "creator_email": "alice@example.com"},
+        "id2": {"id": "id2", "username": "alice", "creator_email": ""},  # same creator, no email
+        "id3": {"id": "id3", "username": "alice", "creator_email": ""},  # same creator, no email
+        "id4": {"id": "id4", "username": "bob", "creator_email": ""},    # different creator
+    }
+    return result
+
+
+def test_propagate_emails_by_username_fills_siblings():
+    result = _fake_result_for_propagation()
+    filled = propagate_emails_by_username(result)
+    assert filled == 2
+    assert result.master["id2"]["creator_email"] == "alice@example.com"
+    assert result.master["id3"]["creator_email"] == "alice@example.com"
+    assert result.master["id4"]["creator_email"] == ""  # different creator, untouched
+
+
+def test_propagate_emails_by_username_never_overwrites_an_existing_email():
+    result = _fake_result_for_propagation()
+    result.master["id2"]["creator_email"] = "different@example.com"  # already has its own
+    propagate_emails_by_username(result)
+    assert result.master["id2"]["creator_email"] == "different@example.com"  # untouched
+
+
+def test_propagate_emails_by_username_no_known_emails_fills_nothing():
+    result = _fake_result_for_propagation()
+    for row in result.master.values():
+        row["creator_email"] = ""
+    filled = propagate_emails_by_username(result)
+    assert filled == 0
+
+
+def test_propagate_emails_by_username_on_real_sample_data():
+    result = parse_media_csv(MEDIA_CSV)
+    # simulate one known email for a username that repeats in the sample
+    usernames = [row["username"] for row in result.master.values()]
+    from collections import Counter
+    repeated_username = next(u for u, c in Counter(usernames).items() if c > 1)
+    first_id = next(mid for mid, row in result.master.items() if row["username"] == repeated_username)
+    result.master[first_id]["creator_email"] = "found@example.com"
+
+    filled = propagate_emails_by_username(result)
+    assert filled > 0
+    for row in result.master.values():
+        if row["username"] == repeated_username:
+            assert row["creator_email"] == "found@example.com"
+
+
+def test_sabotage_propagate_emails_wrong_target_would_be_caught():
+    result = _fake_result_for_propagation()
+    propagate_emails_by_username(result)
+    with pytest.raises(AssertionError):
+        assert result.master["id4"]["creator_email"] == "alice@example.com"  # wrong -- different creator
+    assert result.master["id4"]["creator_email"] == ""  # confirms actual correct behavior
