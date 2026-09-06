@@ -57,9 +57,9 @@ MASTER_COLUMNS = [
     "spark_code",
     "emv",
     "gmv",
-    "views",  # sourced from Refunnel's own "impressions" CSV field -- see note below
     "likes",
     "comments",
+    "impressions",
     "shares",
     "products",
     "hashtags",
@@ -173,16 +173,9 @@ def parse_media_csv(path: str, creator_emails: Optional[Dict[str, str]] = None) 
                 "spark_code": _clean(row.get("spark_code")),
                 "emv": _clean(row.get("emv")),
                 "gmv": _clean(row.get("gmv")),
-                # Labeled "views" per your request -- Refunnel's raw CSV
-                # export has no field literally called "views"; this is
-                # its "impressions" column, which is the only view-like
-                # metric it exports in bulk. Reasonably likely the same
-                # number as the eye-icon count shown in the UI, but not
-                # independently confirmed against a specific post yet --
-                # let me know if a side-by-side check ever shows otherwise.
-                "views": _clean(row.get("impressions")),
                 "likes": _clean(row.get("likes")),
                 "comments": _clean(row.get("comments")),
+                "impressions": _clean(row.get("impressions")),
                 "shares": _clean(row.get("shares")),
                 "products": _clean(row.get("products")),
                 "hashtags": _clean(row.get("hashtags")),
