@@ -102,18 +102,19 @@ def test_media_and_payments_can_merge_into_one_result():
     assert len(result.payments) == 3
 
 
-def test_rows_needing_email_scrape_only_includes_requested():
+def test_rows_needing_email_scrape_includes_requested_and_none_not_approved_declined():
     result = parse_media_csv(MEDIA_CSV)
     ids = rows_needing_email_scrape(result)
-    # sample file has 3 approved + 1 requested + 0 declined -- only the
-    # 1 requested row qualifies, confirmed from real evidence that
-    # approved/declined cards don't have the request button at all
-    assert len(ids) == 1
-    for media_id in ids:
-        assert result.master[media_id]["rights_status"] == "REQUESTED"
-        assert media_id in result.rights_requested
-        assert media_id not in result.rights_approved
-        assert media_id not in result.rights_declined
+    statuses = {result.master[mid]["rights_status"] for mid in ids}
+    # sample file has 876 NONE + 3 approved + 1 requested + 0 declined --
+    # NONE and REQUESTED both qualify (confirmed real: NONE-status posts
+    # use the same working request-card UI); approved/declined never do
+    assert statuses == {"NONE", "REQUESTED"}
+    assert len(ids) == 877  # 876 NONE + 1 REQUESTED
+    approved_ids = set(result.rights_approved)
+    declined_ids = set(result.rights_declined)
+    assert approved_ids.isdisjoint(ids)
+    assert declined_ids.isdisjoint(ids)
 
 
 def test_rows_needing_email_scrape_shrinks_once_email_supplied():
@@ -122,13 +123,16 @@ def test_rows_needing_email_scrape_shrinks_once_email_supplied():
     partial_emails = {ids_before[0]: "found@example.com"}
     result2 = parse_media_csv(MEDIA_CSV, creator_emails=partial_emails)
     ids_after = rows_needing_email_scrape(result2)
-    assert len(ids_after) == 0
+    assert len(ids_after) == len(ids_before) - 1
     assert ids_before[0] not in ids_after
 
 
 def test_apply_creator_emails_updates_master_and_shared_bucket():
     result = parse_media_csv(MEDIA_CSV)
-    target_id = rows_needing_email_scrape(result)[0]
+    # specifically target the Requested-status id, so this test can
+    # check shared-bucket behavior (NONE-status ids, now also in scope
+    # for scraping, aren't in any of the three usage-rights buckets)
+    target_id = next(iter(result.rights_requested))
     updated = apply_creator_emails(result, {target_id: "creator@example.com"})
 
     assert updated == 1
