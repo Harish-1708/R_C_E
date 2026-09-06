@@ -13,6 +13,7 @@ from sheets_sync import (
     SuspiciousShrinkError,
     GspreadSheetsClient,
     get_or_create_worksheet,
+    _flatten_cell,
 )
 import gspread.exceptions
 
@@ -416,3 +417,75 @@ def test_sabotage_broad_except_would_be_caught():
     with pytest.raises(AssertionError):
         assert spreadsheet.add_worksheet_calls == [("Master Data", 1000, 30)]  # wrong
     assert spreadsheet.add_worksheet_calls == []  # confirms actual correct behavior
+
+
+# ---------- _flatten_cell tests ----------
+
+def test_flatten_cell_collapses_embedded_newlines():
+    value = "10 of my favorite\n\n1) Nick Shirley\n2) Brodo Bone Broth"
+    result = _flatten_cell(value)
+    assert "\n" not in result
+    assert result == "10 of my favorite 1) Nick Shirley 2) Brodo Bone Broth"
+
+
+def test_flatten_cell_handles_none():
+    assert _flatten_cell(None) == ""
+
+
+def test_flatten_cell_leaves_normal_text_unchanged():
+    assert _flatten_cell("just a normal caption") == "just a normal caption"
+
+
+def test_flatten_cell_handles_crlf_too():
+    assert _flatten_cell("line one\r\nline two") == "line one line two"
+
+
+def test_sync_tab_strips_newlines_from_written_rows():
+    client = FakeSheetsClient()
+    target = {"id1": {"id": "id1", "username": "alice", "rights_status": "one\ntwo\nthree"}}
+    sync_tab(client, COLUMNS, target)
+    written_status = client.rows[1][2]
+    assert "\n" not in written_status
+    assert written_status == "one two three"
+
+
+def test_sabotage_flatten_cell_newline_left_in_would_be_caught():
+    result = _flatten_cell("a\nb")
+    with pytest.raises(AssertionError):
+        assert "\n" in result  # wrong -- it should have been collapsed
+    assert result == "a b"
+
+
+# ---------- sort_reverse tests ----------
+
+def test_sort_reverse_puts_newest_first():
+    client = FakeSheetsClient()
+    target = _rows(
+        ("old_id", "alice", "GRANTED"),
+        ("new_id", "bob", "GRANTED"),
+    )
+    # simulate a created_at-like field via the sort_key mechanism using
+    # the existing 3-column row shape -- reuse "rights_status" as a
+    # stand-in sortable field for this test's purposes
+    target["old_id"]["rights_status"] = "2026-01-01"
+    target["new_id"]["rights_status"] = "2026-06-01"
+    sync_tab(client, COLUMNS, target, sort_key="rights_status", sort_reverse=True)
+    assert client.rows[1][0] == "new_id"  # newest (later date) first
+    assert client.rows[2][0] == "old_id"
+
+
+def test_sort_reverse_false_keeps_ascending_order():
+    client = FakeSheetsClient()
+    target = _rows(("a_id", "alice", "2026-01-01"), ("b_id", "bob", "2026-06-01"))
+    sync_tab(client, COLUMNS, target, sort_key="rights_status", sort_reverse=False)
+    assert client.rows[1][0] == "a_id"  # earliest date first (unchanged default)
+    assert client.rows[2][0] == "b_id"
+
+
+def test_sabotage_sort_reverse_ignored_would_be_caught():
+    client = FakeSheetsClient()
+    target = _rows(("old_id", "alice", "2026-01-01"), ("new_id", "bob", "2026-06-01"))
+    sync_tab(client, COLUMNS, target, sort_key="rights_status", sort_reverse=True)
+    with pytest.raises(AssertionError):
+        assert client.rows[1][0] == "old_id"  # wrong -- newest should be first
+    assert client.rows[1][0] == "new_id"
