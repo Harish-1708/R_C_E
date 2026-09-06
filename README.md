@@ -68,28 +68,40 @@ run.
 
 ## What I just added
 
-- **Fixed a real undercount**: Master Data was capped around ~2065-2088
-  rows because the daily pull had no date filter at all, defaulting to
-  Refunnel's own "Last 3 months". Confirmed against your manual check
-  showing 2771 under "Last 12 months" -- the pull now explicitly uses
-  that same filter (`REFUNNEL_SOCIAL_LISTENING_URL` in
-  `refunnel_auth.py`). Note this is still a rolling 12-month window, not
-  "all time" -- but `never_delete=True` on Master Data means a post
-  never actually disappears from the sheet even once it ages out of a
-  future pull.
-- **Added a "views" column**, positioned right before "likes". Honest
-  caveat: Refunnel's raw CSV export has no field literally called
-  "views" -- this is sourced from its "impressions" column, the only
-  view-like metric it exports in bulk. Reasonably likely the same
-  number as the UI's eye-icon count, but not independently confirmed
-  against a specific post yet.
+- **Fixed the real undercount, with the real fix this time**: a first
+  attempt (adding `insights_timeline=last12months` alone) did NOT
+  actually widen the pull -- Master Data stayed capped around ~2088
+  rows. Fixed using the exact URL you captured from your address bar
+  after manually selecting "Last 12 months": Refunnel's preset ALSO
+  sets explicit `from_date`/`to_date` bounds (to_date = today, from_date
+  = exactly 365 days earlier) plus `sort_by`/`snv` params -- all of
+  which `refunnel_social_listening_url()` in `refunnel_auth.py` now
+  includes, computed fresh each call so it stays a true rolling window,
+  not a date frozen at whatever day this was written. Per your
+  instruction, there's no plan to later narrow this to "Last 7 days" --
+  that would stop older posts (rights status changes, updated engagement
+  numbers) from ever being refreshed again once they age past 7 days,
+  so the 12-month window is the permanent setting, not a temporary one.
+- **No "views" column** -- reverted. Refunnel's own Analytics panel
+  (confirmed from a real screenshot) labels this metric "Impressions",
+  not "Views" -- there's no separate "views" concept in the product at
+  all. Fully back to the original column name and position.
+- **Fixed a side effect of that reverted rename**: renaming a known
+  column and then reverting it left stray blank-header cells trailing
+  in a real sheet, because the "preserve manual columns" logic (built
+  for something like a real "Notes" column) doesn't know the difference
+  between a genuine manual column and a leftover renamed one. Now
+  ignores any blank-named header when deciding what counts as a manual
+  column to carry forward -- a real manual column always has a name.
 - **A found email now propagates to every other post by that same
   creator automatically** (`propagate_emails_by_username` in
   `parse_refunnel.py`), both before scraping starts and after each
   restart during it -- so scraping a creator's email once covers all
   their other content instead of re-scraping per post. Confirmed real
   opportunity: 342 of 1360 unique usernames in a real export appear on
-  2+ posts.
+  2+ posts. Bonus side effect confirmed from a real run: this also fills
+  in emails for Approved/Declined posts by the same creator, even though
+  those statuses have no scrapeable button of their own.
 - **A crashed browser now recovers AND resumes scraping**, not just
   recovers once to limp to Payments. Confirmed from real runs that a
   single scheduled run could hit the crash repeatedly, each time only
