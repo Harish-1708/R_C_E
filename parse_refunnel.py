@@ -57,9 +57,9 @@ MASTER_COLUMNS = [
     "spark_code",
     "emv",
     "gmv",
+    "views",  # sourced from Refunnel's own "impressions" CSV field -- see note below
     "likes",
     "comments",
-    "impressions",
     "shares",
     "products",
     "hashtags",
@@ -173,9 +173,16 @@ def parse_media_csv(path: str, creator_emails: Optional[Dict[str, str]] = None) 
                 "spark_code": _clean(row.get("spark_code")),
                 "emv": _clean(row.get("emv")),
                 "gmv": _clean(row.get("gmv")),
+                # Labeled "views" per your request -- Refunnel's raw CSV
+                # export has no field literally called "views"; this is
+                # its "impressions" column, which is the only view-like
+                # metric it exports in bulk. Reasonably likely the same
+                # number as the eye-icon count shown in the UI, but not
+                # independently confirmed against a specific post yet --
+                # let me know if a side-by-side check ever shows otherwise.
+                "views": _clean(row.get("impressions")),
                 "likes": _clean(row.get("likes")),
                 "comments": _clean(row.get("comments")),
-                "impressions": _clean(row.get("impressions")),
                 "shares": _clean(row.get("shares")),
                 "products": _clean(row.get("products")),
                 "hashtags": _clean(row.get("hashtags")),
@@ -266,6 +273,43 @@ def build_human_review_rows(result: ParseResult) -> Dict[str, dict]:
         media_id: {col: row.get(col, "") for col in HUMAN_REVIEW_COLUMNS}
         for media_id, row in result.rights_reviewed.items()
     }
+
+
+def propagate_emails_by_username(result: ParseResult) -> int:
+    """Once one post's creator_email is known, apply it to every OTHER
+    post by that same username that doesn't have one yet -- an email
+    belongs to the creator, not the individual post, so there's no
+    reason to scrape it separately for each of their posts. Confirmed
+    real opportunity: 342 of 1360 unique usernames in a real export
+    appear on 2+ posts.
+
+    Call this BEFORE computing rows_needing_email_scrape() so already-
+    known emails shrink the scraping target list immediately, and again
+    after new emails are found during a run so newly-discovered ones
+    propagate too, without needing a fresh run.
+
+    Assumes one email per creator (your stated assumption) -- if a
+    creator genuinely has two different emails on file, whichever one
+    is encountered first while building the map wins silently. Returns
+    how many rows were filled in this way, for logging.
+    """
+    email_by_username: Dict[str, str] = {}
+    for row in result.master.values():
+        username = row.get("username", "")
+        email = row.get("creator_email", "")
+        if username and email and username not in email_by_username:
+            email_by_username[username] = email
+
+    filled = 0
+    for row in result.master.values():
+        if row.get("creator_email"):
+            continue
+        username = row.get("username", "")
+        known_email = email_by_username.get(username)
+        if known_email:
+            row["creator_email"] = known_email
+            filled += 1
+    return filled
 
 
 def apply_creator_emails(result: ParseResult, emails: Dict[str, str]) -> int:
