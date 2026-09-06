@@ -68,6 +68,37 @@ run.
 
 ## What I just added
 
+- **Fixed a real undercount**: Master Data was capped around ~2065-2088
+  rows because the daily pull had no date filter at all, defaulting to
+  Refunnel's own "Last 3 months". Confirmed against your manual check
+  showing 2771 under "Last 12 months" -- the pull now explicitly uses
+  that same filter (`REFUNNEL_SOCIAL_LISTENING_URL` in
+  `refunnel_auth.py`). Note this is still a rolling 12-month window, not
+  "all time" -- but `never_delete=True` on Master Data means a post
+  never actually disappears from the sheet even once it ages out of a
+  future pull.
+- **Added a "views" column**, positioned right before "likes". Honest
+  caveat: Refunnel's raw CSV export has no field literally called
+  "views" -- this is sourced from its "impressions" column, the only
+  view-like metric it exports in bulk. Reasonably likely the same
+  number as the UI's eye-icon count, but not independently confirmed
+  against a specific post yet.
+- **A found email now propagates to every other post by that same
+  creator automatically** (`propagate_emails_by_username` in
+  `parse_refunnel.py`), both before scraping starts and after each
+  restart during it -- so scraping a creator's email once covers all
+  their other content instead of re-scraping per post. Confirmed real
+  opportunity: 342 of 1360 unique usernames in a real export appear on
+  2+ posts.
+- **A crashed browser now recovers AND resumes scraping**, not just
+  recovers once to limp to Payments. Confirmed from real runs that a
+  single scheduled run could hit the crash repeatedly, each time only
+  covering a fraction of what's left -- now it automatically gets a
+  fresh session and keeps scraping the remaining (shrinking, thanks to
+  propagation) target list, up to a bounded 3 automatic restarts per
+  run, before moving on. This should mean far less need to keep
+  manually re-triggering runs.
+
 - **Email scraping is implemented for real now** (see `scrape_creator_emails`
   in `refunnel_export.py`), built directly from your screenshots of the
   actual flow: click a post's "Request usage rights" toggle -> its top
