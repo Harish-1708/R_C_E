@@ -211,6 +211,32 @@ def main() -> int:
             resynced = parse_refunnel.apply_creator_emails(result, refreshed_emails)
             print(f"Re-synced {resynced} creator email(s) from Master Data's current sheet state.")
 
+            # Confirm the browser actually survived scraping before
+            # trying to keep using it -- confirmed from a real run: it
+            # crashed mid-scrape, the circuit breaker correctly stopped
+            # scraping and returned cleanly, but the NEXT action
+            # (navigating to Payments) then failed too, because it
+            # tried to reuse the same already-dead page. If it's dead,
+            # get a fresh logged-in session (reusing the saved cookies,
+            # no full re-login needed) rather than limping forward with
+            # a browser that's already gone.
+            try:
+                page.evaluate("() => 1")
+            except Exception:
+                print("Browser appears to have crashed during scraping -- "
+                      "recovering with a fresh session before continuing.")
+                for cleanup in (context.close, browser.close, p.stop):
+                    try:
+                        cleanup()
+                    except Exception:
+                        pass
+                p, browser, context = refunnel_auth.load_or_refresh_session(
+                    email=email, session_file=session_file, headless=True
+                )
+                page = context.new_page()
+                page.goto(refunnel_auth.REFUNNEL_SOCIAL_LISTENING_URL)
+                refunnel_export.select_workspace(page, refunnel_workspace_name, known_workspace_names)
+
         # --- 4. NOW it's safe to navigate away and export payments ---
         page.goto(refunnel_auth.REFUNNEL_PAYMENTS_URL)
         payments_csv_path = refunnel_export.export_payments_csv(page, download_dir)
