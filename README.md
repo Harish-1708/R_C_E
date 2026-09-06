@@ -68,32 +68,28 @@ run.
 
 ## What I just added
 
-- **Widened scroll-loading patience for the bigger 12-month dataset.**
-  Confirmed real: the 12-months fix worked (2771 correctly recognized
-  as the total), but a run against that larger total stalled out (hit
-  the hard-fail safety net) at only 120/2771 loaded. The failure
-  screenshot showed a perfectly healthy, normally-loading page --
-  nothing broken -- consistent with the bigger dataset (more images
-  across a wider historical range) simply needing more time per batch
-  than the old, smaller one did. Widened `scroll_pause_ms` 1200ms ->
-  2000ms and `idle_rounds_before_giving_up` 6 -> 12. Not proven to be
-  the whole story -- if a real run still stalls early even with this,
-  that's real evidence pointing at something else instead.
+- **Widened scroll-loading patience** (`scroll_pause_ms` 1200ms ->
+  2000ms, `idle_rounds_before_giving_up` 6 -> 12) -- this was an
+  initial hypothesis for a stall at 120/2771 that turned out to be
+  wrong (see the entry right below): a second run with this wider
+  patience stalled at the exact same 120, proving it wasn't a timing
+  issue at all. Left in place anyway since it's a harmless general
+  safety margin, but it was NOT the fix for that specific problem.
 
-- **Fixed the real undercount, with the real fix this time**: a first
-  attempt (adding `insights_timeline=last12months` alone) did NOT
-  actually widen the pull -- Master Data stayed capped around ~2088
-  rows. Fixed using the exact URL you captured from your address bar
-  after manually selecting "Last 12 months": Refunnel's preset ALSO
-  sets explicit `from_date`/`to_date` bounds (to_date = today, from_date
-  = exactly 365 days earlier) plus `sort_by`/`snv` params -- all of
-  which `refunnel_social_listening_url()` in `refunnel_auth.py` now
-  includes, computed fresh each call so it stays a true rolling window,
-  not a date frozen at whatever day this was written. Per your
-  instruction, there's no plan to later narrow this to "Last 7 days" --
-  that would stop older posts (rights status changes, updated engagement
-  numbers) from ever being refreshed again once they age past 7 days,
-  so the 12-month window is the permanent setting, not a temporary one.
+- **The "Last 12 months" undercount fix is reverted -- turned out to be
+  a Refunnel-side bug, not ours.** Two real runs stalled at the exact
+  same post (@faisalofficial993, ~120 of 2771), even after doubling how
+  much patience `scroll_to_load_all` was given -- identical stopping
+  point both times ruled out a timing explanation. You then confirmed
+  it directly: scrolling that same URL manually in a real browser hits
+  the identical wall, and Refunnel's own manual export feature caps out
+  at just 20 rows under that filter. Since a genuine human hits the
+  same limit, not just our automation, this isn't fixable from our
+  side -- worth reporting to Refunnel's own support team. Reverted back
+  to no forced date filter (Refunnel's own default), which is confirmed
+  reliable at ~2065-2088 rows across many past runs. If Refunnel ever
+  fixes this on their end, `REFUNNEL_SOCIAL_LISTENING_URL` in
+  `refunnel_auth.py` is the only line that needs to change back.
 - **No "views" column** -- reverted. Refunnel's own Analytics panel
   (confirmed from a real screenshot) labels this metric "Impressions",
   not "Views" -- there's no separate "views" concept in the product at
