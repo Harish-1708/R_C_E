@@ -11,6 +11,8 @@ xlsx. This script exists purely so you can visually check the tab
 structure and column layout against real data right now.
 """
 
+import re
+
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
@@ -30,6 +32,13 @@ HEADER_FILL = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="s
 BODY_FONT = Font(name="Arial", size=10)
 
 
+def _flatten(value) -> str:
+    """Same newline-collapsing as sheets_sync.py's _flatten_cell -- keeps
+    this local preview honest about what the real sheet will look like."""
+    text = str(value) if value is not None else ""
+    return re.sub(r"\s*[\r\n]+\s*", " ", text).strip()
+
+
 def write_tab(wb, title, columns, rows_dict, sort_key="id"):
     ws = wb.create_sheet(title=title)
     ws.append(columns)
@@ -40,7 +49,7 @@ def write_tab(wb, title, columns, rows_dict, sort_key="id"):
 
     sorted_rows = sorted(rows_dict.values(), key=lambda r: str(r.get(sort_key, "")))
     for row in sorted_rows:
-        ws.append([row.get(col, "") for col in columns])
+        ws.append([_flatten(row.get(col, "")) for col in columns])
 
     for row in ws.iter_rows(min_row=2):
         for cell in row:
