@@ -48,7 +48,7 @@ from playwright.sync_api import Page
 
 # Turn this on only after you've manually verified scrape_creator_email()
 # against the real site -- see module docstring and README.
-SCRAPE_EMAILS_ENABLED = False
+SCRAPE_EMAILS_ENABLED = True
 
 # Refunnel's "Request usage rights" flow has a "Send request" button
 # (confirmed from your screenshot). We refuse to click anything whose
@@ -491,20 +491,27 @@ def scrape_creator_emails(
     happens rather than after.
 
     Flow -- confirmed from a real, complete HTML trace of the whole
-    interaction (card -> popover -> modal):
+    interaction (card -> popover -> modal), for BOTH never-requested and
+    already-Requested posts:
       1. Each post card (a react-virtuoso grid item, matched here by its
-         thumbnail image src containing the media id) has a
-         `.usage-rights-request-card` toggle. Clicking it reveals a
-         popover whose menu items include a top one with the exact text
-         "Request usage-rights" (`role="menuitem"`), distinct from
-         "Request whitelisting-rights" below it.
-      2. That opens a modal (`.usageRightsModal`) with three channel
+         thumbnail image src containing the media id) has a status
+         toggle in its footer. The class name differs by status --
+         `.usage-rights-request-card` for never-requested posts,
+         `.usage-rights-requested-card` for already-Requested ones (one
+         letter different: "request" vs "requested") -- so both are
+         matched together.
+      2. Clicking it reveals a popover whose top menu item's TITLE also
+         differs by status ("Request usage-rights" vs "Usage-rights
+         requested"), but its SUBTITLE is identical either way
+         ("Request creator approval to use this content in your
+         marketing") -- matched on that instead, since it doesn't vary.
+      3. That opens a modal (`.usageRightsModal`) with three channel
          tabs (`.ur-tab-card`): Email / TikTok DM / TT Shop DM -- Email
-         is active by default.
-      3. The email field has a real, properly-linked
+         is active by default, confirmed for both post statuses.
+      4. The email field has a real, properly-linked
          `<label>Creator email address</label>`, so `get_by_label()`
          finds it directly.
-      4. The confirmed "Send request" button (`.ur-bottom-btn`) is never
+      5. The confirmed "Send request" button (`.ur-bottom-btn`) is never
          clicked -- `_safe_click`'s pattern check refuses it regardless.
 
     Since react-virtuoso virtualizes the grid, a target card may not be
@@ -545,24 +552,32 @@ def scrape_creator_emails(
                     break
                 continue
 
-            request_toggle = grid_item.locator(".usage-rights-request-card").first
+            request_toggle = grid_item.locator(
+                ".usage-rights-request-card, .usage-rights-requested-card"
+            ).first
             try:
                 request_toggle.scroll_into_view_if_needed(timeout=4000)
                 request_toggle.wait_for(state="visible", timeout=4000)
             except Exception as e:
                 raise ExportError(
                     f"Card for media_id={media_id!r} was found in the DOM, but its "
-                    f".usage-rights-request-card button never became visible/clickable "
-                    f"within 4s even after scroll_into_view_if_needed() -- may be "
-                    f"obscured by an overlay, or this post's rights status has already "
-                    f"been resolved (Approved/Declined cards replace this button with a "
-                    f"status badge instead -- confirmed from a real screenshot). "
+                    f"status toggle never became visible/clickable within 4s even "
+                    f"after scroll_into_view_if_needed() -- may be obscured by an "
+                    f"overlay, or this post's rights status uses yet another class "
+                    f"name not yet accounted for (Approved cards use a different, "
+                    f"non-clickable badge entirely -- confirmed separately). "
                     f"Original error: {e}"
                 ) from e
             _safe_click(request_toggle)
             _pace(page)
 
-            top_menu_item = page.get_by_role("menuitem", name=re.compile(r"^Request usage-rights$", re.I)).first
+            # The popup's top item's TITLE differs by status ("Request
+            # usage-rights" vs "Usage-rights requested"), but its
+            # subtitle is identical either way -- matched on that
+            # instead, since it doesn't vary.
+            top_menu_item = page.get_by_role("menuitem").filter(
+                has_text="Request creator approval to use this content in your marketing"
+            ).first
             top_menu_item.wait_for(state="visible", timeout=5000)
             _safe_click(top_menu_item)
             _pace(page)
