@@ -48,7 +48,7 @@ from playwright.sync_api import Page
 
 # Turn this on only after you've manually verified scrape_creator_email()
 # against the real site -- see module docstring and README.
-SCRAPE_EMAILS_ENABLED = True
+SCRAPE_EMAILS_ENABLED = False
 
 # Refunnel's "Request usage rights" flow has a "Send request" button
 # (confirmed from your screenshot). We refuse to click anything whose
@@ -162,13 +162,26 @@ def scroll_to_load_all(
     page: Page,
     count_text_pattern: str = r"(\d+)\s+of\s+(\d+)\s+media",
     max_rounds: int = 400,
-    scroll_pause_ms: int = 1200,
-    idle_rounds_before_giving_up: int = 6,
+    scroll_pause_ms: int = 2000,
+    idle_rounds_before_giving_up: int = 12,
     scroll_container_selector: str = "#scrollableDiv",
 ) -> None:
     """Scroll until the page's own '<loaded> of <total> media' counter
     (visible in your screenshot) shows loaded == total, or growth stalls
     for idle_rounds_before_giving_up consecutive scrolls in a row.
+
+    Defaults widened from 1200ms/6 rounds to 2000ms/12 rounds --
+    confirmed real: switching to the "Last 12 months" filter genuinely
+    increased the total from ~2065 to 2771, and a run against that
+    larger total stalled out (hit the hard-fail safety net) at only
+    120/2771 loaded. The failure screenshot showed a perfectly healthy,
+    normally-loading page -- nothing broken, no obviously wrong
+    selector -- consistent with the larger dataset (more images across
+    a wider historical range) simply needing more time per batch to
+    render than the old, smaller dataset did. This isn't proven to be
+    the whole story, so if a real run still stalls early even with
+    these wider defaults, that would be real evidence pointing at
+    something else instead (e.g. a genuine selector/DOM change).
 
     Scrolls `scroll_container_selector` directly via JS (setting its
     scrollTop), confirmed from a real HTML dump to be `#scrollableDiv`
