@@ -139,6 +139,13 @@ def main() -> int:
         # export now happens AFTER this block, not before it.
         result = parse_refunnel.parse_media_csv(media_csv_path)
 
+        duplicate_links = parse_refunnel.find_duplicate_post_links(result)
+        if duplicate_links:
+            print(f"WARNING: {len(duplicate_links)} original_post_link value(s) are shared "
+                  f"across multiple different ids -- this usually means genuine duplicate "
+                  f"content under two ids. Not removed automatically. Examples: "
+                  f"{dict(list(duplicate_links.items())[:5])}")
+
         gc = gspread.service_account(filename=service_account_path)
         sh = gc.open_by_key(spreadsheet_id)
         master_ws = sheets_sync.get_or_create_worksheet(sh, "Master Data")
