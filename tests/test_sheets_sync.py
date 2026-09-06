@@ -7,7 +7,14 @@ and should be smoke-tested manually once credentials exist.
 
 import pytest
 
-from sheets_sync import sync_tab, read_column_values, SuspiciousShrinkError, GspreadSheetsClient
+from sheets_sync import (
+    sync_tab,
+    read_column_values,
+    SuspiciousShrinkError,
+    GspreadSheetsClient,
+    get_or_create_worksheet,
+)
+import gspread.exceptions
 
 
 class FakeSheetsClient:
@@ -356,3 +363,56 @@ def test_sabotage_never_delete_dropping_a_row_would_be_caught():
     with pytest.raises(AssertionError):
         assert ids_in_tab == {"id2"}  # wrong -- id1 should have survived
     assert ids_in_tab == {"id1", "id2"}  # confirms actual correct behavior
+
+
+# ---------- get_or_create_worksheet tests ----------
+
+class _FakeSpreadsheet:
+    def __init__(self, existing_error=None, worksheet_obj="EXISTING_WORKSHEET"):
+        self._existing_error = existing_error
+        self._worksheet_obj = worksheet_obj
+        self.add_worksheet_calls = []
+
+    def worksheet(self, title):
+        if self._existing_error:
+            raise self._existing_error
+        return self._worksheet_obj
+
+    def add_worksheet(self, title, rows, cols):
+        self.add_worksheet_calls.append((title, rows, cols))
+        return "NEWLY_CREATED_WORKSHEET"
+
+
+def test_get_or_create_worksheet_returns_existing_when_found():
+    spreadsheet = _FakeSpreadsheet(existing_error=None)
+    result = get_or_create_worksheet(spreadsheet, "Master Data")
+    assert result == "EXISTING_WORKSHEET"
+    assert spreadsheet.add_worksheet_calls == []
+
+
+def test_get_or_create_worksheet_creates_on_genuine_not_found():
+    spreadsheet = _FakeSpreadsheet(existing_error=gspread.exceptions.WorksheetNotFound("nope"))
+    result = get_or_create_worksheet(spreadsheet, "Master Data")
+    assert result == "NEWLY_CREATED_WORKSHEET"
+    assert spreadsheet.add_worksheet_calls == [("Master Data", 1000, 30)]
+
+
+def test_get_or_create_worksheet_propagates_other_errors_instead_of_creating():
+    # this is the real bug a live run hit: a transient 503 from
+    # Google's side was being misread as "doesn't exist yet", causing
+    # an attempted duplicate creation that then failed for real
+    spreadsheet = _FakeSpreadsheet(existing_error=RuntimeError("503 Service Unavailable"))
+    with pytest.raises(RuntimeError, match="503"):
+        get_or_create_worksheet(spreadsheet, "Master Data")
+    assert spreadsheet.add_worksheet_calls == []  # never attempted a duplicate create
+
+
+def test_sabotage_broad_except_would_be_caught():
+    # proves the fix is actually scoped to WorksheetNotFound, not just
+    # any exception -- a generic error must NOT trigger a create
+    spreadsheet = _FakeSpreadsheet(existing_error=ValueError("some unrelated error"))
+    with pytest.raises(ValueError):
+        get_or_create_worksheet(spreadsheet, "Master Data")
+    with pytest.raises(AssertionError):
+        assert spreadsheet.add_worksheet_calls == [("Master Data", 1000, 30)]  # wrong
+    assert spreadsheet.add_worksheet_calls == []  # confirms actual correct behavior
