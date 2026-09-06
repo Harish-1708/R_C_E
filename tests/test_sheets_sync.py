@@ -290,3 +290,69 @@ def test_sabotage_update_single_cell_wrong_row_would_be_caught():
     with pytest.raises(AssertionError):
         assert ws.rows[2][2] == "alice@example.com"  # wrong row -- that's id2/bob's row
     assert ws.rows[1][2] == "alice@example.com"  # confirms actual correct behavior
+
+
+# ---------- never_delete tests ----------
+
+def test_never_delete_carries_forward_a_row_missing_from_target():
+    client = FakeSheetsClient(
+        [COLUMNS, ["id1", "alice", "GRANTED"], ["id2", "bob", "GRANTED"]]
+    )
+    target = _rows(("id2", "bob", "GRANTED"))  # id1 missing from this run's pull
+    summary = sync_tab(client, COLUMNS, target, never_delete=True)
+
+    ids_in_tab = {row[0] for row in client.rows[1:]}
+    assert ids_in_tab == {"id1", "id2"}  # id1 survived even though not in target
+    assert summary["rows_carried_forward"] == 1
+
+
+def test_never_delete_still_applies_updates_to_matching_rows():
+    client = FakeSheetsClient(
+        [COLUMNS, ["id1", "alice", "REQUESTED"]]
+    )
+    target = _rows(("id1", "alice", "GRANTED"))  # status changed
+    sync_tab(client, COLUMNS, target, never_delete=True)
+
+    row = next(r for r in client.rows[1:] if r[0] == "id1")
+    assert row[2] == "GRANTED"  # updated, not stuck at the old value
+
+
+def test_never_delete_still_adds_genuinely_new_rows():
+    client = FakeSheetsClient([COLUMNS, ["id1", "alice", "GRANTED"]])
+    target = _rows(("id1", "alice", "GRANTED"), ("id2", "new_person", "REQUESTED"))
+    summary = sync_tab(client, COLUMNS, target, never_delete=True)
+
+    ids_in_tab = {row[0] for row in client.rows[1:]}
+    assert ids_in_tab == {"id1", "id2"}
+    assert summary["rows_carried_forward"] == 0  # id1 was in target, not carried forward
+
+
+def test_never_delete_on_empty_sheet_is_a_normal_first_write():
+    client = FakeSheetsClient()  # never written before
+    target = _rows(("id1", "alice", "GRANTED"))
+    summary = sync_tab(client, COLUMNS, target, never_delete=True)
+    assert len(client.rows) - 1 == 1
+    assert summary["rows_carried_forward"] == 0
+
+
+def test_never_delete_ignores_max_shrink_fraction_since_shrink_is_impossible():
+    # even a request that WOULD trip the shrink check should just work,
+    # since never_delete makes an actual shrink structurally impossible
+    client = FakeSheetsClient(
+        [COLUMNS] + [[f"id{i}", f"user{i}", "GRANTED"] for i in range(100)]
+    )
+    target = _rows(("id0", "user0", "GRANTED"))  # would be a 99% drop if not for never_delete
+    sync_tab(client, COLUMNS, target, never_delete=True, max_shrink_fraction=0.1)
+    assert len(client.rows) - 1 == 100  # nothing lost
+
+
+def test_sabotage_never_delete_dropping_a_row_would_be_caught():
+    client = FakeSheetsClient(
+        [COLUMNS, ["id1", "alice", "GRANTED"], ["id2", "bob", "GRANTED"]]
+    )
+    target = _rows(("id2", "bob", "GRANTED"))
+    sync_tab(client, COLUMNS, target, never_delete=True)
+    ids_in_tab = {row[0] for row in client.rows[1:]}
+    with pytest.raises(AssertionError):
+        assert ids_in_tab == {"id2"}  # wrong -- id1 should have survived
+    assert ids_in_tab == {"id1", "id2"}  # confirms actual correct behavior
