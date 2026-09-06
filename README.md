@@ -68,6 +68,18 @@ run.
 
 ## What I just added
 
+- **Widened scroll-loading patience for the bigger 12-month dataset.**
+  Confirmed real: the 12-months fix worked (2771 correctly recognized
+  as the total), but a run against that larger total stalled out (hit
+  the hard-fail safety net) at only 120/2771 loaded. The failure
+  screenshot showed a perfectly healthy, normally-loading page --
+  nothing broken -- consistent with the bigger dataset (more images
+  across a wider historical range) simply needing more time per batch
+  than the old, smaller one did. Widened `scroll_pause_ms` 1200ms ->
+  2000ms and `idle_rounds_before_giving_up` 6 -> 12. Not proven to be
+  the whole story -- if a real run still stalls early even with this,
+  that's real evidence pointing at something else instead.
+
 - **Fixed the real undercount, with the real fix this time**: a first
   attempt (adding `insights_timeline=last12months` alone) did NOT
   actually widen the pull -- Master Data stayed capped around ~2088
