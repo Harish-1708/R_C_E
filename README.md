@@ -330,9 +330,10 @@ site. Please work through this checklist once real credentials exist:
   just for rendering). The "80 of 2078 media" counter text pattern
   itself was already confirmed correct and is unchanged -- still worth a
   fresh real run to confirm the full 2078 now loads.
-- [ ] **Email scraping** (`scrape_creator_emails` in `refunnel_export.py`):
-  built from a real, complete HTML trace of the whole flow, for BOTH
-  never-requested and already-Requested posts. Confirmed real selectors:
+- [x] **Email scraping is genuinely working** -- confirmed with a real
+  run: 240 real emails found and saved. Built from a real, complete
+  HTML trace of the whole flow, for BOTH never-requested and
+  already-Requested posts. Confirmed real selectors:
   `.usage-rights-request-card` / `.usage-rights-requested-card` (the
   toggle -- class name differs by status, both matched), the popup's
   top menu item (matched by its subtitle text, which is identical
@@ -343,17 +344,40 @@ site. Please work through this checklist once real credentials exist:
   never click "Send request" regardless of anything else going wrong --
   enforced by `_safe_click`'s pattern check, independent of whatever
   selector logic runs above it.
-  **Scoped to Requested-only**: a real run's debug screenshot confirmed
-  Approved posts replace the request button with a status badge --
-  "Usage rights approved -- Via direct post permission" -- with no
-  button to click at all; every attempt on one was a guaranteed
-  failure. `rows_needing_email_scrape()` only returns Requested rows;
-  Declined is presumed to behave like Approved but isn't separately
-  confirmed (0 declined rows existed to test against). The circuit
-  breaker (`max_consecutive_failures`, default 25 -- deliberately
-  generous, since a single isolated failure just skips to the next
-  post as normal) is still there as a last resort if this turns out
-  wrong too.
+  **Scoped to Requested + NONE-status** (never Approved/Declined): a
+  real debug screenshot confirmed Approved posts replace the request
+  button with a status badge -- "Usage rights approved -- Via direct
+  post permission" -- with no button to click at all; every attempt on
+  one was a guaranteed failure. NONE-status (never-requested) posts use
+  the exact same working request-card UI as Requested ones -- confirmed
+  real, since the very first pre-filled-email screenshot in this whole
+  project was a never-requested post. Declined is presumed to behave
+  like Approved but isn't separately confirmed (0 declined rows existed
+  to test against). Widening to NONE-status is a deliberate one-time
+  cost (~2065 posts instead of ~732) -- every subsequent run only
+  re-attempts posts still missing an email, so this doesn't recur.
+  The circuit breaker (`max_consecutive_failures`, default 25 --
+  deliberately generous, since a single isolated failure just skips to
+  the next post as normal) is still there as a last resort.
+- [x] **A scraping crash no longer takes down the whole run.** A real
+  run hit `Page crashed` (the browser process itself died, not a
+  selector problem) partway through -- traced to one specific unguarded
+  call (`_pace()` in the per-item `finally` block) that let the error
+  escape the per-item error boundary instead of being caught and
+  counted toward the circuit breaker like every other failure. Now
+  wrapped in its own try/except. Additionally, `run_daily_sync.py` now
+  catches a scraping-level crash entirely and continues to the rest of
+  the pipeline rather than aborting the whole run.
+- [x] **Other tabs are now copied from Master Data's actual sheet
+  state, not from a fragile in-memory intermediate.** Master Data is
+  the only tab any scraping/email logic touches directly (via the
+  incremental per-email save). After scraping -- whether it finished
+  cleanly or crashed partway -- the script re-reads Master Data's
+  current `creator_email` column and re-applies it to every other tab's
+  data before writing them. This means a scrape that crashes halfway no
+  longer leaves Usage Rights / Human Review stuck with stale, pre-run
+  data -- they correctly reflect whatever Master Data actually has,
+  including partial progress.
 - [x] **Progress saved incrementally**: emails are now written to the
   sheet as each one is found (`update_single_cell`), not only at the
   very end -- so an interruption mid-scrape doesn't lose what was
