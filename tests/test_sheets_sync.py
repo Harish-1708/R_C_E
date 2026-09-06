@@ -489,3 +489,41 @@ def test_sabotage_sort_reverse_ignored_would_be_caught():
     with pytest.raises(AssertionError):
         assert client.rows[1][0] == "old_id"  # wrong -- newest should be first
     assert client.rows[1][0] == "new_id"
+
+
+# ---------- blank-header extra-column tests ----------
+
+def test_blank_named_headers_are_not_preserved_as_extra_columns():
+    # confirmed real: renaming a known column (impressions -> views,
+    # then reverted) left stray blank-header cells trailing in a real
+    # sheet -- this must not be treated as a manual column to carry
+    # forward forever
+    client = FakeSheetsClient(
+        [COLUMNS + ["", ""], ["id1", "alice", "GRANTED", "leftover1", "leftover2"]]
+    )
+    target = _rows(("id1", "alice", "GRANTED"))
+    summary = sync_tab(client, COLUMNS, target)
+    assert summary["extra_columns_preserved"] == []
+    assert client.rows[0] == COLUMNS  # no trailing blank headers anymore
+    assert client.rows[1] == ["id1", "alice", "GRANTED"]  # no leftover data trailing either
+
+
+def test_a_real_named_extra_column_is_still_preserved():
+    client = FakeSheetsClient(
+        [COLUMNS + ["Notes"], ["id1", "alice", "GRANTED", "some note"]]
+    )
+    target = _rows(("id1", "alice", "GRANTED"))
+    summary = sync_tab(client, COLUMNS, target)
+    assert summary["extra_columns_preserved"] == ["Notes"]
+    assert client.rows[1] == ["id1", "alice", "GRANTED", "some note"]
+
+
+def test_sabotage_blank_header_check_missing_would_be_caught():
+    client = FakeSheetsClient(
+        [COLUMNS + ["", ""], ["id1", "alice", "GRANTED", "leftover1", "leftover2"]]
+    )
+    target = _rows(("id1", "alice", "GRANTED"))
+    summary = sync_tab(client, COLUMNS, target)
+    with pytest.raises(AssertionError):
+        assert summary["extra_columns_preserved"] == ["", ""]  # wrong -- blanks shouldn't count
+    assert summary["extra_columns_preserved"] == []  # confirms actual correct behavior
