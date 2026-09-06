@@ -196,7 +196,13 @@ def sync_tab(
                 f"investigate why the real count dropped before re-running."
             )
 
-    extra_columns = [c for c in existing_header if c not in known_columns]
+    # Blank-named header cells are never treated as a manual column to
+    # preserve -- confirmed real: renaming a known column (impressions
+    # -> views, then reverted) left stray blank-header cells trailing
+    # in a real sheet, which this same logic would otherwise carry
+    # forward indefinitely as "extra columns". A real manual column
+    # (like a "Notes" header you add yourself) always has a name.
+    extra_columns = [c for c in existing_header if c not in known_columns and c.strip()]
     existing_by_id = _index_by_id(existing_header, existing_data, id_col) if extra_columns else {}
 
     final_header = list(known_columns) + extra_columns
