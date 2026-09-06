@@ -20,6 +20,7 @@ from parse_refunnel import (
     apply_creator_emails,
     apply_human_review_flags,
     build_human_review_rows,
+    find_duplicate_post_links,
     RIGHTS_STATUS_MAP,
     HUMAN_REVIEW_COLUMNS,
 )
@@ -336,3 +337,66 @@ def test_sabotage_blank_id_check_would_be_caught():
     finally:
         os.unlink(path)
 
+
+# ---------- find_duplicate_post_links tests ----------
+
+def test_find_duplicate_post_links_on_real_data_finds_none():
+    # confirmed against your real 2078-row export: 0 duplicates, the
+    # 6-row gap between rows and unique links is entirely blank links
+    # (Instagram Stories have none), not duplicate content
+    result = parse_media_csv(REAL_MEDIA_CSV)
+    dupes = find_duplicate_post_links(result)
+    assert dupes == {}
+
+
+def test_find_duplicate_post_links_detects_a_shared_link():
+    with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["id", "rights_status", "original_post_link"])
+        w.writerow(["id1", "NONE", "https://tiktok.com/@x/video/123"])
+        w.writerow(["id2", "NONE", "https://tiktok.com/@x/video/123"])  # same link, different id
+        path = f.name
+    try:
+        result = parse_media_csv(path)
+        dupes = find_duplicate_post_links(result)
+        assert dupes == {"https://tiktok.com/@x/video/123": ["id1", "id2"]}
+    finally:
+        os.unlink(path)
+
+
+def test_find_duplicate_post_links_ignores_blank_links():
+    with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["id", "rights_status", "original_post_link"])
+        w.writerow(["id1", "NONE", ""])
+        w.writerow(["id2", "NONE", ""])  # both blank -- not a duplicate, just missing data
+        path = f.name
+    try:
+        result = parse_media_csv(path)
+        dupes = find_duplicate_post_links(result)
+        assert dupes == {}
+    finally:
+        os.unlink(path)
+
+
+def test_find_duplicate_post_links_does_not_flag_a_unique_link_shared_with_nothing():
+    result = parse_media_csv(MEDIA_CSV)  # the smaller real sample, no known dupes
+    dupes = find_duplicate_post_links(result)
+    assert dupes == {}
+
+
+def test_sabotage_find_duplicate_post_links_missed_dupe_would_be_caught():
+    with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["id", "rights_status", "original_post_link"])
+        w.writerow(["id1", "NONE", "https://tiktok.com/@x/video/999"])
+        w.writerow(["id2", "NONE", "https://tiktok.com/@x/video/999"])
+        path = f.name
+    try:
+        result = parse_media_csv(path)
+        dupes = find_duplicate_post_links(result)
+        with pytest.raises(AssertionError):
+            assert dupes == {}  # wrong -- there IS a duplicate here
+        assert "https://tiktok.com/@x/video/999" in dupes  # confirms actual correct behavior
+    finally:
+        os.unlink(path)
