@@ -32,7 +32,6 @@ completes; see README "Testing the login flow".
 from __future__ import annotations
 
 import time
-from datetime import date, timedelta
 from pathlib import Path
 
 from playwright.sync_api import BrowserContext, Page, sync_playwright
@@ -43,39 +42,22 @@ REFUNNEL_BASE_URL = "https://app.refunnel.com"
 REFUNNEL_LOGIN_URL = f"{REFUNNEL_BASE_URL}/login"
 # Confirmed from real analytics data embedded in a session export you
 # shared -- the actual dashboard path includes /dashboard/content/, not
-# just the page name. The insights_timeline param is added on purpose:
-# with no date filter at all, Refunnel defaults to "Last 3 months"
-# (confirmed from every real screenshot's filter dropdown), capping
-# Master Data around ~2065-2088 rows even though you confirmed 2771
-# exist under "Last 12 months". This matches that exact filter, so the
-# daily pull actually covers what you were seeing manually. Note this
-# is still a ROLLING 12-month window, not "all time" -- content older
-# than 12 months would eventually age out of a fresh export, but
-# Master Data's never_delete=True protection means it's never actually
-# lost from the sheet even if a later pull no longer includes it.
+# just the page name.
 #
-# Confirmed for real: the first attempt at this (just adding
-# insights_timeline alone, no explicit from_date/to_date) did NOT
-# actually widen the pull -- Master Data stayed capped around
-# ~2088 rows instead of reaching the ~2771 you saw manually. Fixed
-# using the exact URL you captured from your address bar after
-# manually selecting "Last 12 months": Refunnel's "last12months" preset
-# ALSO sets explicit from_date/to_date bounds (to_date = today,
-# from_date = exactly 365 days earlier), plus sort_by and snv params --
-# all of which are now included, not just insights_timeline alone.
-# from_date/to_date are computed fresh each call so this stays a true
-# rolling window, not a date frozen at whatever day this was written.
-def refunnel_social_listening_url() -> str:
-    today = date.today()
-    from_date = today - timedelta(days=365)
-    return (
-        f"{REFUNNEL_BASE_URL}/dashboard/content/social-listening"
-        f"?sort_by=%22BY_DATE%22"
-        f"&from_date=%22{from_date.isoformat()}%22"
-        f"&to_date=%22{today.isoformat()}%22"
-        f"&snv=true"
-        f"&insights_timeline=%22last12months%22"
-    )
+# REVERTED back to no forced date filter (Refunnel's own default,
+# confirmed reliable at ~2065-2088 rows across many past runs) after
+# "Last 12 months" turned out to be broken on REFUNNEL'S side, not
+# ours -- confirmed two ways: (1) scroll_to_load_all stalled at exactly
+# the same post (@faisalofficial993, ~120 of 2771) on two separate real
+# runs, even after doubling how much patience it was given, and (2) you
+# reproduced the identical stall manually, scrolling that exact URL
+# yourself in a real browser -- and Refunnel's own manual export
+# feature capped out at just 20 rows under that same filter. Since a
+# genuine human, not just our automation, hits the same wall, this
+# isn't fixable from our side -- worth reporting to Refunnel's own
+# support team, since their manual export is affected too. If they ever
+# fix it, this is the only line that needs to change back.
+REFUNNEL_SOCIAL_LISTENING_URL = f"{REFUNNEL_BASE_URL}/dashboard/content/social-listening"
 
 
 # Confirmed for real (you sent the exact URL from your address bar):
