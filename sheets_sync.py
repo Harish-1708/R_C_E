@@ -29,6 +29,7 @@ should get a manual smoke test once real credentials are available.
 
 from __future__ import annotations
 
+import re
 from typing import Dict, List, Optional, Protocol
 
 from gspread.utils import rowcol_to_a1
@@ -48,6 +49,20 @@ class SheetsClient(Protocol):
         """Replace the tab's entire contents with `rows` (header + data),
         clearing anything currently there first."""
         ...
+
+
+def _flatten_cell(value) -> str:
+    """Stringify a cell value and collapse any embedded newlines to a
+    single space. Confirmed real cause of "one row huge, next one
+    normal" row heights: some fields (captions, in particular) contain
+    genuine `\\n` characters from the original post's own line breaks --
+    CLIP wrap strategy only stops Sheets from wrapping text that's too
+    WIDE for the column, it does nothing for a cell whose value already
+    contains real newlines, which forces multi-line rendering
+    regardless. Stripping them here means every row is uniformly
+    single-line, with CLIP handling the "too wide" case on top."""
+    text = str(value) if value is not None else ""
+    return re.sub(r"\s*[\r\n]+\s*", " ", text).strip()
 
 
 def _index_by_id(header: List[str], data_rows: List[List[str]], id_col: str) -> Dict[str, Dict[str, str]]:
@@ -108,6 +123,7 @@ def sync_tab(
     target_rows: Dict[str, dict],
     id_col: str = "id",
     sort_key: Optional[str] = None,
+    sort_reverse: bool = False,
     max_shrink_fraction: Optional[float] = None,
     never_delete: bool = False,
 ) -> dict:
@@ -139,6 +155,16 @@ def sync_tab(
     data pull (e.g. a browser scroll that stalled early) would
     otherwise silently delete real rows a previous, complete run had
     correctly written.
+
+    sort_key / sort_reverse: which field to sort rows by, and whether to
+    reverse it (e.g. sort_key="created_at", sort_reverse=True puts the
+    newest posts first). Only safe for fields whose string form sorts
+    the same as its real chronological/numeric order -- ISO-format
+    timestamps like created_at/updated_at do; a human-formatted date
+    like "Sep 4, 2026" does NOT (alphabetically "Dec" sorts before
+    "Jan", which is backwards across a year boundary), so don't use
+    sort_key for a field like that without parsing it into a sortable
+    form first.
 
     Returns a small summary dict, useful for logging:
         {"rows_written": int, "extra_columns_preserved": [str, ...],
@@ -177,17 +203,17 @@ def sync_tab(
 
     ids = list(target_rows.keys())
     if sort_key:
-        ids.sort(key=lambda i: target_rows[i].get(sort_key, ""))
+        ids.sort(key=lambda i: target_rows[i].get(sort_key, ""), reverse=sort_reverse)
     else:
         ids.sort()
 
     out_rows = [final_header]
     for row_id in ids:
         row = target_rows[row_id]
-        line = [str(row.get(col, "")) for col in known_columns]
+        line = [_flatten_cell(row.get(col, "")) for col in known_columns]
         if extra_columns:
             preserved = existing_by_id.get(row_id, {})
-            line += [str(preserved.get(col, "")) for col in extra_columns]
+            line += [_flatten_cell(preserved.get(col, "")) for col in extra_columns]
         out_rows.append(line)
 
     client.overwrite_all(out_rows)
