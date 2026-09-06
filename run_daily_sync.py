@@ -160,6 +160,15 @@ def main() -> int:
         if preloaded:
             print(f"Loaded {preloaded} previously-found creator email(s) from the sheet -- won't re-scrape those.")
 
+        # An email belongs to the creator, not the individual post --
+        # propagate any known email to every other post by that same
+        # username before deciding what still needs scraping. Confirmed
+        # real opportunity: 342 of 1360 unique usernames in a real
+        # export appear on 2+ posts.
+        propagated = parse_refunnel.propagate_emails_by_username(result)
+        if propagated:
+            print(f"Propagated {propagated} creator email(s) to other posts by the same username.")
+
         if refunnel_export.SCRAPE_EMAILS_ENABLED:
             # Write Master Data NOW, before scraping starts, so there
             # are actual rows in the sheet for update_single_cell() to
@@ -179,52 +188,78 @@ def main() -> int:
                     print(f"(incremental save: media_id={media_id!r} not found in Master Data yet -- "
                           f"will still be saved in the final full sync at the end)")
 
-            target_ids = parse_refunnel.rows_needing_email_scrape(result)
-            try:
-                emails = refunnel_export.scrape_creator_emails(
-                    page, result.master, target_ids,
-                    debug_dir=f"{download_dir}/debug",
-                    on_email_found=_save_email_incrementally,
-                )
-                updated = parse_refunnel.apply_creator_emails(result, emails)
-                print(f"Scraped {updated} new creator email(s) for usage-rights rows.")
-            except Exception as e:
-                # Don't let a scraping crash (e.g. the browser itself
-                # crashing) take down the rest of the run -- whatever
-                # was found before the crash is already saved to Master
-                # Data via the incremental callback above. Continue on
-                # to the re-sync step below and the rest of the
-                # pipeline (payments, other tabs) rather than aborting.
-                print(f"WARNING: email scraping did not finish cleanly ({type(e).__name__}: {e}). "
-                      f"Continuing with whatever was incrementally saved to Master Data so far.")
+            # A crashed browser no longer just gets one recovery to
+            # limp to Payments -- confirmed from real runs that a
+            # single scheduled run can hit the browser-crash circuit
+            # breaker repeatedly, each time only getting through a
+            # fraction of what's left, requiring you to keep manually
+            # re-triggering. Now it automatically recovers AND resumes
+            # scraping the remaining ids, up to a bounded number of
+            # restarts, so one scheduled run gets much further on its
+            # own. Each loop also re-checks target_ids fresh (shrunk by
+            # both newly-scraped AND newly-propagated emails), and
+            # propagates after every attempt, not just once at the top.
+            max_scrape_restarts = 3
+            for attempt in range(max_scrape_restarts + 1):
+                target_ids = parse_refunnel.rows_needing_email_scrape(result)
+                if not target_ids:
+                    print("No posts left needing an email -- scraping is done for this run.")
+                    break
 
-            # Master Data is the only tab any scraping/email logic ever
-            # touches directly. Every other tab's creator_email just
-            # gets copied from whatever's ACTUALLY in Master Data's
-            # sheet right now -- re-read here rather than trusting the
-            # in-memory `result` to have survived the scraping step
-            # uninterrupted. This makes the other tabs correct even if
-            # scraping above crashed partway through: Usage Rights /
-            # Human Review will reflect real, saved progress, not stale
-            # data from before this run started.
-            refreshed_emails = sheets_sync.read_column_values(master_client, "creator_email")
-            resynced = parse_refunnel.apply_creator_emails(result, refreshed_emails)
-            print(f"Re-synced {resynced} creator email(s) from Master Data's current sheet state.")
+                try:
+                    emails = refunnel_export.scrape_creator_emails(
+                        page, result.master, target_ids,
+                        debug_dir=f"{download_dir}/debug",
+                        on_email_found=_save_email_incrementally,
+                    )
+                    updated = parse_refunnel.apply_creator_emails(result, emails)
+                    print(f"Scraped {updated} new creator email(s) (attempt {attempt + 1}).")
+                except Exception as e:
+                    # Don't let a scraping crash take down the rest of
+                    # the run -- whatever was found before the crash is
+                    # already saved to Master Data via the incremental
+                    # callback above.
+                    print(f"WARNING: email scraping did not finish cleanly ({type(e).__name__}: {e}).")
 
-            # Confirm the browser actually survived scraping before
-            # trying to keep using it -- confirmed from a real run: it
-            # crashed mid-scrape, the circuit breaker correctly stopped
-            # scraping and returned cleanly, but the NEXT action
-            # (navigating to Payments) then failed too, because it
-            # tried to reuse the same already-dead page. If it's dead,
-            # get a fresh logged-in session (reusing the saved cookies,
-            # no full re-login needed) rather than limping forward with
-            # a browser that's already gone.
-            try:
-                page.evaluate("() => 1")
-            except Exception:
-                print("Browser appears to have crashed during scraping -- "
-                      "recovering with a fresh session before continuing.")
+                propagated = parse_refunnel.propagate_emails_by_username(result)
+                if propagated:
+                    print(f"Propagated {propagated} creator email(s) to other posts by the same username.")
+
+                # Master Data is the only tab any scraping/email logic
+                # ever touches directly. Every other tab's creator_email
+                # just gets copied from whatever's ACTUALLY in Master
+                # Data's sheet right now -- re-read here rather than
+                # trusting the in-memory `result` to have survived the
+                # scraping step uninterrupted.
+                refreshed_emails = sheets_sync.read_column_values(master_client, "creator_email")
+                resynced = parse_refunnel.apply_creator_emails(result, refreshed_emails)
+                print(f"Re-synced {resynced} creator email(s) from Master Data's current sheet state.")
+
+                try:
+                    page.evaluate("() => 1")
+                    page_survived = True
+                except Exception:
+                    page_survived = False
+
+                if page_survived:
+                    # Scraping stopped for a reason other than a crash
+                    # (e.g. the circuit breaker tripped on a genuine,
+                    # non-crash problem) -- retrying won't help there,
+                    # so don't burn a restart on it.
+                    break
+
+                if attempt >= max_scrape_restarts:
+                    print(f"Browser crashed and the {max_scrape_restarts}-restart budget for "
+                          f"this run is used up -- moving on with what was found. The rest "
+                          f"will be picked up on a future run.")
+
+                else:
+                    print(f"Browser crashed during scraping -- recovering and resuming "
+                          f"(restart {attempt + 1} of {max_scrape_restarts})...")
+
+                # Either way (final giveup or about to retry), we need a
+                # healthy page again -- for the next scrape attempt, or
+                # for Payments right after this loop.
                 for cleanup in (context.close, browser.close, p.stop):
                     try:
                         cleanup()
@@ -236,6 +271,9 @@ def main() -> int:
                 page = context.new_page()
                 page.goto(refunnel_auth.REFUNNEL_SOCIAL_LISTENING_URL)
                 refunnel_export.select_workspace(page, refunnel_workspace_name, known_workspace_names)
+
+                if attempt >= max_scrape_restarts:
+                    break
 
         # --- 4. NOW it's safe to navigate away and export payments ---
         page.goto(refunnel_auth.REFUNNEL_PAYMENTS_URL)
