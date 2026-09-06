@@ -180,13 +180,36 @@ def main() -> int:
                           f"will still be saved in the final full sync at the end)")
 
             target_ids = parse_refunnel.rows_needing_email_scrape(result)
-            emails = refunnel_export.scrape_creator_emails(
-                page, result.master, target_ids,
-                debug_dir=f"{download_dir}/debug",
-                on_email_found=_save_email_incrementally,
-            )
-            updated = parse_refunnel.apply_creator_emails(result, emails)
-            print(f"Scraped {updated} new creator email(s) for usage-rights rows.")
+            try:
+                emails = refunnel_export.scrape_creator_emails(
+                    page, result.master, target_ids,
+                    debug_dir=f"{download_dir}/debug",
+                    on_email_found=_save_email_incrementally,
+                )
+                updated = parse_refunnel.apply_creator_emails(result, emails)
+                print(f"Scraped {updated} new creator email(s) for usage-rights rows.")
+            except Exception as e:
+                # Don't let a scraping crash (e.g. the browser itself
+                # crashing) take down the rest of the run -- whatever
+                # was found before the crash is already saved to Master
+                # Data via the incremental callback above. Continue on
+                # to the re-sync step below and the rest of the
+                # pipeline (payments, other tabs) rather than aborting.
+                print(f"WARNING: email scraping did not finish cleanly ({type(e).__name__}: {e}). "
+                      f"Continuing with whatever was incrementally saved to Master Data so far.")
+
+            # Master Data is the only tab any scraping/email logic ever
+            # touches directly. Every other tab's creator_email just
+            # gets copied from whatever's ACTUALLY in Master Data's
+            # sheet right now -- re-read here rather than trusting the
+            # in-memory `result` to have survived the scraping step
+            # uninterrupted. This makes the other tabs correct even if
+            # scraping above crashed partway through: Usage Rights /
+            # Human Review will reflect real, saved progress, not stale
+            # data from before this run started.
+            refreshed_emails = sheets_sync.read_column_values(master_client, "creator_email")
+            resynced = parse_refunnel.apply_creator_emails(result, refreshed_emails)
+            print(f"Re-synced {resynced} creator email(s) from Master Data's current sheet state.")
 
         # --- 4. NOW it's safe to navigate away and export payments ---
         page.goto(refunnel_auth.REFUNNEL_PAYMENTS_URL)
