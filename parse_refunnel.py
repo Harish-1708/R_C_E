@@ -290,6 +290,35 @@ def apply_creator_emails(result: ParseResult, emails: Dict[str, str]) -> int:
     return updated
 
 
+def find_duplicate_post_links(result: ParseResult) -> Dict[str, List[str]]:
+    """Detect real duplicate CONTENT -- the same underlying video/post
+    showing up under two different `id`s. `id` is Refunnel's own and
+    already prevents duplicate rows for the same id (confirmed: 2078
+    unique ids for 2078 real rows, with usernames legitimately
+    repeating -- multiple videos from the same creator is normal, not a
+    duplicate). But if Refunnel ever assigned two different ids to what
+    is actually the same post, id-based dedup alone wouldn't catch it.
+
+    This checks the second, independent signal available --
+    `original_post_link` (the actual TikTok/IG URL) -- and returns
+    {link: [id1, id2, ...]} for any link shared by 2+ different ids.
+    Blank links (e.g. Instagram Stories, which have none) are ignored --
+    that's missing data, not a duplicate.
+
+    This is diagnostic only -- it does NOT remove anything automatically
+    (a shared link could have a legitimate reason, e.g. two distinct
+    relation_types like TAGGED and MENTIONED for the same post), so
+    the caller decides what, if anything, to do with the result.
+    """
+    by_link: Dict[str, List[str]] = {}
+    for media_id, row in result.master.items():
+        link = row.get("original_post_link", "").strip()
+        if not link:
+            continue
+        by_link.setdefault(link, []).append(media_id)
+    return {link: ids for link, ids in by_link.items() if len(ids) > 1}
+
+
 def rows_needing_email_scrape(result: ParseResult) -> List[str]:
     """Return media ids that still need a scraped email -- scoped to
     ONLY rights_requested, not approved/declined.
