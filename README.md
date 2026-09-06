@@ -331,18 +331,42 @@ site. Please work through this checklist once real credentials exist:
   itself was already confirmed correct and is unchanged -- still worth a
   fresh real run to confirm the full 2078 now loads.
 - [ ] **Email scraping** (`scrape_creator_emails` in `refunnel_export.py`):
-  now built entirely from a real, complete HTML trace of the whole flow
-  (card -> popover -> modal), not a guess -- `.usage-rights-request-card`,
-  the `role="menuitem"` popover item, the `.ur-tab-card` Email tab (active
-  by default), and `get_by_label("Creator email address")` are all
-  confirmed real selectors. `SCRAPE_EMAILS_ENABLED = False` by default
-  regardless -- this still needs a real run before trusting it, because
-  the page uses react-virtuoso (a virtualized grid that only keeps
-  nearby cards mounted), which no amount of HTML inspection can fully
-  verify without watching it actually scroll and load in a live
-  browser. It will never click "Send request" regardless of anything
-  else going wrong -- that's enforced by `_safe_click`'s pattern check,
-  independent of whatever selector logic runs above it.
+  built from a real, complete HTML trace of the whole flow, for BOTH
+  never-requested and already-Requested posts. Confirmed real selectors:
+  `.usage-rights-request-card` / `.usage-rights-requested-card` (the
+  toggle -- class name differs by status, both matched), the popup's
+  top menu item (matched by its subtitle text, which is identical
+  regardless of status, since the title text isn't), the `.ur-tab-card`
+  Email tab (active by default, confirmed for both statuses), and
+  `get_by_label("Creator email address")`. `SCRAPE_EMAILS_ENABLED =
+  False` by default regardless -- flip it yourself to test. It will
+  never click "Send request" regardless of anything else going wrong --
+  enforced by `_safe_click`'s pattern check, independent of whatever
+  selector logic runs above it.
+  **Scoped to Requested-only**: a real run's debug screenshot confirmed
+  Approved posts replace the request button with a status badge --
+  "Usage rights approved -- Via direct post permission" -- with no
+  button to click at all; every attempt on one was a guaranteed
+  failure. `rows_needing_email_scrape()` only returns Requested rows;
+  Declined is presumed to behave like Approved but isn't separately
+  confirmed (0 declined rows existed to test against). The circuit
+  breaker (`max_consecutive_failures`, default 25 -- deliberately
+  generous, since a single isolated failure just skips to the next
+  post as normal) is still there as a last resort if this turns out
+  wrong too.
+- [x] **Progress saved incrementally**: emails are now written to the
+  sheet as each one is found (`update_single_cell`), not only at the
+  very end -- so an interruption mid-scrape doesn't lose what was
+  already found.
+- [x] **Duplicate-content check**: verified against your real 2078-row
+  export -- 0 duplicate `original_post_link` values (the 6-row gap
+  between total rows and unique links is entirely blank links, from
+  Instagram Stories which have none -- not duplicates). `id`-based
+  dedup already prevents duplicate rows; `find_duplicate_post_links()`
+  adds a second, independent check using the actual post URL, in case
+  Refunnel ever assigns two different ids to the same real post. It's
+  diagnostic only (logs a warning) -- never auto-removes a row, since a
+  shared link could have a legitimate reason.
 - [ ] **A full end-to-end run for Duderobe**: once the above are fixed,
   trigger the workflow manually once (Actions tab -> Run workflow,
   workspace = Duderobe) and check the Sheet updates correctly before
@@ -374,6 +398,14 @@ within a couple minutes -- it should print the code it found.
 - **Manual columns you add to any tab** (e.g. a "Notes" column, or the
   "Human Review" tab's own review-status column) are preserved across
   runs, matched back to rows by `id`.
+- **Master Data and Payments can only ever gain rows or update existing
+  ones -- never lose one**, regardless of what a given run's pull looks
+  like (`sync_tab(..., never_delete=True)`). If an id from a previous
+  run is missing from today's fresh pull, it's carried forward
+  unchanged rather than dropped. Usage Rights tabs and Human Review are
+  deliberately NOT protected this way, since rows leaving them (a
+  status changing, a post marked Reviewed) is correct, intended
+  behavior, not data loss.
 - **CLIP text wrapping + a frozen, bolded header** on every tab, for
   consistent row heights instead of one long caption blowing out a
   single row's height next to short ones.
