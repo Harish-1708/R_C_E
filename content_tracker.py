@@ -34,6 +34,7 @@ TRACKER_COLUMNS = [
     "Product",
     "Sub Category",
     "Content Type",
+    "Post Type",
     "Theme",
     "Usage Rights",
     "Refunnel Link",
@@ -50,7 +51,7 @@ TRACKER_COLUMNS = [
 
 FREEZE_ONCE_SET_COLUMNS = [
     "Brand", "Platform", "Creator", "Product", "Sub Category",
-    "Content Type", "Theme", "Refunnel Link", "Video File", "Created At",
+    "Content Type", "Post Type", "Theme", "Refunnel Link", "Video File", "Created At",
 ]
 REFRESH_COLUMNS = ["Usage Rights", "Creator Email"]
 MANUAL_COLUMNS = [
@@ -136,6 +137,28 @@ def derive_content_type(viewable_media_type: str) -> str:
     return CONTENT_TYPE_DISPLAY.get((viewable_media_type or "").strip().upper(), "")
 
 
+# Sourced from Refunnel's own post_type field -- confirmed real,
+# cross-referenced against platform in an actual export: TikTok+VIDEO
+# (2034), Instagram+REELS (35), Instagram+STORY (5), TikTok+STORY (3),
+# PRIVATE+PRIVATE (1, a since-restricted post). This is the separate,
+# richer dimension from Refunnel's own "Post Type" filter (distinct
+# from "Content Type" -- their own UI treats Story as a Post Type, not
+# a Content Type, which is exactly why Content Type is sourced from
+# viewable_media_type instead of this field).
+POST_TYPE_DISPLAY = {
+    "VIDEO": "Video",
+    "REELS": "Reels",
+    "STORY": "Story",
+    "PRIVATE": "Private",
+}
+
+
+def derive_post_type(post_type: str) -> str:
+    """Maps Master Data's post_type to a display label. Blank/unknown
+    values stay blank rather than guessing."""
+    return POST_TYPE_DISPLAY.get((post_type or "").strip().upper(), "")
+
+
 def _clean_theme_text(caption: str, hashtags: str) -> str:
     text = f"{caption or ''} {hashtags or ''}".lower()
     return re.sub(r"#?tiktokshop\w*", "", text)
@@ -198,6 +221,7 @@ def build_fresh_tracker_row(master_row: Dict[str, str], brand: str) -> Dict[str,
     """
     product, sub_category = derive_product_and_subcategory(brand, master_row.get("products", ""))
     content_type = derive_content_type(master_row.get("viewable_media_type", ""))
+    post_type = derive_post_type(master_row.get("post_type", ""))
     theme = derive_theme(master_row.get("caption", ""), master_row.get("hashtags", ""))
     return {
         "id": master_row.get("id", ""),
@@ -208,6 +232,7 @@ def build_fresh_tracker_row(master_row: Dict[str, str], brand: str) -> Dict[str,
         "Product": product,
         "Sub Category": sub_category,
         "Content Type": content_type,
+        "Post Type": post_type,
         "Theme": theme,
         "Usage Rights": RIGHTS_STATUS_DISPLAY.get(master_row.get("rights_status", ""), ""),
         "Refunnel Link": master_row.get("media_url", ""),
