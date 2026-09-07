@@ -196,7 +196,7 @@ refunnel-sync/
 | `run_daily_sync.py` | Orchestrates the above into one workspace's run | Syntax-checked only |
 | `build_preview_workbook.py` | One-off: builds a local xlsx to eyeball tab structure before wiring up live Sheets | Run, produced `refunnel_sync_preview.xlsx` |
 | `.github/workflows/refunnel-sync.yml` | Daily schedule + matrix over workspaces | Not run |
-| `content_tracker.py` | Pure logic for the Content Tracker: Product/Sub Category detection, the freeze/refresh/manual column policy | 21 automated tests |
+| `content_tracker.py` | Pure logic for the Content Tracker: Product/Sub Category/Content Type/Theme detection, the freeze/refresh/manual column policy | 37 automated tests |
 | `build_content_tracker.py` | Orchestrates content_tracker.py against real Google Sheets, one tab per brand | 5 automated tests against fakes |
 | `.github/workflows/content-tracker.yml` | Separate daily schedule, 2 hours after the main export | Not run |
 
@@ -267,6 +267,51 @@ Swoveralls/Defi Snacks/Kelson have no rule yet (never had real Master
 Data to build one from) -- both fields stay blank there regardless,
 until a real rule can be written the same way this one was: from
 actual data, not a guess.
+
+**Content Type detection**: from Master Data's `media_type` field
+(added to `MASTER_COLUMNS` specifically to support this -- it wasn't
+being captured before). VIDEO -> "UGC Video", STORY -> "UGC Story",
+IMAGE -> "UGC Photo". Deliberately this simple: confirmed real that
+~98% of Duderobe's Master Data is VIDEO, since Refunnel only tracks
+creator-generated content -- it has no visibility into the separate
+official content folder or Howie's older archive mentioned in the
+original ticket, so a genuine "product photo" or studio "lifestyle"
+category isn't derivable from this data at all. Checked captions for
+more specific style descriptors (unboxing, review, haul) too -- too
+rare (4-16 of 2078) to be a reliable column on their own, so those live
+in Theme instead, only when a caption actually says so.
+
+**Theme detection**: keyword-matched against `caption` + `hashtags`,
+checked in priority order (see `THEME_KEYWORDS` in
+`content_tracker.py`) so an explicit occasion always wins over generic
+gift language -- "father's day" mentioned -> Father's Day, even though
+the caption likely also says "gift"; "gift for dad" with no explicit
+occasion -> Gift-Giving. Confirmed real distribution across the full
+~2078-row backlog:
+
+| Theme | Rows |
+|---|---|
+| Gift-Giving | 268 |
+| Self-Care/Cozy | 149 |
+| Father's Day | 90 |
+| Athletic/Workout | 50 |
+| Christmas/Holiday | 24 |
+| Try-On/Haul | 12 |
+| Winter/Cold Weather | 8 |
+| Birthday | 3 |
+| Travel/Vacation | 1 |
+| Unboxing | 1 |
+| *(no match -- left blank)* | 1,472 |
+
+Valentine's Day, Mother's Day, Wedding/Honeymoon, and Graduation are
+included as categories for future content and year-round campaign
+planning, but confirmed 0 matches in the current backlog even with a
+broad keyword search -- makes some sense for a men's robe brand.
+`#tiktokshop`-prefixed hashtags (e.g. `#tiktokshopbacktoschool`,
+`#tiktokshopsummersale`) are stripped before matching -- confirmed
+real: those are TikTok Shop's own promotional campaign tags, appearing
+on totally unrelated robe videos, not genuine content about summer or
+school.
 
 **Same never_delete protection as Master Data** -- a row already in
 the tracker is never dropped for being momentarily missing from a
