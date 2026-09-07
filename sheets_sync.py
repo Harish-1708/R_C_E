@@ -65,7 +65,12 @@ def _flatten_cell(value) -> str:
     return re.sub(r"\s*[\r\n]+\s*", " ", text).strip()
 
 
-def _index_by_id(header: List[str], data_rows: List[List[str]], id_col: str) -> Dict[str, Dict[str, str]]:
+def index_by_id(header: List[str], data_rows: List[List[str]], id_col: str) -> Dict[str, Dict[str, str]]:
+    """Turn a sheet's raw (header, data_rows) into id -> {column: value}.
+    Public -- used internally by sync_tab for extra-column/never_delete
+    merging, and by other scripts (e.g. build_content_tracker.py) that
+    need to read an existing tab's current state the same way.
+    """
     if id_col not in header:
         return {}
     id_idx = header.index(id_col)
@@ -176,7 +181,7 @@ def sync_tab(
 
     rows_carried_forward = 0
     if never_delete:
-        existing_by_id_full = _index_by_id(existing_header, existing_data, id_col)
+        existing_by_id_full = index_by_id(existing_header, existing_data, id_col)
         merged = dict(target_rows)
         for row_id, old_row in existing_by_id_full.items():
             if row_id not in merged:
@@ -203,7 +208,7 @@ def sync_tab(
     # forward indefinitely as "extra columns". A real manual column
     # (like a "Notes" header you add yourself) always has a name.
     extra_columns = [c for c in existing_header if c not in known_columns and c.strip()]
-    existing_by_id = _index_by_id(existing_header, existing_data, id_col) if extra_columns else {}
+    existing_by_id = index_by_id(existing_header, existing_data, id_col) if extra_columns else {}
 
     final_header = list(known_columns) + extra_columns
 
