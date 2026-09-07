@@ -222,13 +222,26 @@ def merge_tracker_row(existing_row: Optional[Dict[str, str]], fresh_row: Dict[st
     Brand new row (existing_row is None): use the fresh values as-is --
     there's nothing to freeze yet, and manual columns start blank.
 
-    Existing row: start from exactly what's already there (freezing
-    FREEZE_ONCE_SET_COLUMNS and MANUAL_COLUMNS by construction, since
-    they're simply never touched below), then update ONLY
-    REFRESH_COLUMNS -- and even then, only when the fresh value is
+    Existing row: start from exactly what's already there, then update
+    ONLY REFRESH_COLUMNS -- and even then, only when the fresh value is
     non-blank, so a blank Master Data value (or a run where scraping
     hasn't caught up yet) never erases something already sitting in the
     tracker, manually typed or previously scraped.
+
+    FREEZE_ONCE_SET_COLUMNS are frozen once they actually HAVE a value
+    -- but if one is still blank (either genuinely no source info yet,
+    or -- confirmed real bug -- because the column was added to the
+    schema AFTER this row already existed in the tracker, so it never
+    got a first chance to compute anything), it's allowed to take a
+    fresh value now. A real run showed this exactly: adding Content
+    Type/Theme to an already-populated tracker left every existing row
+    frozen at blank forever, since "existing but blank" and "genuinely
+    already computed" were being treated the same way. Once a column
+    has any real value, freezing kicks in as normal -- this only
+    affects columns that have never actually been set for that row.
+    MANUAL_COLUMNS are unaffected either way -- they're not written by
+    build_fresh_tracker_row at all, so this loop naturally never touches
+    them.
     """
     if existing_row is None:
         return dict(fresh_row)
@@ -238,6 +251,9 @@ def merge_tracker_row(existing_row: Optional[Dict[str, str]], fresh_row: Dict[st
         fresh_value = fresh_row.get(col, "")
         if fresh_value:
             merged[col] = fresh_value
+    for col in FREEZE_ONCE_SET_COLUMNS:
+        if not merged.get(col, ""):
+            merged[col] = fresh_row.get(col, "")
     return merged
 
 
