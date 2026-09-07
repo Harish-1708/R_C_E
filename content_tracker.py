@@ -42,6 +42,7 @@ TRACKER_COLUMNS = [
     "Ad Ready",
     "Notes",
     "Contact Status",
+    "Last Contacted Date",
 ]
 
 FREEZE_ONCE_SET_COLUMNS = [
@@ -50,7 +51,8 @@ FREEZE_ONCE_SET_COLUMNS = [
 ]
 REFRESH_COLUMNS = ["Usage Rights", "Creator Email"]
 MANUAL_COLUMNS = [
-    "Summary", "Product Score", "Rights Duration", "Ad Ready", "Notes", "Contact Status",
+    "Summary", "Product Score", "Rights Duration", "Ad Ready", "Notes",
+    "Contact Status", "Last Contacted Date",
 ]
 
 # Confirmed real: you asked for "Declined", not Master Data's internal
@@ -126,6 +128,7 @@ def build_fresh_tracker_row(master_row: Dict[str, str], brand: str) -> Dict[str,
         "Ad Ready": "",
         "Notes": "",
         "Contact Status": "",
+        "Last Contacted Date": "",
     }
 
 
