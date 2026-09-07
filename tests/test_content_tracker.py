@@ -217,8 +217,12 @@ def test_content_type_video():
     assert derive_content_type("VIDEO") == "UGC Video"
 
 
-def test_content_type_story():
-    assert derive_content_type("STORY") == "UGC Story"
+def test_content_type_story_is_not_a_content_type_at_all():
+    # confirmed real: Refunnel's own UI treats Story as a Post Type,
+    # not a Content Type -- their "Content type" filter only has
+    # Video/Image, so STORY correctly maps to blank here, not a
+    # fabricated "UGC Story" category
+    assert derive_content_type("STORY") == ""
 
 
 def test_content_type_image():
@@ -235,10 +239,10 @@ def test_content_type_blank_stays_blank():
 
 
 def test_sabotage_content_type_wrong_mapping_would_be_caught():
-    result = derive_content_type("STORY")
+    result = derive_content_type("IMAGE")
     with pytest.raises(AssertionError):
         assert result == "UGC Video"  # wrong -- that's the VIDEO mapping
-    assert result == "UGC Story"
+    assert result == "UGC Photo"
 
 
 # ---------- derive_theme ----------
@@ -302,7 +306,7 @@ def test_build_fresh_tracker_row_includes_content_type_and_theme():
     row = build_fresh_tracker_row(
         {
             **_sample_master_row(),
-            "media_type": "VIDEO",
+            "viewable_media_type": "VIDEO",
             "caption": "Perfect Father's Day gift!",
             "hashtags": "#fathersday",
         },
@@ -313,10 +317,10 @@ def test_build_fresh_tracker_row_includes_content_type_and_theme():
 
 
 def test_merge_freezes_content_type_and_theme_too():
-    existing = build_fresh_tracker_row({**_sample_master_row(), "media_type": "VIDEO", "caption": "gift for dad", "hashtags": ""}, "Duderobe")
+    existing = build_fresh_tracker_row({**_sample_master_row(), "viewable_media_type": "VIDEO", "caption": "gift for dad", "hashtags": ""}, "Duderobe")
     existing["Theme"] = "Gift-Giving"  # frozen from an earlier run
     # today's Master Data caption changed to explicitly mention Father's Day
-    fresh = build_fresh_tracker_row({**_sample_master_row(), "media_type": "VIDEO", "caption": "Father's Day special", "hashtags": "#fathersday"}, "Duderobe")
+    fresh = build_fresh_tracker_row({**_sample_master_row(), "viewable_media_type": "VIDEO", "caption": "Father's Day special", "hashtags": "#fathersday"}, "Duderobe")
     merged = merge_tracker_row(existing, fresh)
     assert merged["Theme"] == "Gift-Giving"  # frozen, NOT recomputed
 
@@ -332,7 +336,7 @@ def test_merge_gives_a_first_value_to_a_column_that_never_existed_before():
     del existing["Content Type"]  # simulates a row from before this column existed
     del existing["Theme"]
     fresh = build_fresh_tracker_row(
-        {**_sample_master_row(), "media_type": "VIDEO", "caption": "Father's Day gift", "hashtags": "#fathersday"},
+        {**_sample_master_row(), "viewable_media_type": "VIDEO", "caption": "Father's Day gift", "hashtags": "#fathersday"},
         "Duderobe",
     )
     merged = merge_tracker_row(existing, fresh)
@@ -343,9 +347,9 @@ def test_merge_gives_a_first_value_to_a_column_that_never_existed_before():
 def test_merge_still_freezes_a_column_that_already_has_a_real_value():
     # the fix must NOT undo the original freeze behavior for a column
     # that genuinely already has a value
-    existing = build_fresh_tracker_row({**_sample_master_row(), "media_type": "VIDEO"}, "Duderobe")
+    existing = build_fresh_tracker_row({**_sample_master_row(), "viewable_media_type": "VIDEO"}, "Duderobe")
     existing["Content Type"] = "UGC Video"  # already set from an earlier run
-    fresh = build_fresh_tracker_row({**_sample_master_row(), "media_type": "IMAGE"}, "Duderobe")
+    fresh = build_fresh_tracker_row({**_sample_master_row(), "viewable_media_type": "IMAGE"}, "Duderobe")
     merged = merge_tracker_row(existing, fresh)
     assert merged["Content Type"] == "UGC Video"  # NOT recomputed to UGC Photo
 
