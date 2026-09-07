@@ -256,7 +256,7 @@ UTC), so each brand's Master Data has had a chance to update first.
   so you can type an email in directly here before Master Data has it,
   without a later run wiping it out.
 - **Manual** (Summary, Product Score, Rights Duration, Ad Ready, Notes,
-  Contact Status): never touched by any automated write, ever.
+  Contact Status, Last Contacted Date): never touched by any automated write, ever.
 
 **Product / Sub Category detection** (Duderobe only so far -- see
 `content_tracker.py`'s docstring): based on Master Data's own
