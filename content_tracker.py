@@ -19,6 +19,7 @@ Column policy, as agreed:
 """
 from __future__ import annotations
 
+import re
 from typing import Dict, Optional
 
 TRACKER_COLUMNS = [
@@ -32,6 +33,8 @@ TRACKER_COLUMNS = [
     "Creator Email",
     "Product",
     "Sub Category",
+    "Content Type",
+    "Theme",
     "Usage Rights",
     "Refunnel Link",
     "Video File",
@@ -47,7 +50,7 @@ TRACKER_COLUMNS = [
 
 FREEZE_ONCE_SET_COLUMNS = [
     "Brand", "Platform", "Creator", "Product", "Sub Category",
-    "Refunnel Link", "Video File", "Created At",
+    "Content Type", "Theme", "Refunnel Link", "Video File", "Created At",
 ]
 REFRESH_COLUMNS = ["Usage Rights", "Creator Email"]
 MANUAL_COLUMNS = [
@@ -64,6 +67,79 @@ RIGHTS_STATUS_DISPLAY = {
     "GRANTED": "Granted",
     "DENIED": "Declined",
 }
+
+# Confirmed real: Master Data's media_type is ~98% "VIDEO" -- Refunnel
+# only tracks creator-generated content, never the separate official
+# content folder or older archive, so there's no genuine "product
+# photo" or studio "lifestyle" category available from this data at
+# all. This is deliberately the full extent of Content Type -- checked
+# captions for more specific style descriptors (unboxing, review,
+# haul) and they're too rare (4-16 out of 2078) to be a reliable
+# column on their own, so those live in Theme instead, only when a
+# caption actually says so.
+CONTENT_TYPE_DISPLAY = {
+    "VIDEO": "UGC Video",
+    "STORY": "UGC Story",
+    "IMAGE": "UGC Photo",
+}
+
+# Checked IN ORDER -- first match wins. This is what makes the priority
+# rule work: explicit occasion names (Father's Day, etc.) are listed
+# BEFORE the generic "Gift-Giving" catch-all, so "father's day" matches
+# Father's Day even though the caption also very likely contains
+# "gift" -- while "gift for dad" with no explicit occasion falls
+# through to Gift-Giving, exactly as you described.
+#
+# Valentine's Day / Mother's Day / Wedding-Honeymoon / Graduation:
+# confirmed 0 matches in the real ~2078-row backlog even with a broad
+# keyword net, kept here anyway for future content and for your
+# year-round campaign planning -- they just won't tag anything in the
+# existing backlog today.
+#
+# "tiktokshop"-prefixed hashtags are stripped before matching (see
+# _clean_theme_text) -- confirmed real: #tiktokshopbacktoschool and
+# #tiktokshopsummersale appear on totally unrelated robe videos (a
+# TikTok Shop platform promotional tag, not real content about summer
+# or school), which would otherwise falsely tag hundreds of rows.
+THEME_KEYWORDS = [
+    ("Valentine's Day", ["valentine", "vday"]),
+    ("Mother's Day", ["mothersday", "mother's day", "giftformom", "for mom"]),
+    ("Father's Day", ["fathersday", "father's day"]),
+    ("Wedding/Honeymoon", ["honeymoon", "wedding", "bridal", "groomsmen"]),
+    ("Birthday", ["birthday", "bday"]),
+    ("Graduation", ["graduation", "grad gift"]),
+    ("Christmas/Holiday", ["christmas", "xmas", "holiday", "stocking"]),
+    ("Gift-Giving", ["gift", "present"]),
+    ("Self-Care/Cozy", ["selfcare", "self care", "cozy", "relax"]),
+    ("Winter/Cold Weather", ["winter", "cold"]),
+    ("Athletic/Workout", ["workout", "gym", "ufc", "athletic"]),
+    ("Travel/Vacation", ["travel", "vacation", "cruise"]),
+    ("Try-On/Haul", ["tryon", "try on", "haul"]),
+    ("Unboxing", ["unboxing", "unbox"]),
+]
+
+
+def derive_content_type(media_type: str) -> str:
+    """Maps Master Data's media_type to a display label. Blank/unknown
+    values stay blank rather than guessing."""
+    return CONTENT_TYPE_DISPLAY.get((media_type or "").strip().upper(), "")
+
+
+def _clean_theme_text(caption: str, hashtags: str) -> str:
+    text = f"{caption or ''} {hashtags or ''}".lower()
+    return re.sub(r"#?tiktokshop\w*", "", text)
+
+
+def derive_theme(caption: str, hashtags: str) -> str:
+    """Checks THEME_KEYWORDS in order, first match wins. Blank if
+    nothing matches -- confirmed real: roughly 60% of the real backlog
+    won't match any current theme, and that's fine, per your
+    instruction to leave it blank rather than force a guess."""
+    text = _clean_theme_text(caption, hashtags)
+    for theme, keywords in THEME_KEYWORDS:
+        if any(kw in text for kw in keywords):
+            return theme
+    return ""
 
 
 def derive_product_and_subcategory(brand: str, products_field: str) -> tuple[str, str]:
@@ -110,6 +186,8 @@ def build_fresh_tracker_row(master_row: Dict[str, str], brand: str) -> Dict[str,
     merge_tracker_row() for an id that already exists in the tracker.
     """
     product, sub_category = derive_product_and_subcategory(brand, master_row.get("products", ""))
+    content_type = derive_content_type(master_row.get("media_type", ""))
+    theme = derive_theme(master_row.get("caption", ""), master_row.get("hashtags", ""))
     return {
         "id": master_row.get("id", ""),
         "Brand": brand,
@@ -118,6 +196,8 @@ def build_fresh_tracker_row(master_row: Dict[str, str], brand: str) -> Dict[str,
         "Creator Email": master_row.get("creator_email", ""),
         "Product": product,
         "Sub Category": sub_category,
+        "Content Type": content_type,
+        "Theme": theme,
         "Usage Rights": RIGHTS_STATUS_DISPLAY.get(master_row.get("rights_status", ""), ""),
         "Refunnel Link": master_row.get("media_url", ""),
         "Video File": master_row.get("original_post_link", ""),
