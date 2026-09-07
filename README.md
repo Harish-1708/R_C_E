@@ -196,7 +196,7 @@ refunnel-sync/
 | `run_daily_sync.py` | Orchestrates the above into one workspace's run | Syntax-checked only |
 | `build_preview_workbook.py` | One-off: builds a local xlsx to eyeball tab structure before wiring up live Sheets | Run, produced `refunnel_sync_preview.xlsx` |
 | `.github/workflows/refunnel-sync.yml` | Daily schedule + matrix over workspaces | Not run |
-| `content_tracker.py` | Pure logic for the Content Tracker: Product/Sub Category/Content Type/Theme detection, the freeze/refresh/manual column policy | 37 automated tests |
+| `content_tracker.py` | Pure logic for the Content Tracker: Product/Sub Category/Content Type/Post Type/Theme detection, the freeze/refresh/manual column policy | 53 automated tests |
 | `build_content_tracker.py` | Orchestrates content_tracker.py against real Google Sheets, one tab per brand | 5 automated tests against fakes |
 | `.github/workflows/content-tracker.yml` | Separate daily schedule, 2 hours after the main export | Not run |
 
@@ -268,11 +268,17 @@ Data to build one from) -- both fields stay blank there regardless,
 until a real rule can be written the same way this one was: from
 actual data, not a guess.
 
-**Content Type detection**: from Master Data's `media_type` field
-(added to `MASTER_COLUMNS` specifically to support this -- it wasn't
-being captured before). VIDEO -> "UGC Video", STORY -> "UGC Story",
-IMAGE -> "UGC Photo". Deliberately this simple: confirmed real that
-~98% of Duderobe's Master Data is VIDEO, since Refunnel only tracks
+**Content Type detection**: from Master Data's `viewable_media_type`
+field (NOT `media_type` -- corrected from an earlier mistake). Confirmed
+against Refunnel's own dashboard: it has two separate filter
+dimensions, "Content type" (Video/Image only) and "Post Type"
+(Reels/Feed/Story/Carousel for Instagram, Video/Image/Carousel for
+TikTok). `viewable_media_type` is the exact match for "Content type"
+(2 real values: VIDEO 2077, IMAGE 1) -- `media_type` has a 3rd value
+(STORY) that doesn't belong here at all, since Refunnel's own UI treats
+Story as a Post Type, not a Content Type. VIDEO -> "UGC Video", IMAGE
+-> "UGC Photo". Deliberately this simple: confirmed real that ~98% of
+Duderobe's Master Data is VIDEO, since Refunnel only tracks
 creator-generated content -- it has no visibility into the separate
 official content folder or Howie's older archive mentioned in the
 original ticket, so a genuine "product photo" or studio "lifestyle"
@@ -280,6 +286,14 @@ category isn't derivable from this data at all. Checked captions for
 more specific style descriptors (unboxing, review, haul) too -- too
 rare (4-16 of 2078) to be a reliable column on their own, so those live
 in Theme instead, only when a caption actually says so.
+
+**Post Type detection**: from Master Data's `post_type` field (added
+to `MASTER_COLUMNS` to support this -- Refunnel's own separate "Post
+Type" filter dimension, distinct from Content Type). Confirmed real,
+cross-referenced against platform in an actual export: TikTok+VIDEO
+(2034), Instagram+REELS (35), Instagram+STORY (5), TikTok+STORY (3),
+PRIVATE+PRIVATE (1, a since-restricted post). VIDEO -> "Video", REELS
+-> "Reels", STORY -> "Story", PRIVATE -> "Private".
 
 **Theme detection**: keyword-matched against `caption` + `hashtags`,
 checked in priority order (see `THEME_KEYWORDS` in
@@ -312,6 +326,19 @@ broad keyword search -- makes some sense for a men's robe brand.
 real: those are TikTok Shop's own promotional campaign tags, appearing
 on totally unrelated robe videos, not genuine content about summer or
 school.
+
+**A column added to the schema after rows already existed still gets a
+real first value, not frozen at blank forever** -- confirmed real bug
+and fix: when Content Type/Theme were first added, every existing
+tracker row had no key for them at all, and the freeze policy was
+treating "never had a chance to compute anything" the same as
+"already correctly set", freezing every row at blank permanently.
+Fixed in `merge_tracker_row` -- a freeze-once-set column only stays
+frozen once it actually has a value; a blank/missing one still gets
+its first real computed value. Verified this fix generalizes (not a
+one-off patch) by simulating the identical scenario for Post Type when
+it was added afterward, and by re-running the full real dataset
+through it end-to-end both times.
 
 **Same never_delete protection as Master Data** -- a row already in
 the tracker is never dropped for being momentarily missing from a
