@@ -196,6 +196,9 @@ refunnel-sync/
 | `run_daily_sync.py` | Orchestrates the above into one workspace's run | Syntax-checked only |
 | `build_preview_workbook.py` | One-off: builds a local xlsx to eyeball tab structure before wiring up live Sheets | Run, produced `refunnel_sync_preview.xlsx` |
 | `.github/workflows/refunnel-sync.yml` | Daily schedule + matrix over workspaces | Not run |
+| `content_tracker.py` | Pure logic for the Content Tracker: Product/Sub Category detection, the freeze/refresh/manual column policy | 21 automated tests |
+| `build_content_tracker.py` | Orchestrates content_tracker.py against real Google Sheets, one tab per brand | 5 automated tests against fakes |
+| `.github/workflows/content-tracker.yml` | Separate daily schedule, 2 hours after the main export | Not run |
 
 Run all automated tests (from the repo root): `python -m pytest -v`
 Lint everything: `python -m pyflakes *.py scripts/*.py tests/*.py`
@@ -226,6 +229,59 @@ tab: Actions -> Refunnel Sync -> Run workflow -> type the workspace name
 Each workspace needs its own Google Sheet and its own
 `spreadsheet_id_secret` (see setup checklist below) -- they're kept
 completely separate, nothing is shared between brands' sheets.
+
+## The Content Tracker -- a separate sheet, separate schedule
+
+A completely different sheet from any brand's Refunnel-export
+spreadsheet, agreed on separately from the main pipeline: one tab per
+brand (Duderobe, Swoveralls, Defi Snacks, Kelson -- whichever brands
+are in `config/workspaces.yaml`), each derived from that brand's own
+Master Data.
+
+Runs entirely independently of the Refunnel export -- no Playwright, no
+browser, no Refunnel login at all, just reading and writing Google
+Sheets. Scheduled 2 hours after the main export (05:00 UTC vs 03:00
+UTC), so each brand's Master Data has had a chance to update first.
+
+**Column policy**, as agreed:
+- **Freeze-once-set** (Brand, Platform, Creator, Product, Sub Category,
+  Refunnel Link, Video File, Created At): computed fresh only the first
+  time a post appears in the tracker. Never recomputed later, even if
+  the underlying Master Data value has since changed -- protects
+  anything you've manually corrected (e.g. a blank Product you filled
+  in yourself).
+- **Refresh** (Usage Rights, Creator Email): re-read from Master Data
+  every run, since both genuinely change over time. A blank value in
+  Master Data never erases a non-blank value already in the tracker --
+  so you can type an email in directly here before Master Data has it,
+  without a later run wiping it out.
+- **Manual** (Summary, Product Score, Rights Duration, Ad Ready, Notes,
+  Contact Status): never touched by any automated write, ever.
+
+**Product / Sub Category detection** (Duderobe only so far -- see
+`content_tracker.py`'s docstring): based on Master Data's own
+`products` field. If it mentions "SheRobe" -> Product = SheRobe,
+otherwise DudeRobe. Sub Category = "UFC" if mentioned, else same as
+Product. If `products` is blank, both stay blank for you to fill in.
+Swoveralls/Defi Snacks/Kelson have no rule yet (never had real Master
+Data to build one from) -- both fields stay blank there regardless,
+until a real rule can be written the same way this one was: from
+actual data, not a guess.
+
+**Same never_delete protection as Master Data** -- a row already in
+the tracker is never dropped for being momentarily missing from a
+given run's Master Data read.
+
+### Setup needed for this specific feature
+
+1. **Create a brand-new Google Sheet** for this (NOT any brand's
+   existing export sheet) and share it with the same service account
+   email as everything else.
+2. **Add its ID as a new secret**: `CONTENT_TRACKER_SPREADSHEET_ID`.
+3. Nothing else -- brand tabs are created automatically the first time
+   the workflow runs, and a brand with no spreadsheet secret set yet
+   (Swoveralls/Defi Snacks/Kelson, currently) is just skipped with a
+   clear log line, not a failure.
 
 ## Setup checklist -- what I need from you
 
