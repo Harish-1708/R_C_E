@@ -68,18 +68,28 @@ RIGHTS_STATUS_DISPLAY = {
     "DENIED": "Declined",
 }
 
-# Confirmed real: Master Data's media_type is ~98% "VIDEO" -- Refunnel
-# only tracks creator-generated content, never the separate official
-# content folder or older archive, so there's no genuine "product
-# photo" or studio "lifestyle" category available from this data at
-# all. This is deliberately the full extent of Content Type -- checked
-# captions for more specific style descriptors (unboxing, review,
-# haul) and they're too rare (4-16 out of 2078) to be a reliable
-# column on their own, so those live in Theme instead, only when a
-# caption actually says so.
+# Sourced from viewable_media_type, NOT media_type -- confirmed real:
+# Refunnel's own dashboard has two separate filter dimensions, "Post
+# type" (Reels/Feed/Story/Carousel for Instagram, Video/Image/Carousel
+# for TikTok) and "Content type" (just Video/Image). viewable_media_type
+# is the exact match for their "Content type" concept (2 values only:
+# VIDEO 2077, IMAGE 1 in a real export) -- media_type has a 3rd value
+# (STORY) that doesn't belong here at all, since Refunnel's own UI
+# treats Story as a Post Type, not a Content Type. "Post Type" is a
+# separate, richer dimension (post_type in the raw CSV) that could be
+# its own future tracker column if ever wanted, but that's not what
+# this one is.
+#
+# Refunnel only tracks creator-generated content, never the separate
+# official content folder or older archive, so there's no genuine
+# "product photo" or studio "lifestyle" category available from this
+# data at all. This is deliberately the full extent of Content Type --
+# checked captions for more specific style descriptors (unboxing,
+# review, haul) and they're too rare (4-16 out of 2078) to be a
+# reliable column on their own, so those live in Theme instead, only
+# when a caption actually says so.
 CONTENT_TYPE_DISPLAY = {
     "VIDEO": "UGC Video",
-    "STORY": "UGC Story",
     "IMAGE": "UGC Photo",
 }
 
@@ -119,10 +129,11 @@ THEME_KEYWORDS = [
 ]
 
 
-def derive_content_type(media_type: str) -> str:
-    """Maps Master Data's media_type to a display label. Blank/unknown
+def derive_content_type(viewable_media_type: str) -> str:
+    """Maps Master Data's viewable_media_type (NOT media_type -- see
+    CONTENT_TYPE_DISPLAY comment above) to a display label. Blank/unknown
     values stay blank rather than guessing."""
-    return CONTENT_TYPE_DISPLAY.get((media_type or "").strip().upper(), "")
+    return CONTENT_TYPE_DISPLAY.get((viewable_media_type or "").strip().upper(), "")
 
 
 def _clean_theme_text(caption: str, hashtags: str) -> str:
@@ -186,7 +197,7 @@ def build_fresh_tracker_row(master_row: Dict[str, str], brand: str) -> Dict[str,
     merge_tracker_row() for an id that already exists in the tracker.
     """
     product, sub_category = derive_product_and_subcategory(brand, master_row.get("products", ""))
-    content_type = derive_content_type(master_row.get("media_type", ""))
+    content_type = derive_content_type(master_row.get("viewable_media_type", ""))
     theme = derive_theme(master_row.get("caption", ""), master_row.get("hashtags", ""))
     return {
         "id": master_row.get("id", ""),
