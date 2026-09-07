@@ -319,3 +319,56 @@ def test_merge_freezes_content_type_and_theme_too():
     fresh = build_fresh_tracker_row({**_sample_master_row(), "media_type": "VIDEO", "caption": "Father's Day special", "hashtags": "#fathersday"}, "Duderobe")
     merged = merge_tracker_row(existing, fresh)
     assert merged["Theme"] == "Gift-Giving"  # frozen, NOT recomputed
+
+
+# ---------- the real bug: new column added after rows already existed ----------
+
+def test_merge_gives_a_first_value_to_a_column_that_never_existed_before():
+    # confirmed real bug: a row created BEFORE Content Type/Theme were
+    # added to the schema has no key for them at all -- they must NOT
+    # stay frozen at blank forever just because the row itself already
+    # existed for other columns
+    existing = build_fresh_tracker_row({**_sample_master_row()}, "Duderobe")
+    del existing["Content Type"]  # simulates a row from before this column existed
+    del existing["Theme"]
+    fresh = build_fresh_tracker_row(
+        {**_sample_master_row(), "media_type": "VIDEO", "caption": "Father's Day gift", "hashtags": "#fathersday"},
+        "Duderobe",
+    )
+    merged = merge_tracker_row(existing, fresh)
+    assert merged["Content Type"] == "UGC Video"
+    assert merged["Theme"] == "Father's Day"
+
+
+def test_merge_still_freezes_a_column_that_already_has_a_real_value():
+    # the fix must NOT undo the original freeze behavior for a column
+    # that genuinely already has a value
+    existing = build_fresh_tracker_row({**_sample_master_row(), "media_type": "VIDEO"}, "Duderobe")
+    existing["Content Type"] = "UGC Video"  # already set from an earlier run
+    fresh = build_fresh_tracker_row({**_sample_master_row(), "media_type": "IMAGE"}, "Duderobe")
+    merged = merge_tracker_row(existing, fresh)
+    assert merged["Content Type"] == "UGC Video"  # NOT recomputed to UGC Photo
+
+
+def test_merge_blank_freeze_column_can_still_pick_up_a_later_value():
+    # if a freeze-once-set column is genuinely blank (not because it's
+    # new, just because the source data was blank), it's allowed to
+    # fill in once real source data appears -- "frozen" should mean
+    # "protects a real value", not "permanently stuck at nothing"
+    existing = build_fresh_tracker_row({**_sample_master_row(), "products": ""}, "Duderobe")
+    assert existing["Product"] == ""  # blank, as expected
+    fresh = build_fresh_tracker_row({**_sample_master_row(), "products": "The DudeRobe"}, "Duderobe")
+    merged = merge_tracker_row(existing, fresh)
+    assert merged["Product"] == "DudeRobe"
+
+
+def test_sabotage_missing_column_bug_would_be_caught():
+    existing = build_fresh_tracker_row({**_sample_master_row()}, "Duderobe")
+    del existing["Theme"]
+    fresh = build_fresh_tracker_row(
+        {**_sample_master_row(), "caption": "Father's Day gift", "hashtags": "#fathersday"}, "Duderobe"
+    )
+    merged = merge_tracker_row(existing, fresh)
+    with pytest.raises(AssertionError):
+        assert merged["Theme"] == ""  # wrong -- confirmed real bug: frozen at blank forever
+    assert merged["Theme"] == "Father's Day"  # confirms actual correct behavior
