@@ -10,6 +10,7 @@ from content_tracker import (
     merge_tracker_row,
     build_tracker_target_rows,
     derive_content_type,
+    derive_post_type,
     derive_theme,
 )
 
@@ -376,3 +377,87 @@ def test_sabotage_missing_column_bug_would_be_caught():
     with pytest.raises(AssertionError):
         assert merged["Theme"] == ""  # wrong -- confirmed real bug: frozen at blank forever
     assert merged["Theme"] == "Father's Day"  # confirms actual correct behavior
+
+
+# ---------- derive_post_type ----------
+
+def test_post_type_video():
+    assert derive_post_type("VIDEO") == "Video"
+
+
+def test_post_type_reels():
+    assert derive_post_type("REELS") == "Reels"
+
+
+def test_post_type_story():
+    # confirmed real: Story IS a valid Post Type (unlike Content Type,
+    # where it doesn't belong at all) -- cross-referenced against
+    # platform in a real export: both Instagram+STORY and TikTok+STORY
+    # exist
+    assert derive_post_type("STORY") == "Story"
+
+
+def test_post_type_private():
+    assert derive_post_type("PRIVATE") == "Private"
+
+
+def test_post_type_is_case_insensitive():
+    assert derive_post_type("video") == "Video"
+
+
+def test_post_type_blank_stays_blank():
+    assert derive_post_type("") == ""
+    assert derive_post_type(None) == ""
+
+
+def test_sabotage_post_type_wrong_mapping_would_be_caught():
+    result = derive_post_type("REELS")
+    with pytest.raises(AssertionError):
+        assert result == "Video"  # wrong -- that's a different mapping
+    assert result == "Reels"
+
+
+# ---------- Post Type wired into build_fresh_tracker_row / merge ----------
+
+def test_build_fresh_tracker_row_includes_post_type():
+    row = build_fresh_tracker_row({**_sample_master_row(), "post_type": "REELS"}, "Duderobe")
+    assert row["Post Type"] == "Reels"
+
+
+def test_merge_freezes_post_type_once_set():
+    existing = build_fresh_tracker_row({**_sample_master_row(), "post_type": "VIDEO"}, "Duderobe")
+    existing["Post Type"] = "Video"
+    fresh = build_fresh_tracker_row({**_sample_master_row(), "post_type": "REELS"}, "Duderobe")
+    merged = merge_tracker_row(existing, fresh)
+    assert merged["Post Type"] == "Video"  # frozen, NOT recomputed to Reels
+
+
+def test_merge_gives_post_type_a_first_value_for_a_pre_existing_row():
+    # same migration scenario as Content Type/Theme: a row that existed
+    # before Post Type was added to the schema must get a real first
+    # value, not stay frozen at blank forever
+    existing = build_fresh_tracker_row(_sample_master_row(), "Duderobe")
+    del existing["Post Type"]
+    fresh = build_fresh_tracker_row({**_sample_master_row(), "post_type": "STORY"}, "Duderobe")
+    merged = merge_tracker_row(existing, fresh)
+    assert merged["Post Type"] == "Story"
+
+
+def test_sabotage_post_type_migration_bug_would_be_caught():
+    existing = build_fresh_tracker_row(_sample_master_row(), "Duderobe")
+    del existing["Post Type"]
+    fresh = build_fresh_tracker_row({**_sample_master_row(), "post_type": "REELS"}, "Duderobe")
+    merged = merge_tracker_row(existing, fresh)
+    with pytest.raises(AssertionError):
+        assert merged["Post Type"] == ""  # wrong -- would mean the migration bug is back
+    assert merged["Post Type"] == "Reels"
+
+
+def test_build_tracker_target_rows_end_to_end_includes_post_type():
+    master_rows = {
+        "tk_1": _sample_master_row(id="tk_1", post_type="VIDEO"),
+        "tk_2": _sample_master_row(id="tk_2", post_type="REELS"),
+    }
+    target = build_tracker_target_rows(master_rows, "Duderobe", {})
+    assert target["tk_1"]["Post Type"] == "Video"
+    assert target["tk_2"]["Post Type"] == "Reels"
