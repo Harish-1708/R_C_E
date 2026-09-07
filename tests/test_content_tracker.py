@@ -1,382 +1,321 @@
-"""
-parse_refunnel.py
+import pytest
 
-Pure data-transformation layer for the Refunnel -> Google Sheets sync.
-No network calls, no browser automation, no Sheets API here on purpose --
-this module only turns the two CSV exports Refunnel gives us into the
-row-sets each destination tab should contain. Keeping it pure makes it
-fully testable with just sample CSV files.
-
-Tabs produced:
-    - master            (every media/content row, always kept, never deleted)
-    - rights_approved    (media rows where rights_status == GRANTED)
-    - rights_requested   (media rows where rights_status == REQUESTED)
-    - rights_declined    (media rows where rights_status == DENIED)
-    - payments           (every payment row)
-
-Every row set is returned as a dict keyed by a stable id, so the sheet-sync
-layer can upsert by id instead of re-appending duplicates. For media rows
-the key is the `id` column (e.g. "tk_7681495537484369165") -- confirmed
-unique per post in real exports, stable across re-exports, and immune to
-the "same creator, many videos" duplication problem the user flagged.
-For payment rows the key is the CSV's own `ID` column.
-"""
-
-from __future__ import annotations
-
-import csv
-from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional
+from content_tracker import (
+    TRACKER_COLUMNS,
+    FREEZE_ONCE_SET_COLUMNS,
+    REFRESH_COLUMNS,
+    MANUAL_COLUMNS,
+    derive_product_and_subcategory,
+    build_fresh_tracker_row,
+    merge_tracker_row,
+    build_tracker_target_rows,
+    derive_content_type,
+    derive_theme,
+)
 
 
-# Refunnel's rights_status enum values. Confirmed from a real 2078-row
-# export: NONE, REQUESTED, GRANTED, and DENIED -- note the last one is
-# "DENIED", not "DECLINED" as an earlier guess assumed (that guess was
-# wrong and silently routed 0 rows to the Declined tab even when real
-# denied rows existed -- fixed once real data surfaced the actual value).
-RIGHTS_STATUS_MAP = {
-    "GRANTED": "rights_approved",
-    "REQUESTED": "rights_requested",
-    "DENIED": "rights_declined",
-    # "NONE" -> stays in master only, no usage-rights tab
-}
+# ---------- derive_product_and_subcategory ----------
 
-MASTER_COLUMNS = [
-    "id",
-    "platform",
-    "username",
-    "followers",
-    "original_post_link",
-    "media_url",
-    "media_type",
-    "caption",
-    "relation_type",
-    "rights_status",
-    "rights_granted_until_date",
-    "creator_email",  # filled in later by the modal-scrape step; blank until then
-    "status",
-    "spark_code",
-    "emv",
-    "gmv",
-    "likes",
-    "comments",
-    "impressions",
-    "shares",
-    "products",
-    "hashtags",
-    "mentions",
-    "collections",
-    "created_at",
-    "updated_at",
-]
-
-# Usage-rights tabs reuse the master schema (same columns) so a row looks
-# identical whichever tab it's in -- just filtered by rights_status.
-USAGE_RIGHTS_COLUMNS = MASTER_COLUMNS
-
-# Trimmed columns for the Human Review tab -- just enough to identify
-# and evaluate a post at a glance. The "Reviewed" (or whatever you name
-# it) column is NOT listed here on purpose: you add that column
-# yourself directly in the sheet, and sheets_sync.py's existing "extra
-# manual columns" preservation logic (see sheets_sync.py docstring)
-# automatically carries your marks forward across daily reruns, keyed
-# by id -- no code change needed for that part.
-HUMAN_REVIEW_COLUMNS = [
-    "id",
-    "username",
-    "platform",
-    "rights_status",
-    "original_post_link",
-    "creator_email",
-    "followers",
-    "updated_at",
-]
-
-PAYMENT_COLUMNS = [
-    "id",
-    "creator",
-    "handle",
-    "email",
-    "type",
-    "purpose",
-    "campaign",
-    "amount",
-    "currency",
-    "date",
-    "status",
-]
+def test_sherobe_detected_case_insensitively():
+    product, sub = derive_product_and_subcategory("Duderobe", "The SHEROBE - Premium Hoodie Robe")
+    assert product == "SheRobe"
+    assert sub == "SheRobe"
 
 
-@dataclass
-class ParseResult:
-    master: Dict[str, dict] = field(default_factory=dict)
-    rights_approved: Dict[str, dict] = field(default_factory=dict)
-    rights_requested: Dict[str, dict] = field(default_factory=dict)
-    rights_declined: Dict[str, dict] = field(default_factory=dict)
-    # Rows moved here (out of the three buckets above) once you mark
-    # them reviewed -- see apply_human_review_flags().
-    rights_reviewed: Dict[str, dict] = field(default_factory=dict)
-    payments: Dict[str, dict] = field(default_factory=dict)
-
-    # Simple counters for a post-run summary line, useful for logging /
-    # Slack alerts without re-walking the dicts.
-    media_rows_seen: int = 0
-    payment_rows_seen: int = 0
-    skipped_media_rows: int = 0
-    skipped_payment_rows: int = 0
+def test_defaults_to_duderobe_for_generic_unbranded_text():
+    product, sub = derive_product_and_subcategory("Duderobe", "Men's Hooded Wrap Bathrobe")
+    assert product == "DudeRobe"
+    assert sub == "DudeRobe"
 
 
-def _clean(value: Optional[str]) -> str:
-    return (value or "").strip()
+def test_ufc_detected_as_its_own_subcategory():
+    product, sub = derive_product_and_subcategory("Duderobe", "The UFC DudeRobe - Premium Robe for Men")
+    assert product == "DudeRobe"
+    assert sub == "UFC"
 
 
-def parse_media_csv(path: str, creator_emails: Optional[Dict[str, str]] = None) -> ParseResult:
-    """Parse Refunnel's media/content bulk-export CSV.
-
-    creator_emails: optional {media_id: email} map, supplied by the
-    modal-scrape step for posts whose rights_status is not NONE. Merged
-    into the `creator_email` column when present.
-    """
-    result = ParseResult()
-    creator_emails = creator_emails or {}
-
-    with open(path, encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f)
-        missing_cols = {"id", "rights_status"} - set(reader.fieldnames or [])
-        if missing_cols:
-            raise ValueError(
-                f"media CSV is missing expected columns: {sorted(missing_cols)}. "
-                f"Got columns: {reader.fieldnames}"
-            )
-
-        for row in reader:
-            result.media_rows_seen += 1
-            media_id = _clean(row.get("id"))
-            if not media_id:
-                result.skipped_media_rows += 1
-                continue
-
-            rights_status = _clean(row.get("rights_status")).upper()
-
-            out = {
-                "id": media_id,
-                "platform": _clean(row.get("platform")),
-                "username": _clean(row.get("username")),
-                "followers": _clean(row.get("followers")),
-                "original_post_link": _clean(row.get("original_post_link")),
-                "media_url": _clean(row.get("media_url")),
-                "media_type": _clean(row.get("media_type")),
-                "caption": _clean(row.get("caption")),
-                "relation_type": _clean(row.get("relation_type")),
-                "rights_status": rights_status,
-                "rights_granted_until_date": _clean(row.get("rights_granted_until_date")),
-                "creator_email": creator_emails.get(media_id, ""),
-                "status": _clean(row.get("status")),
-                "spark_code": _clean(row.get("spark_code")),
-                "emv": _clean(row.get("emv")),
-                "gmv": _clean(row.get("gmv")),
-                "likes": _clean(row.get("likes")),
-                "comments": _clean(row.get("comments")),
-                "impressions": _clean(row.get("impressions")),
-                "shares": _clean(row.get("shares")),
-                "products": _clean(row.get("products")),
-                "hashtags": _clean(row.get("hashtags")),
-                "mentions": _clean(row.get("mentions")),
-                "collections": _clean(row.get("collections")),
-                "created_at": _clean(row.get("created_at")),
-                "updated_at": _clean(row.get("updated_at")),
-            }
-
-            result.master[media_id] = out
-
-            tab = RIGHTS_STATUS_MAP.get(rights_status)
-            if tab == "rights_approved":
-                result.rights_approved[media_id] = out
-            elif tab == "rights_requested":
-                result.rights_requested[media_id] = out
-            elif tab == "rights_declined":
-                result.rights_declined[media_id] = out
-            # NONE (or any unrecognized value) -> master only, logged so an
-            # unexpected new enum value doesn't silently vanish.
-
-    return result
+def test_ufc_sherobe_combo_still_reports_sherobe_product():
+    product, sub = derive_product_and_subcategory("Duderobe", "The UFC SheRobe special edition")
+    assert product == "SheRobe"
+    assert sub == "UFC"
 
 
-def parse_payments_csv(path: str, result: Optional[ParseResult] = None) -> ParseResult:
-    """Parse Refunnel's payment-history export CSV. Can be merged into an
-    existing ParseResult (from parse_media_csv) or used standalone."""
-    result = result or ParseResult()
-
-    with open(path, encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f)
-        missing_cols = {"ID"} - set(reader.fieldnames or [])
-        if missing_cols:
-            raise ValueError(
-                f"payments CSV is missing expected columns: {sorted(missing_cols)}. "
-                f"Got columns: {reader.fieldnames}"
-            )
-
-        for row in reader:
-            result.payment_rows_seen += 1
-            payment_id = _clean(row.get("ID"))
-            if not payment_id:
-                result.skipped_payment_rows += 1
-                continue
-
-            result.payments[payment_id] = {
-                "id": payment_id,
-                "creator": _clean(row.get("Creator")),
-                "handle": _clean(row.get("Handle")),
-                "email": _clean(row.get("Email")),
-                "type": _clean(row.get("Type")),
-                "purpose": _clean(row.get("Purpose")),
-                "campaign": _clean(row.get("Campaign")),
-                "amount": _clean(row.get("Amount")),
-                "currency": _clean(row.get("Currency")),
-                "date": _clean(row.get("Date")),
-                "status": _clean(row.get("Status")),
-            }
-
-    return result
+def test_blank_products_field_leaves_both_blank_for_manual_fill():
+    product, sub = derive_product_and_subcategory("Duderobe", "")
+    assert product == ""
+    assert sub == ""
+    product2, sub2 = derive_product_and_subcategory("Duderobe", "   ")
+    assert product2 == ""
+    assert sub2 == ""
 
 
-def apply_human_review_flags(result: ParseResult, reviewed_ids: Iterable[str]) -> int:
-    """Move rows marked reviewed (via a manual 'Reviewed' column you add
-    to Master Data yourself -- mark it 'Yes' for any row) OUT of
-    whichever of the three rights-status tabs they're currently in, and
-    into the Human Review tab instead. The row itself is untouched in
-    Master Data -- this only changes which Usage Rights tab (if any) it
-    shows up in. Returns how many rows were moved, for logging.
-    """
-    moved = 0
-    for media_id in reviewed_ids:
-        row = result.master.get(media_id)
-        if row is None:
-            continue
-        result.rights_approved.pop(media_id, None)
-        result.rights_requested.pop(media_id, None)
-        result.rights_declined.pop(media_id, None)
-        result.rights_reviewed[media_id] = row
-        moved += 1
-    return moved
+def test_other_brands_have_no_rule_yet_leave_blank():
+    product, sub = derive_product_and_subcategory("Swoveralls", "some swoveralls product text")
+    assert product == ""
+    assert sub == ""
 
 
-def build_human_review_rows(result: ParseResult) -> Dict[str, dict]:
-    """Rows moved into Human Review by apply_human_review_flags(),
-    trimmed to HUMAN_REVIEW_COLUMNS."""
-    return {
-        media_id: {col: row.get(col, "") for col in HUMAN_REVIEW_COLUMNS}
-        for media_id, row in result.rights_reviewed.items()
+def test_sabotage_ufc_default_wrong_would_be_caught():
+    _, sub = derive_product_and_subcategory("Duderobe", "The DudeRobe - Premium Hoodie Robe")
+    with pytest.raises(AssertionError):
+        assert sub == "UFC"  # wrong -- no UFC mention here
+    assert sub == "DudeRobe"
+
+
+# ---------- build_fresh_tracker_row ----------
+
+def _sample_master_row(**overrides):
+    row = {
+        "id": "tk_123",
+        "platform": "TIKTOK",
+        "username": "alice",
+        "creator_email": "alice@example.com",
+        "products": "The SheRobe - Premium Hoodie Robe for Women",
+        "rights_status": "REQUESTED",
+        "media_url": "https://cdn.refunnel.com/x.mp4",
+        "original_post_link": "https://www.tiktok.com/@alice/video/123",
+        "created_at": "2026-08-01T00:00:00",
     }
+    row.update(overrides)
+    return row
 
 
-def propagate_emails_by_username(result: ParseResult) -> int:
-    """Once one post's creator_email is known, apply it to every OTHER
-    post by that same username that doesn't have one yet -- an email
-    belongs to the creator, not the individual post, so there's no
-    reason to scrape it separately for each of their posts. Confirmed
-    real opportunity: 342 of 1360 unique usernames in a real export
-    appear on 2+ posts.
-
-    Call this BEFORE computing rows_needing_email_scrape() so already-
-    known emails shrink the scraping target list immediately, and again
-    after new emails are found during a run so newly-discovered ones
-    propagate too, without needing a fresh run.
-
-    Assumes one email per creator (your stated assumption) -- if a
-    creator genuinely has two different emails on file, whichever one
-    is encountered first while building the map wins silently. Returns
-    how many rows were filled in this way, for logging.
-    """
-    email_by_username: Dict[str, str] = {}
-    for row in result.master.values():
-        username = row.get("username", "")
-        email = row.get("creator_email", "")
-        if username and email and username not in email_by_username:
-            email_by_username[username] = email
-
-    filled = 0
-    for row in result.master.values():
-        if row.get("creator_email"):
-            continue
-        username = row.get("username", "")
-        known_email = email_by_username.get(username)
-        if known_email:
-            row["creator_email"] = known_email
-            filled += 1
-    return filled
+def test_build_fresh_tracker_row_maps_every_field_correctly():
+    row = build_fresh_tracker_row(_sample_master_row(), "Duderobe")
+    assert row["id"] == "tk_123"
+    assert row["Brand"] == "Duderobe"
+    assert row["Platform"] == "TIKTOK"
+    assert row["Creator"] == "@alice"
+    assert row["Creator Email"] == "alice@example.com"
+    assert row["Product"] == "SheRobe"
+    assert row["Sub Category"] == "SheRobe"
+    assert row["Usage Rights"] == "Requested"
+    assert row["Refunnel Link"] == "https://cdn.refunnel.com/x.mp4"
+    assert row["Video File"] == "https://www.tiktok.com/@alice/video/123"
+    assert row["Created At"] == "2026-08-01T00:00:00"
+    for col in MANUAL_COLUMNS:
+        assert row[col] == ""
 
 
-def apply_creator_emails(result: ParseResult, emails: Dict[str, str]) -> int:
-    """Mutate result.master (and, by shared reference, whichever
-    usage-rights bucket that row is also in) with newly-found creator
-    emails. Returns how many rows were actually updated, for logging.
-
-    Relies on the fact that parse_media_csv puts the *same* dict object
-    into both result.master and its matching rights_* bucket, so a
-    single in-place update is visible in both places without needing to
-    touch the bucket separately.
-    """
-    updated = 0
-    for media_id, email in emails.items():
-        if not email:
-            continue
-        row = result.master.get(media_id)
-        if row is None:
-            continue
-        row["creator_email"] = email
-        updated += 1
-    return updated
+def test_build_fresh_tracker_row_adds_at_symbol_without_duplicating():
+    row1 = build_fresh_tracker_row(_sample_master_row(username="bob"), "Duderobe")
+    assert row1["Creator"] == "@bob"
+    row2 = build_fresh_tracker_row(_sample_master_row(username="@bob"), "Duderobe")
+    assert row2["Creator"] == "@bob"  # not "@@bob"
 
 
-def find_duplicate_post_links(result: ParseResult) -> Dict[str, List[str]]:
-    """Detect real duplicate CONTENT -- the same underlying video/post
-    showing up under two different `id`s. `id` is Refunnel's own and
-    already prevents duplicate rows for the same id (confirmed: 2078
-    unique ids for 2078 real rows, with usernames legitimately
-    repeating -- multiple videos from the same creator is normal, not a
-    duplicate). But if Refunnel ever assigned two different ids to what
-    is actually the same post, id-based dedup alone wouldn't catch it.
-
-    This checks the second, independent signal available --
-    `original_post_link` (the actual TikTok/IG URL) -- and returns
-    {link: [id1, id2, ...]} for any link shared by 2+ different ids.
-    Blank links (e.g. Instagram Stories, which have none) are ignored --
-    that's missing data, not a duplicate.
-
-    This is diagnostic only -- it does NOT remove anything automatically
-    (a shared link could have a legitimate reason, e.g. two distinct
-    relation_types like TAGGED and MENTIONED for the same post), so
-    the caller decides what, if anything, to do with the result.
-    """
-    by_link: Dict[str, List[str]] = {}
-    for media_id, row in result.master.items():
-        link = row.get("original_post_link", "").strip()
-        if not link:
-            continue
-        by_link.setdefault(link, []).append(media_id)
-    return {link: ids for link, ids in by_link.items() if len(ids) > 1}
+def test_build_fresh_tracker_row_declined_display_matches_your_wording():
+    row = build_fresh_tracker_row(_sample_master_row(rights_status="DENIED"), "Duderobe")
+    assert row["Usage Rights"] == "Declined"  # not Master Data's internal "DENIED"
 
 
-def rows_needing_email_scrape(result: ParseResult) -> List[str]:
-    """Return media ids that still need a scraped email -- REQUESTED and
-    NONE-status rows only, never Approved/Declined.
+def test_build_fresh_tracker_row_none_status_display():
+    row = build_fresh_tracker_row(_sample_master_row(rights_status="NONE"), "Duderobe")
+    assert row["Usage Rights"] == "None"
 
-    NONE-status posts (never had any usage-rights action) use the exact
-    same button class as originally discovered -- confirmed real: the
-    very first pre-filled-email screenshot in this whole project was a
-    never-requested post. So this covers the two statuses confirmed to
-    still have a working request-card UI.
 
-    Approved (and presumably Declined) are excluded on purpose -- a real
-    debug screenshot confirmed their card footer is replaced entirely
-    with a status badge ("Usage rights approved -- Via direct post
-    permission"), with no request-card button at all. Every attempt on
-    one was a guaranteed failure, not intermittent bad luck -- which is
-    why an early run took hours grinding through them.
-    """
-    ids = []
-    for media_id, row in result.master.items():
-        if row.get("rights_status") in ("REQUESTED", "NONE") and not row.get("creator_email"):
-            ids.append(media_id)
-    return ids
+def test_sabotage_creator_email_field_swap_would_be_caught():
+    row = build_fresh_tracker_row(_sample_master_row(), "Duderobe")
+    with pytest.raises(AssertionError):
+        assert row["Creator Email"] == row["Creator"]  # wrong -- different fields
+    assert row["Creator Email"] == "alice@example.com"
+
+
+# ---------- merge_tracker_row ----------
+
+def test_merge_brand_new_row_uses_fresh_values_as_is():
+    fresh = build_fresh_tracker_row(_sample_master_row(), "Duderobe")
+    merged = merge_tracker_row(None, fresh)
+    assert merged == fresh
+
+
+def test_merge_freezes_non_refresh_columns_even_if_fresh_differs():
+    existing = build_fresh_tracker_row(_sample_master_row(products="The DudeRobe original"), "Duderobe")
+    existing["Product"] = "DudeRobe"  # what was frozen in from an earlier run
+    fresh = build_fresh_tracker_row(_sample_master_row(products="The SheRobe now"), "Duderobe")
+    # fresh would compute "SheRobe", but Product must NOT change once set
+    merged = merge_tracker_row(existing, fresh)
+    assert merged["Product"] == "DudeRobe"
+
+
+def test_merge_refreshes_usage_rights_and_creator_email():
+    existing = build_fresh_tracker_row(_sample_master_row(rights_status="REQUESTED"), "Duderobe")
+    existing["Creator Email"] = ""  # not found yet at the time this row was created
+    fresh = build_fresh_tracker_row(
+        _sample_master_row(rights_status="GRANTED", creator_email="found@example.com"), "Duderobe"
+    )
+    merged = merge_tracker_row(existing, fresh)
+    assert merged["Usage Rights"] == "Granted"
+    assert merged["Creator Email"] == "found@example.com"
+
+
+def test_merge_never_erases_existing_value_with_a_blank_refresh():
+    existing = build_fresh_tracker_row(_sample_master_row(), "Duderobe")
+    existing["Creator Email"] = "manually-typed@example.com"  # you typed this in yourself
+    fresh = build_fresh_tracker_row(_sample_master_row(creator_email=""), "Duderobe")  # Master Data still blank
+    merged = merge_tracker_row(existing, fresh)
+    assert merged["Creator Email"] == "manually-typed@example.com"  # NOT erased
+
+
+def test_merge_preserves_manual_columns_untouched():
+    existing = build_fresh_tracker_row(_sample_master_row(), "Duderobe")
+    existing["Notes"] = "called them twice, no reply"
+    existing["Product Score"] = "8"
+    fresh = build_fresh_tracker_row(_sample_master_row(rights_status="GRANTED"), "Duderobe")
+    merged = merge_tracker_row(existing, fresh)
+    assert merged["Notes"] == "called them twice, no reply"
+    assert merged["Product Score"] == "8"
+
+
+def test_sabotage_refresh_erasing_manual_email_would_be_caught():
+    existing = build_fresh_tracker_row(_sample_master_row(), "Duderobe")
+    existing["Creator Email"] = "manually-typed@example.com"
+    fresh = build_fresh_tracker_row(_sample_master_row(creator_email=""), "Duderobe")
+    merged = merge_tracker_row(existing, fresh)
+    with pytest.raises(AssertionError):
+        assert merged["Creator Email"] == ""  # wrong -- would mean it got erased
+    assert merged["Creator Email"] == "manually-typed@example.com"  # confirms actual correct behavior
+
+
+# ---------- build_tracker_target_rows ----------
+
+def test_build_tracker_target_rows_end_to_end():
+    master_rows = {
+        "tk_1": _sample_master_row(id="tk_1", username="alice", rights_status="REQUESTED"),
+        "tk_2": _sample_master_row(id="tk_2", username="bob", rights_status="NONE", products=""),
+    }
+    # tk_1 already exists in the tracker with a frozen Product and a manual note
+    existing_tracker_rows = {
+        "tk_1": {**build_fresh_tracker_row(master_rows["tk_1"], "Duderobe"), "Product": "DudeRobe", "Notes": "in progress"},
+    }
+    target = build_tracker_target_rows(master_rows, "Duderobe", existing_tracker_rows)
+
+    assert set(target.keys()) == {"tk_1", "tk_2"}
+    assert target["tk_1"]["Product"] == "DudeRobe"  # frozen, not recomputed to SheRobe
+    assert target["tk_1"]["Notes"] == "in progress"  # manual column preserved
+    assert target["tk_2"]["id"] == "tk_2"  # brand new row built fresh
+    assert target["tk_2"]["Product"] == ""  # blank products field -- left blank
+
+
+def test_tracker_columns_include_every_column_used_by_the_row_builders():
+    fresh = build_fresh_tracker_row(_sample_master_row(), "Duderobe")
+    assert set(fresh.keys()) == set(TRACKER_COLUMNS)
+
+
+def test_column_groups_are_mutually_exclusive_and_complete():
+    all_grouped = set(FREEZE_ONCE_SET_COLUMNS) | set(REFRESH_COLUMNS) | set(MANUAL_COLUMNS)
+    assert all_grouped == set(TRACKER_COLUMNS) - {"id"}
+    # no overlaps between groups
+    assert not (set(FREEZE_ONCE_SET_COLUMNS) & set(REFRESH_COLUMNS))
+    assert not (set(FREEZE_ONCE_SET_COLUMNS) & set(MANUAL_COLUMNS))
+    assert not (set(REFRESH_COLUMNS) & set(MANUAL_COLUMNS))
+
+
+# ---------- derive_content_type ----------
+
+def test_content_type_video():
+    assert derive_content_type("VIDEO") == "UGC Video"
+
+
+def test_content_type_story():
+    assert derive_content_type("STORY") == "UGC Story"
+
+
+def test_content_type_image():
+    assert derive_content_type("IMAGE") == "UGC Photo"
+
+
+def test_content_type_is_case_insensitive():
+    assert derive_content_type("video") == "UGC Video"
+
+
+def test_content_type_blank_stays_blank():
+    assert derive_content_type("") == ""
+    assert derive_content_type(None) == ""
+
+
+def test_sabotage_content_type_wrong_mapping_would_be_caught():
+    result = derive_content_type("STORY")
+    with pytest.raises(AssertionError):
+        assert result == "UGC Video"  # wrong -- that's the VIDEO mapping
+    assert result == "UGC Story"
+
+
+# ---------- derive_theme ----------
+
+def test_theme_explicit_fathers_day_wins_over_generic_gift():
+    # confirmed real priority rule: explicit occasion beats generic
+    # gift language, even though this caption also contains "gift"
+    theme = derive_theme("Perfect Father's Day gift for the dude in your life!", "#fathersday #giftideas")
+    assert theme == "Father's Day"
+
+
+def test_theme_generic_gift_mention_without_occasion_falls_to_gift_giving():
+    theme = derive_theme("This robe makes such a great gift for dad", "#giftsforhim")
+    assert theme == "Gift-Giving"
+
+
+def test_theme_self_care_cozy():
+    theme = derive_theme("My self care Sunday cozy routine", "#selfcare #cozy")
+    assert theme == "Self-Care/Cozy"
+
+
+def test_theme_tiktokshop_promo_hashtags_are_not_real_signal():
+    # confirmed real: #tiktokshopbacktoschool and #tiktokshopsummersale
+    # are TikTok Shop's own promotional tags, not real content --
+    # appeared on totally unrelated robe videos in real data
+    theme = derive_theme("This robe is so comfortable!", "#tiktokshopbacktoschool #tiktokshopsummersale")
+    assert theme == ""
+
+
+def test_theme_no_match_returns_blank():
+    theme = derive_theme("Just a regular Tuesday in my robe", "#comfy #robe")
+    assert theme == ""
+
+
+def test_theme_valentines_mothers_wedding_still_detectable_even_if_rare_today():
+    # confirmed 0 matches in the real backlog today, but the categories
+    # exist for future content per your year-round campaign plan
+    assert derive_theme("Happy Valentine's Day to my favorite robe wearer", "#valentine") == "Valentine's Day"
+    assert derive_theme("The best Mother's Day gift", "#mothersday") == "Mother's Day"
+    assert derive_theme("Wore this on our honeymoon", "#honeymoon") == "Wedding/Honeymoon"
+
+
+def test_theme_case_insensitive_and_blank_safe():
+    assert derive_theme("FATHER'S DAY SPECIAL", "") == "Father's Day"
+    assert derive_theme("", "") == ""
+    assert derive_theme(None, None) == ""
+
+
+def test_sabotage_priority_order_broken_would_be_caught():
+    # if Gift-Giving were checked before Father's Day, this would
+    # wrongly return Gift-Giving instead
+    theme = derive_theme("Father's Day gift guide", "#fathersday #gift")
+    with pytest.raises(AssertionError):
+        assert theme == "Gift-Giving"  # wrong -- explicit occasion should win
+    assert theme == "Father's Day"
+
+
+# ---------- Content Type / Theme wired into build_fresh_tracker_row ----------
+
+def test_build_fresh_tracker_row_includes_content_type_and_theme():
+    row = build_fresh_tracker_row(
+        {
+            **_sample_master_row(),
+            "media_type": "VIDEO",
+            "caption": "Perfect Father's Day gift!",
+            "hashtags": "#fathersday",
+        },
+        "Duderobe",
+    )
+    assert row["Content Type"] == "UGC Video"
+    assert row["Theme"] == "Father's Day"
+
+
+def test_merge_freezes_content_type_and_theme_too():
+    existing = build_fresh_tracker_row({**_sample_master_row(), "media_type": "VIDEO", "caption": "gift for dad", "hashtags": ""}, "Duderobe")
+    existing["Theme"] = "Gift-Giving"  # frozen from an earlier run
+    # today's Master Data caption changed to explicitly mention Father's Day
+    fresh = build_fresh_tracker_row({**_sample_master_row(), "media_type": "VIDEO", "caption": "Father's Day special", "hashtags": "#fathersday"}, "Duderobe")
+    merged = merge_tracker_row(existing, fresh)
+    assert merged["Theme"] == "Gift-Giving"  # frozen, NOT recomputed
