@@ -48,7 +48,7 @@ from playwright.sync_api import Page
 
 # Turn this on only after you've manually verified scrape_creator_email()
 # against the real site -- see module docstring and README.
-SCRAPE_EMAILS_ENABLED = True
+SCRAPE_EMAILS_ENABLED = False
 
 # Refunnel's "Request usage rights" flow has a "Send request" button
 # (confirmed from your screenshot). We refuse to click anything whose
@@ -454,6 +454,19 @@ def _save_scrape_failure_snapshot(page: Page, debug_dir: str, media_id: str) -> 
         print(f"Couldn't save scrape-failure debug snapshot: {e}")
 
 
+def _should_print_progress(attempted: int, total: int, checkpoint: int) -> bool:
+    """True every `checkpoint` items, and once more on the final item --
+    pulled out as its own function specifically so this cadence logic is
+    unit-testable without needing a real Playwright page."""
+    return attempted % checkpoint == 0 or attempted == total
+
+
+def _format_progress_line(attempted: int, total: int, found: int) -> str:
+    failed = attempted - found
+    return (f"scrape_creator_emails: progress {attempted}/{total} attempted "
+            f"-- {found} found, {failed} failed/no-info so far")
+
+
 def scrape_creator_emails(
     page: Page,
     media_rows: dict,
@@ -484,6 +497,14 @@ def scrape_creator_emails(
     end, so a later interruption doesn't lose emails already found. A
     failure inside this callback is caught and logged, not allowed to
     abort the whole scraping loop.
+
+    Prints a "starting -- N post(s) to attempt" line immediately, then a
+    "progress X/N attempted -- Y found, Z failed" line every 25 items
+    (and once more at the very end) -- confirmed real need: a run gave
+    no visible sign of life in the GitHub Actions log for 25+ minutes,
+    since nothing printed until either a failure or the very end,
+    making it impossible to tell "still working, just slow" apart from
+    "stuck" or "broken" from the log alone.
 
     Every individual post failing is ALREADY handled by design -- one
     bad post (page didn't load, element timing, whatever) just gets
@@ -546,7 +567,20 @@ def scrape_creator_emails(
     results: dict = {}
     debug_snapshot_saved = False
     consecutive_failures = 0
-    for media_id in _order_ids_for_scraping(media_rows, media_ids):
+    # Materialized into a list (not left as a lazy iterable) specifically
+    # so its length is known upfront, for the "X/Y attempted" progress
+    # line below -- confirmed real need: a real run gave no visible sign
+    # of life for 25+ minutes, and the only log output visible in GitHub
+    # Actions was the step's environment-variable header, not any of
+    # this function's actual print() calls, since nothing printed
+    # until either a failure or the very end.
+    target_ids = list(_order_ids_for_scraping(media_rows, media_ids))
+    total_targets = len(target_ids)
+    print(f"scrape_creator_emails: starting -- {total_targets} post(s) to attempt.")
+    attempted = 0
+    found_count = 0
+    PROGRESS_CHECKPOINT = 25
+    for media_id in target_ids:
         try:
             grid_item, diagnostics = _scroll_until_card_found(page, media_id, scroll_container_selector)
             if grid_item is None:
@@ -608,6 +642,7 @@ def scrape_creator_emails(
 
             if email_value:
                 results[media_id] = email_value
+                found_count += 1
                 consecutive_failures = 0
                 if on_email_found:
                     try:
@@ -655,5 +690,14 @@ def scrape_creator_emails(
                 _pace(page, EMAIL_SCRAPE_ITEM_PACE_MS)
             except Exception:
                 pass
+
+            # Periodic live progress -- exactly this granularity (every
+            # 25, not every 1) so a run of hundreds/thousands of items
+            # doesn't flood the log, while still giving a genuine,
+            # frequent "is this actually doing anything" signal well
+            # before the run finishes.
+            attempted += 1
+            if _should_print_progress(attempted, total_targets, PROGRESS_CHECKPOINT):
+                print(_format_progress_line(attempted, total_targets, found_count))
 
     return results
