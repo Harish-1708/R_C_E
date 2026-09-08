@@ -101,6 +101,11 @@ def sync_one_brand(gc: "gspread.Client", tracker_sh, brand_config: dict) -> None
 
 
 def main() -> int:
+    # Belt-and-suspenders alongside `python -u` in the workflow YML --
+    # see run_daily_sync.py's main() for the full explanation. Same
+    # fix, same reasoning, applied here too for consistency.
+    sys.stdout.reconfigure(line_buffering=True)
+
     service_account_path = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
     tracker_spreadsheet_id = os.environ.get("CONTENT_TRACKER_SPREADSHEET_ID")
 
