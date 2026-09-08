@@ -210,21 +210,43 @@ def main() -> int:
             # own. Each loop also re-checks target_ids fresh (shrunk by
             # both newly-scraped AND newly-propagated emails), and
             # propagates after every attempt, not just once at the top.
-            max_scrape_restarts = 3
+            #
+            # already_confirmed_empty accumulates across every restart
+            # in THIS run -- confirmed real, serious bug: without this,
+            # a crash-triggered restart re-scanned the ENTIRE target
+            # list from scratch, including hundreds of ids already
+            # confirmed to have no email earlier in the SAME run, pure
+            # wasted work (a real run showed exactly this: 875 ids
+            # re-checked identically after one restart). Ids that hit a
+            # genuine exception are deliberately NOT added here -- their
+            # true status is still unknown, so they get another chance
+            # on the next attempt, unlike confirmed-empty ones.
+            # max_scrape_restarts raised 3 -> 8: with restarts no longer
+            # wasting time on already-checked ids, each one now makes
+            # real forward progress, so more of them can actually mean
+            # reaching the end of a large backlog instead of just
+            # burning through the restart budget on repeated no-op work.
+            already_confirmed_empty: set = set()
+            max_scrape_restarts = 8
             for attempt in range(max_scrape_restarts + 1):
-                target_ids = parse_refunnel.rows_needing_email_scrape(result)
+                target_ids = [
+                    mid for mid in parse_refunnel.rows_needing_email_scrape(result)
+                    if mid not in already_confirmed_empty
+                ]
                 if not target_ids:
                     print("No posts left needing an email -- scraping is done for this run.")
                     break
 
                 try:
-                    emails = refunnel_export.scrape_creator_emails(
+                    emails, empty_ids = refunnel_export.scrape_creator_emails(
                         page, result.master, target_ids,
                         debug_dir=f"{download_dir}/debug",
                         on_email_found=_save_email_incrementally,
                     )
+                    already_confirmed_empty |= empty_ids
                     updated = parse_refunnel.apply_creator_emails(result, emails)
-                    print(f"Scraped {updated} new creator email(s) (attempt {attempt + 1}).")
+                    print(f"Scraped {updated} new creator email(s), confirmed "
+                          f"{len(empty_ids)} with no email on file (attempt {attempt + 1}).")
                 except Exception as e:
                     # Don't let a scraping crash take down the rest of
                     # the run -- whatever was found before the crash is
