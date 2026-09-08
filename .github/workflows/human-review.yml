@@ -1,0 +1,42 @@
+name: Apply Human Review
+
+# Entirely separate from Refunnel Sync and Content Tracker -- no
+# Playwright/browser involved at all (pure Google Sheets read + write),
+# same reasoning as Content Tracker's own split. Manual trigger only
+# for now, on purpose: mark rows "Reviewed" in Master Data whenever you
+# want, then run this to move them into Human Review immediately,
+# without waiting for (or re-triggering) the next full Refunnel scrape.
+# Add a `schedule:` block here later if you'd rather this ran
+# automatically on a cadence -- it's cheap and fast enough to run often.
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  apply-human-review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install gspread PyYAML
+
+      - name: Apply Human Review flags
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: service_account.json
+          GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          # One secret per brand, matching config/workspaces.yaml's
+          # spreadsheet_id_secret values -- brands without a secret set
+          # here are just skipped, not a failure (see
+          # apply_human_review.py's docstring).
+          SPREADSHEET_ID_DUDEROBE: ${{ secrets.SPREADSHEET_ID_DUDEROBE }}
+          SPREADSHEET_ID_SWOVERALLS: ${{ secrets.SPREADSHEET_ID_SWOVERALLS }}
+          SPREADSHEET_ID_DEFI_SNACKS: ${{ secrets.SPREADSHEET_ID_DEFI_SNACKS }}
+          SPREADSHEET_ID_KELSON: ${{ secrets.SPREADSHEET_ID_KELSON }}
+        run: |
+          echo "$GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT" > service_account.json
+          python -u apply_human_review.py
