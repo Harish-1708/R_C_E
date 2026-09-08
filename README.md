@@ -68,6 +68,32 @@ run.
 
 ## What I just added
 
+- **Fixed a serious, confirmed bug: crash-recovery was re-scanning
+  already-checked posts from scratch.** Real log evidence: after a
+  crash and restart, the run re-attempted the exact same 875 posts it
+  had already confirmed had no email, from the very beginning --
+  wasting the entire restart on work whose outcome was already known.
+  `scrape_creator_emails` now returns which ids were CONFIRMED to have
+  no email (distinct from ids that hit a genuine exception, which are
+  deliberately still eligible for retry, since a crash means their true
+  status is still unknown). `run_daily_sync.py` accumulates this set
+  across every restart in a run and excludes it from each subsequent
+  attempt's target list, so a restart only ever spends time on posts
+  that are genuinely still unknown. Also raised `max_scrape_restarts`
+  3 -> 8, since restarts are no longer wasted effort, so more of them
+  now means real additional coverage of a large backlog.
+- **New: Content Tracker's "Reviewed" column syncs back to Master
+  Data.** Added right after Created At, as a normal manual column
+  (never auto-touched, same as every other manual column). Marking a
+  row reviewed in the Content Tracker (where the richer Product/Theme/
+  Content Type context lives) now also pushes that marking into Master
+  Data's own Reviewed column -- which drives the EXISTING Human Review
+  mechanism (`apply_human_review.py` / the daily sync's own use of it)
+  -- so there's no need to type "Yes" in two different sheets. Only
+  ever pushes a non-blank value; never erases anything in Master Data,
+  and does nothing (no error) if Master Data doesn't have a Reviewed
+  column yet -- same one-time manual setup step as always.
+
 - **The "no email on file" circuit breaker is disabled by default.**
   Even a threshold of 150 stopped a real run at 0/150 found, but you
   confirmed you want the full backlog actually checked -- a long run
@@ -328,8 +354,13 @@ UTC), so each brand's Master Data has had a chance to update first.
   Master Data never erases a non-blank value already in the tracker --
   so you can type an email in directly here before Master Data has it,
   without a later run wiping it out.
-- **Manual** (Summary, Product Score, Rights Duration, Ad Ready, Notes,
-  Contact Status, Last Contacted Date): never touched by any automated write, ever.
+- **Manual** (Reviewed, Summary, Product Score, Rights Duration, Ad
+  Ready, Notes, Contact Status, Last Contacted Date): never touched by
+  any automated write, ever. Reviewed is the one exception with an
+  extra behavior on top: a non-blank value here also gets propagated
+  into Master Data's own Reviewed column (see "What I just added"
+  above) -- but the column itself, here in the tracker, is still purely
+  manual and freeze-forever like the rest.
 
 **Product / Sub Category detection** (Duderobe only so far -- see
 `content_tracker.py`'s docstring): based on Master Data's own
