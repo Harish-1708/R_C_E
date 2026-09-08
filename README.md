@@ -68,6 +68,20 @@ run.
 
 ## What I just added
 
+- **A silent "no results, no error" outcome is now visible and counted.**
+  Confirmed real from a live run (finally readable thanks to the
+  buffering fix): 375 posts in a row, 0 found, and critically zero
+  per-item error lines -- meaning the flow was completing successfully
+  every time (modal opened, Email tab loaded, field found), but the
+  field itself was genuinely empty. That specific outcome previously
+  produced no log line, no debug snapshot, and didn't count toward the
+  circuit breaker at all -- it was invisible. Now logged explicitly
+  ("modal opened fine, but the Creator email address field was empty"),
+  debug-snapshotted once, and counted toward `max_consecutive_failures`
+  -- so a systemic "no email on file for this whole batch" pattern now
+  stops the run early instead of grinding through the entire remaining
+  backlog for nothing.
+
 - **Live progress reporting during scraping.** Confirmed real problem:
   a run gave no visible sign of life in the GitHub Actions log for
   25+ minutes -- the only thing shown was the step's environment-
