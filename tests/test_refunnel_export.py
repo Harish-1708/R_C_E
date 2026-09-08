@@ -368,10 +368,25 @@ def test_should_not_print_progress_between_checkpoints():
 
 
 def test_format_progress_line_shows_found_and_failed():
-    line = _format_progress_line(attempted=50, total=732, found=8)
+    line = _format_progress_line(attempted=50, total=732, found=8, empty_fields=30)
     assert "50/732 attempted" in line
     assert "8 found" in line
-    assert "42 failed/no-info" in line  # 50 - 8
+    assert "30 had no email on file" in line
+    assert "12 other error(s)" in line  # 50 - 8 - 30
+
+
+def test_format_progress_line_defaults_empty_fields_to_zero():
+    line = _format_progress_line(attempted=50, total=732, found=8)
+    assert "8 found" in line
+    assert "0 had no email on file" in line
+    assert "42 other error(s)" in line  # 50 - 8 - 0
+
+
+def test_sabotage_progress_line_wrong_breakdown_would_be_caught():
+    line = _format_progress_line(attempted=50, total=732, found=8, empty_fields=30)
+    with pytest.raises(AssertionError):
+        assert "20 other error(s)" in line  # wrong -- should be 12 (50-8-30)
+    assert "12 other error(s)" in line  # confirms actual correct behavior
 
 
 def test_sabotage_progress_checkpoint_missed_would_be_caught():
