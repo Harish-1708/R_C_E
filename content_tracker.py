@@ -295,6 +295,41 @@ def merge_tracker_row(existing_row: Optional[Dict[str, str]], fresh_row: Dict[st
     return merged
 
 
+def merge_reviewed_from_master(target_rows: Dict[str, Dict[str, str]], master_rows: Dict[str, Dict[str, str]]) -> int:
+    """The other direction of the Reviewed sync -- confirmed real: a
+    real check showed 20 rows marked Reviewed directly in Master Data
+    (the original, established mechanism from before this tracker
+    existed) versus 0 in the Content Tracker, meaning the ONLY sync
+    direction that existed (tracker -> Master Data) had nothing to
+    propagate and looked completely broken from your side, even though
+    it was working correctly for its one direction.
+
+    Pulls a genuine "Yes" from Master Data into the tracker whenever
+    the tracker doesn't already have one, so both sheets end up
+    agreeing on what's been reviewed regardless of which one you
+    happened to mark it in. Never erases an existing tracker value
+    (checked first, skipped if already set), and never pulls in a
+    blank from Master Data either -- this only ever ADDS a Reviewed
+    marking, in either direction, never removes one.
+
+    Call this BEFORE propagate_reviewed_to_master() in
+    build_content_tracker.py, so a value that came FROM Master Data
+    doesn't get redundantly written back to it as if it were new.
+
+    Returns how many rows picked up a Reviewed value this way, for
+    logging.
+    """
+    merged = 0
+    for media_id, row in target_rows.items():
+        if row.get("Reviewed", ""):
+            continue
+        master_value = master_rows.get(media_id, {}).get("Reviewed", "").strip()
+        if master_value:
+            row["Reviewed"] = master_value
+            merged += 1
+    return merged
+
+
 def build_tracker_target_rows(
     master_rows: Dict[str, Dict[str, str]],
     brand: str,
