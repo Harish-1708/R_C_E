@@ -48,7 +48,7 @@ from playwright.sync_api import Page
 
 # Turn this on only after you've manually verified scrape_creator_email()
 # against the real site -- see module docstring and README.
-SCRAPE_EMAILS_ENABLED = True
+SCRAPE_EMAILS_ENABLED = False
 
 # Refunnel's "Request usage rights" flow has a "Send request" button
 # (confirmed from your screenshot). We refuse to click anything whose
@@ -479,7 +479,7 @@ def scrape_creator_emails(
     scroll_container_selector: str = "#scrollableDiv",
     debug_dir: Optional[str] = None,
     max_consecutive_failures: int = 25,
-    max_consecutive_empty_fields: int = 150,
+    max_consecutive_empty_fields: Optional[int] = None,
     on_email_found: Optional[Callable[[str, str], None]] = None,
 ) -> dict:
     """For each media id needing an email, open its 'Request usage
@@ -520,15 +520,14 @@ def scrape_creator_emails(
     Two SEPARATE circuit breakers, not one -- confirmed real need: a
     genuine exception (crash, timeout, missing element) is slow and
     usually means something is badly broken, worth stopping quickly
-    for (max_consecutive_failures, default 25). But "the modal opened
-    fine, the field was just empty" is fast, cheap to check, and
-    confirmed real: a real run's first 25 attempts (in whatever order
-    _order_ids_for_scraping produces) were ALL from a batch with no
-    email on file -- but that doesn't mean the OTHER ~1975 remaining
-    ids share the same fate. A 25-count threshold was too small a
-    sample to conclude "systemic" for this specific, cheap-to-check
-    outcome, so it gets its own, much more generous threshold
-    (max_consecutive_empty_fields, default 150) before giving up.
+    for (max_consecutive_failures, default 25). "The modal opened fine,
+    the field was just empty" is a different, DISABLED-by-default
+    breaker (max_consecutive_empty_fields, default None) -- confirmed
+    real: even a threshold of 150 stopped a run at 0/150 found, but you
+    confirmed you want the full ~1949-post backlog actually checked
+    rather than assuming a long empty run means the rest are the same.
+    Pass an int here explicitly if you ever want that safety net back
+    (e.g. to bound worst-case runtime on a very large one-off pull).
     Individual empty-field occurrences are no longer printed one at a
     time either -- confirmed real complaint about log clutter -- they're
     tallied and reported in the periodic progress line instead (see
@@ -679,7 +678,7 @@ def scrape_creator_emails(
                 empty_field_count += 1
                 consecutive_empty_fields += 1
                 consecutive_failures = 0  # a clean "field was empty" isn't a crash/error
-                if consecutive_empty_fields >= max_consecutive_empty_fields:
+                if max_consecutive_empty_fields is not None and consecutive_empty_fields >= max_consecutive_empty_fields:
                     print(
                         f"scrape_creator_emails: {consecutive_empty_fields} posts in a row had "
                         f"no email on file -- stopping early rather than grinding through the "
