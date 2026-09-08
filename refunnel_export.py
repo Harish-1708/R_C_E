@@ -651,6 +651,40 @@ def scrape_creator_emails(
                         print(f"scrape_creator_emails: on_email_found callback failed for "
                               f"media_id={media_id!r} (email was still found, just not "
                               f"saved incrementally): {e}")
+            else:
+                # Confirmed real gap: the flow completing successfully
+                # (no exception at all -- modal opened, Email tab
+                # loaded, field found) but the field being genuinely
+                # EMPTY was invisible before this -- no print, no debug
+                # snapshot, no circuit-breaker counting, just silent
+                # nothing. A real run showed 375 in a row with zero
+                # found and zero per-item error lines, which is exactly
+                # this case, not an exception-based failure. Now logged
+                # explicitly, one-time debug-snapshotted like every
+                # other failure mode, and counted toward the circuit
+                # breaker -- a systemic "field is always blank" pattern
+                # (e.g. Refunnel simply has no email on file for a
+                # given batch of older posts) should stop the run early
+                # the same way the Approved-badge and crashed-browser
+                # patterns already do, instead of grinding through the
+                # entire remaining backlog for nothing.
+                print(f"scrape_creator_emails: media_id={media_id!r} -- modal opened fine, "
+                      f"but the Creator email address field was empty (Refunnel has no "
+                      f"email on file for this post).")
+                if debug_dir and not debug_snapshot_saved:
+                    _save_scrape_failure_snapshot(page, debug_dir, media_id)
+                    debug_snapshot_saved = True
+                consecutive_failures += 1
+                if consecutive_failures >= max_consecutive_failures:
+                    print(
+                        f"scrape_creator_emails: {consecutive_failures} failures in a row -- "
+                        f"stopping early rather than grinding through the remaining ids. This "
+                        f"pattern usually means every remaining post shares the same problem "
+                        f"(e.g. no email on file for this whole batch), not bad luck on "
+                        f"individual posts. Returning the {len(results)} email(s) found before "
+                        f"this happened."
+                    )
+                    break
 
         except Exception as e:
             print(f"scrape_creator_emails: couldn't get email for media_id={media_id!r}: {e}")
