@@ -39,4 +39,4 @@ jobs:
           SPREADSHEET_ID_KELSON: ${{ secrets.SPREADSHEET_ID_KELSON }}
         run: |
           echo "$GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT" > service_account.json
-          python build_content_tracker.py
+          python -u build_content_tracker.py
