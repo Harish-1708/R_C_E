@@ -52,6 +52,35 @@ def load_workspaces(path: str = CONFIG_PATH) -> list:
     return data.get("workspaces", [])
 
 
+def propagate_reviewed_to_master(target_rows: dict, master_client: sheets_sync.GspreadSheetsClient) -> int:
+    """After building this run's Content Tracker rows, push any
+    "Reviewed" marking back into Master Data's own Reviewed column --
+    confirmed real want: you review content in the richer Content
+    Tracker view (with Product/Theme/Content Type context to help
+    decide), and want that marking to also drive Master Data's EXISTING
+    Human Review mechanism (see apply_human_review.py /
+    run_daily_sync.py's own use of it) without typing "Yes" in two
+    different sheets.
+
+    Only pushes a value when Reviewed is genuinely non-blank -- never
+    writes a blank over anything, and never touches any column other
+    than Reviewed. Silently does nothing for an id if Master Data
+    doesn't have a "Reviewed" column yet at all (update_single_cell
+    already handles that gracefully, returning False) -- that's still
+    a one-time manual setup step, same as it's always been.
+
+    Returns how many cells were actually updated, for logging.
+    """
+    propagated = 0
+    for media_id, row in target_rows.items():
+        reviewed_value = row.get("Reviewed", "").strip()
+        if reviewed_value:
+            found = master_client.update_single_cell(media_id, "Reviewed", reviewed_value)
+            if found:
+                propagated += 1
+    return propagated
+
+
 def sync_one_brand(gc: "gspread.Client", tracker_sh, brand_config: dict) -> None:
     brand = brand_config["name"]
     secret_name = brand_config["spreadsheet_id_secret"]
@@ -85,6 +114,10 @@ def sync_one_brand(gc: "gspread.Client", tracker_sh, brand_config: dict) -> None
     existing_tracker_rows = sheets_sync.index_by_id(tracker_header, tracker_data, "id")
 
     target_rows = content_tracker.build_tracker_target_rows(master_rows, brand, existing_tracker_rows)
+
+    reviewed_propagated = propagate_reviewed_to_master(target_rows, master_client)
+    if reviewed_propagated:
+        print(f"{brand}: propagated {reviewed_propagated} 'Reviewed' marking(s) back to Master Data.")
 
     # never_delete=True: same protection as Master Data -- a row already
     # in the tracker is never dropped just because it's momentarily
