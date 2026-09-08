@@ -115,6 +115,10 @@ def sync_one_brand(gc: "gspread.Client", tracker_sh, brand_config: dict) -> None
 
     target_rows = content_tracker.build_tracker_target_rows(master_rows, brand, existing_tracker_rows)
 
+    reviewed_from_master = content_tracker.merge_reviewed_from_master(target_rows, master_rows)
+    if reviewed_from_master:
+        print(f"{brand}: pulled {reviewed_from_master} 'Reviewed' marking(s) in from Master Data.")
+
     reviewed_propagated = propagate_reviewed_to_master(target_rows, master_client)
     if reviewed_propagated:
         print(f"{brand}: propagated {reviewed_propagated} 'Reviewed' marking(s) back to Master Data.")
