@@ -76,20 +76,20 @@ run.
   issue at all. Left in place anyway since it's a harmless general
   safety margin, but it was NOT the fix for that specific problem.
 
-- **The "Last 12 months" undercount fix is reverted -- turned out to be
-  a Refunnel-side bug, not ours.** Two real runs stalled at the exact
-  same post (@faisalofficial993, ~120 of 2771), even after doubling how
-  much patience `scroll_to_load_all` was given -- identical stopping
-  point both times ruled out a timing explanation. You then confirmed
-  it directly: scrolling that same URL manually in a real browser hits
-  the identical wall, and Refunnel's own manual export feature caps out
-  at just 20 rows under that filter. Since a genuine human hits the
-  same limit, not just our automation, this isn't fixable from our
-  side -- worth reporting to Refunnel's own support team. Reverted back
-  to no forced date filter (Refunnel's own default), which is confirmed
-  reliable at ~2065-2088 rows across many past runs. If Refunnel ever
-  fixes this on their end, `REFUNNEL_SOCIAL_LISTENING_URL` in
-  `refunnel_auth.py` is the only line that needs to change back.
+- **"Last 12 months" is RE-ENABLED -- Refunnel fixed the platform-side
+  bug.** History: two real runs stalled at the exact same post
+  (@faisalofficial993, ~120 of 2771) even after doubling
+  `scroll_to_load_all`'s patience, and you confirmed the same stall
+  manually in a real browser, plus Refunnel's own manual export capped
+  at 20 rows -- all pointing at a bug on Refunnel's own side, not ours.
+  It was reverted to no forced date filter (~2065-2088 rows) while that
+  was unresolved. You've now confirmed you can scroll all the way down
+  without stalling, so `refunnel_social_listening_url()` in
+  `refunnel_auth.py` is back to requesting the full 12 months --
+  matches your freshly re-captured URL exactly. If this ever regresses
+  on Refunnel's side again, the safe fallback is reverting this one
+  function to a plain URL with no query params (Refunnel's own default)
+  -- see git history for the exact prior version.
 - **No "views" column** -- reverted. Refunnel's own Analytics panel
   (confirmed from a real screenshot) labels this metric "Impressions",
   not "Views" -- there's no separate "views" concept in the product at
