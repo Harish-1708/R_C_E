@@ -68,6 +68,17 @@ run.
 
 ## What I just added
 
+- **Live progress reporting during scraping.** Confirmed real problem:
+  a run gave no visible sign of life in the GitHub Actions log for
+  25+ minutes -- the only thing shown was the step's environment-
+  variable header (not any real progress), since `scrape_creator_emails`
+  didn't print anything until either a failure or the very end. Now
+  prints "starting -- N post(s) to attempt" immediately, then
+  "progress X/N attempted -- Y found, Z failed" every 25 items (and
+  once more on the final item, even if the total isn't a multiple of
+  25). Frequent enough to give a genuine live signal, not so frequent
+  it floods the log across a 2000+ item run.
+
 - **Widened scroll-loading patience** (`scroll_pause_ms` 1200ms ->
   2000ms, `idle_rounds_before_giving_up` 6 -> 12) -- this was an
   initial hypothesis for a stall at 120/2771 that turned out to be
@@ -90,6 +101,21 @@ run.
   on Refunnel's side again, the safe fallback is reverting this one
   function to a plain URL with no query params (Refunnel's own default)
   -- see git history for the exact prior version.
+- **Fixed a real bug: crash-recovery never re-scrolled the grid.**
+  Confirmed real: after the 12-months re-enable, a run showed email
+  count essentially flat (773 -> 774) after a full hour. Root cause --
+  the crash-recovery step (see "A crashed browser now recovers AND
+  resumes scraping" below) gets a fresh session and re-selects the
+  workspace, but was never re-running `scroll_to_load_all` afterward.
+  So every recovery left the grid back at its initial ~20-120 loaded
+  items, forcing every subsequent per-item scrape to rely on slow,
+  incremental scrolling to reach anything further down a now
+  much-longer 2771-item list -- easily explaining an hour with almost
+  no progress. Fixed: recovery now re-scrolls the full grid before
+  resuming scraping (wrapped in its own try/except -- a re-scroll
+  failure here gives up on further scraping for this run rather than
+  crashing the whole thing, since there's usually already real progress
+  worth saving by that point).
 - **No "views" column** -- reverted. Refunnel's own Analytics panel
   (confirmed from a real screenshot) labels this metric "Impressions",
   not "Views" -- there's no separate "views" concept in the product at
@@ -354,6 +380,23 @@ given run's Master Data read.
    the workflow runs, and a brand with no spreadsheet secret set yet
    (Swoveralls/Defi Snacks/Kelson, currently) is just skipped with a
    clear log line, not a failure.
+
+## One-time manual cleanup needed: the stale "views" column
+
+Master Data currently has a leftover `views` column at the very end,
+from an earlier rename that was later reverted. **I can't remove it
+myself** -- I don't have a live write connection to your Google Sheet
+from this chat, only the ability to change code that runs in GitHub
+Actions. Our code will never delete a column automatically (matches
+the "never lose data without being asked" design throughout this
+project), so this needs a quick manual step from you:
+
+1. Open Master Data in the Sheet.
+2. Right-click the `views` column header (the very last column).
+3. Delete column.
+
+That's it -- since `views` isn't part of the real schema anymore, the
+code will never recreate it once it's gone.
 
 ## Setup checklist -- what I need from you
 
