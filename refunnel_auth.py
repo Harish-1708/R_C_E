@@ -32,6 +32,7 @@ completes; see README "Testing the login flow".
 from __future__ import annotations
 
 import time
+from datetime import date, timedelta
 from pathlib import Path
 
 from playwright.sync_api import BrowserContext, Page, sync_playwright
@@ -44,20 +45,30 @@ REFUNNEL_LOGIN_URL = f"{REFUNNEL_BASE_URL}/login"
 # shared -- the actual dashboard path includes /dashboard/content/, not
 # just the page name.
 #
-# REVERTED back to no forced date filter (Refunnel's own default,
-# confirmed reliable at ~2065-2088 rows across many past runs) after
-# "Last 12 months" turned out to be broken on REFUNNEL'S side, not
-# ours -- confirmed two ways: (1) scroll_to_load_all stalled at exactly
-# the same post (@faisalofficial993, ~120 of 2771) on two separate real
-# runs, even after doubling how much patience it was given, and (2) you
-# reproduced the identical stall manually, scrolling that exact URL
-# yourself in a real browser -- and Refunnel's own manual export
-# feature capped out at just 20 rows under that same filter. Since a
-# genuine human, not just our automation, hits the same wall, this
-# isn't fixable from our side -- worth reporting to Refunnel's own
-# support team, since their manual export is affected too. If they ever
-# fix it, this is the only line that needs to change back.
-REFUNNEL_SOCIAL_LISTENING_URL = f"{REFUNNEL_BASE_URL}/dashboard/content/social-listening"
+# RE-ENABLED "Last 12 months": confirmed you can now scroll all the way
+# down without stalling -- Refunnel resolved the platform-side bug that
+# previously capped this at ~120 items regardless of automation vs
+# manual scrolling (see git history / prior conversation for the full
+# diagnosis). Matches the exact URL you captured from your address bar:
+# Refunnel's "last12months" preset sets explicit from_date/to_date
+# (to_date = today, from_date = exactly 365 days earlier) plus
+# sort_by/snv params -- all included here, computed fresh each call so
+# it stays a true rolling window, not a date frozen at whatever day
+# this was written. If this ever breaks again on Refunnel's side, the
+# safe fallback is reverting this one function back to a plain
+# f-string with no query params at all (Refunnel's own "Last 3 months"
+# default) -- see git history for that exact version.
+def refunnel_social_listening_url() -> str:
+    today = date.today()
+    from_date = today - timedelta(days=365)
+    return (
+        f"{REFUNNEL_BASE_URL}/dashboard/content/social-listening"
+        f"?sort_by=%22BY_DATE%22"
+        f"&from_date=%22{from_date.isoformat()}%22"
+        f"&to_date=%22{today.isoformat()}%22"
+        f"&snv=true"
+        f"&insights_timeline=%22last12months%22"
+    )
 
 
 # Confirmed for real (you sent the exact URL from your address bar):
