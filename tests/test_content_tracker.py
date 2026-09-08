@@ -9,6 +9,7 @@ from content_tracker import (
     build_fresh_tracker_row,
     merge_tracker_row,
     build_tracker_target_rows,
+    merge_reviewed_from_master,
     derive_content_type,
     derive_post_type,
     derive_theme,
@@ -461,3 +462,49 @@ def test_build_tracker_target_rows_end_to_end_includes_post_type():
     target = build_tracker_target_rows(master_rows, "Duderobe", {})
     assert target["tk_1"]["Post Type"] == "Video"
     assert target["tk_2"]["Post Type"] == "Reels"
+
+
+# ---------- merge_reviewed_from_master ----------
+
+def test_merge_reviewed_from_master_pulls_in_a_yes():
+    target_rows = {"tk_1": {"Reviewed": ""}}
+    master_rows = {"tk_1": {"Reviewed": "Yes"}}
+    merged = merge_reviewed_from_master(target_rows, master_rows)
+    assert merged == 1
+    assert target_rows["tk_1"]["Reviewed"] == "Yes"
+
+
+def test_merge_reviewed_from_master_never_overwrites_an_existing_tracker_value():
+    target_rows = {"tk_1": {"Reviewed": "Yes"}}
+    master_rows = {"tk_1": {"Reviewed": ""}}  # blank in Master Data
+    merged = merge_reviewed_from_master(target_rows, master_rows)
+    assert merged == 0
+    assert target_rows["tk_1"]["Reviewed"] == "Yes"  # untouched, not erased
+
+
+def test_merge_reviewed_from_master_does_nothing_when_both_blank():
+    target_rows = {"tk_1": {"Reviewed": ""}}
+    master_rows = {"tk_1": {"Reviewed": ""}}
+    merged = merge_reviewed_from_master(target_rows, master_rows)
+    assert merged == 0
+    assert target_rows["tk_1"]["Reviewed"] == ""
+
+
+def test_merge_reviewed_from_master_handles_id_missing_from_master_rows():
+    target_rows = {"tk_1": {"Reviewed": ""}}
+    master_rows = {}  # id not present at all
+    merged = merge_reviewed_from_master(target_rows, master_rows)
+    assert merged == 0
+    assert target_rows["tk_1"]["Reviewed"] == ""
+
+
+def test_sabotage_reviewed_sync_direction_missing_would_be_caught():
+    # this is the exact real scenario: 20 rows reviewed in Master Data,
+    # 0 in the tracker -- confirms the fix actually closes that gap
+    target_rows = {f"tk_{i}": {"Reviewed": ""} for i in range(20)}
+    master_rows = {f"tk_{i}": {"Reviewed": "Yes"} for i in range(20)}
+    merged = merge_reviewed_from_master(target_rows, master_rows)
+    with pytest.raises(AssertionError):
+        assert merged == 0  # wrong -- would mean the real bug is still there
+    assert merged == 20  # confirms actual correct behavior
+    assert all(row["Reviewed"] == "Yes" for row in target_rows.values())
