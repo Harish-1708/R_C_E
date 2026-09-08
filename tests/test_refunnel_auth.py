@@ -14,9 +14,9 @@ from refunnel_auth import refunnel_social_listening_url
 def test_matches_the_real_captured_url_shape():
     # Confirmed real: this exact param set (sort_by, from_date, to_date,
     # snv, insights_timeline) is what Refunnel's own "Last 12 months"
-    # filter produces -- captured directly from a browser address bar.
-    # A first attempt using insights_timeline alone (no explicit
-    # from_date/to_date) did NOT actually widen a real pull.
+    # filter produces -- captured directly from a browser address bar,
+    # twice now (once before, once after Refunnel fixed the platform
+    # bug that made this unusable the first time around).
     url = refunnel_social_listening_url()
     assert url.startswith("https://app.refunnel.com/dashboard/content/social-listening?")
     assert "sort_by=%22BY_DATE%22" in url
