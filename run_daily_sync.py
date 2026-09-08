@@ -96,6 +96,17 @@ def _save_debug_snapshot(page, workspace_name: str) -> None:
 
 
 def main() -> int:
+    # Belt-and-suspenders alongside `python -u` in the workflow YML --
+    # confirmed real problem: Python fully buffers stdout when it isn't
+    # connected to a real terminal (exactly the case in GitHub Actions),
+    # so every print() in this whole script -- including the new
+    # scraping progress lines -- was silently sitting in a buffer for
+    # 20+ minutes with nothing visible in the live log, not because
+    # anything was stuck, but because nothing had flushed yet. This
+    # keeps working even if this script is ever invoked a different way
+    # (without -u) in the future.
+    sys.stdout.reconfigure(line_buffering=True)
+
     email = os.environ.get("REFUNNEL_EMAIL")
     spreadsheet_id = os.environ.get("SPREADSHEET_ID")
     service_account_path = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
