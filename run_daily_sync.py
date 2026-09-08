@@ -124,7 +124,7 @@ def main() -> int:
         page = context.new_page()
 
         # --- 2. select the right workspace, then export media ---
-        page.goto(refunnel_auth.REFUNNEL_SOCIAL_LISTENING_URL)
+        page.goto(refunnel_auth.refunnel_social_listening_url())
         refunnel_export.select_workspace(page, refunnel_workspace_name, known_workspace_names)
         refunnel_export.scroll_to_load_all(page)
         media_csv_path = refunnel_export.export_media_csv(page, download_dir)
@@ -269,7 +269,7 @@ def main() -> int:
                     email=email, session_file=session_file, headless=True
                 )
                 page = context.new_page()
-                page.goto(refunnel_auth.REFUNNEL_SOCIAL_LISTENING_URL)
+                page.goto(refunnel_auth.refunnel_social_listening_url())
                 refunnel_export.select_workspace(page, refunnel_workspace_name, known_workspace_names)
 
                 if attempt >= max_scrape_restarts:
