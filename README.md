@@ -68,6 +68,22 @@ run.
 
 ## What I just added
 
+- **The "no email on file" circuit breaker is disabled by default.**
+  Even a threshold of 150 stopped a real run at 0/150 found, but you
+  confirmed you want the full backlog actually checked -- a long run
+  of "no email" doesn't necessarily mean the rest are the same. Pass
+  `max_consecutive_empty_fields` as an int explicitly if you ever want
+  that safety net back for a specific run.
+- **New: `apply_human_review.py` + its own workflow
+  (`human-review.yml`, manual trigger only for now).** The "Reviewed"
+  column mechanism itself already existed and is still used by the
+  daily Refunnel sync too -- this is a faster, additional way to
+  trigger the same move-to-Human-Review effect without waiting for (or
+  re-triggering) a full Refunnel scrape, since it's pure Google Sheets
+  I/O with no browser involved at all. Works the same way across every
+  brand in `config/workspaces.yaml`, skipping any without a spreadsheet
+  secret set or a Master Data tab yet.
+
 - **Two separate circuit breakers, not one, and cleaner logging.**
   Confirmed real from a live run: the first 25 posts attempted all had
   no email on file, which stopped the whole run -- but 25 posts (in
@@ -254,6 +270,8 @@ refunnel-sync/
 | `content_tracker.py` | Pure logic for the Content Tracker: Product/Sub Category/Content Type/Post Type/Theme detection, the freeze/refresh/manual column policy | 53 automated tests |
 | `build_content_tracker.py` | Orchestrates content_tracker.py against real Google Sheets, one tab per brand | 5 automated tests against fakes |
 | `.github/workflows/content-tracker.yml` | Separate daily schedule, 2 hours after the main export | Not run |
+| `apply_human_review.py` | Moves "Reviewed" rows into Human Review across every brand, pure Sheets I/O | 7 automated tests against fakes |
+| `.github/workflows/human-review.yml` | Manual trigger only for now | Not run |
 
 Run all automated tests (from the repo root): `python -m pytest -v`
 Lint everything: `python -m pyflakes *.py scripts/*.py tests/*.py`
