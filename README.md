@@ -68,6 +68,21 @@ run.
 
 ## What I just added
 
+- **Two separate circuit breakers, not one, and cleaner logging.**
+  Confirmed real from a live run: the first 25 posts attempted all had
+  no email on file, which stopped the whole run -- but 25 posts (in
+  whatever order they happened to be processed) isn't a reliable
+  sample for concluding the other ~1975 are the same. A genuine
+  exception (crash, timeout) is slow and usually means something's
+  badly broken, so that keeps its 25-count threshold. "Modal opened
+  fine, field was just empty" is fast and cheap to check, so it gets
+  its own, much more generous threshold (`max_consecutive_empty_fields`,
+  default 150) before giving up. Also: no more one line per empty
+  result (confirmed real complaint about log clutter, 25 identical
+  lines in a row) -- these are now tallied and reported in the existing
+  periodic progress line instead, broken down by reason (e.g. "8 found,
+  30 had no email on file, 12 other errors").
+
 - **A silent "no results, no error" outcome is now visible and counted.**
   Confirmed real from a live run (finally readable thanks to the
   buffering fix): 375 posts in a row, 0 found, and critically zero
