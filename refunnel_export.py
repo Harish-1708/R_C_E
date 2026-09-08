@@ -461,10 +461,15 @@ def _should_print_progress(attempted: int, total: int, checkpoint: int) -> bool:
     return attempted % checkpoint == 0 or attempted == total
 
 
-def _format_progress_line(attempted: int, total: int, found: int) -> str:
-    failed = attempted - found
+def _format_progress_line(attempted: int, total: int, found: int, empty_fields: int = 0) -> str:
+    # Broken down by reason -- confirmed real need: a plain "failed"
+    # count doesn't tell you WHY, and "empty email field on file" (a
+    # real, expected outcome for some posts) looks identical to a
+    # genuine error otherwise.
+    other_failed = attempted - found - empty_fields
     return (f"scrape_creator_emails: progress {attempted}/{total} attempted "
-            f"-- {found} found, {failed} failed/no-info so far")
+            f"-- {found} found, {empty_fields} had no email on file, "
+            f"{other_failed} other error(s)")
 
 
 def scrape_creator_emails(
@@ -474,6 +479,7 @@ def scrape_creator_emails(
     scroll_container_selector: str = "#scrollableDiv",
     debug_dir: Optional[str] = None,
     max_consecutive_failures: int = 25,
+    max_consecutive_empty_fields: int = 150,
     on_email_found: Optional[Callable[[str, str], None]] = None,
 ) -> dict:
     """For each media id needing an email, open its 'Request usage
@@ -511,18 +517,22 @@ def scrape_creator_emails(
     skipped and the loop moves to the next id. That's the normal,
     expected behavior and needs no special handling.
 
-    max_consecutive_failures is a separate, LAST-RESORT circuit breaker
-    for a genuinely systemic pattern, not for occasional one-off
-    failures -- default 25 is deliberately generous so isolated
-    failures never trigger it. It exists because a real run confirmed
-    that once a post's usage rights are Approved (or presumably
-    Declined), its card footer is replaced entirely with a status badge
-    -- there's no request button to click at all, so every such attempt
-    is a GUARANTEED failure, not intermittent bad luck.
-    rows_needing_email_scrape() already excludes approved/declined for
-    exactly this reason, but if some other status or edge case turns
-    out to behave the same way, this stops a multi-hour run before it
-    happens rather than after.
+    Two SEPARATE circuit breakers, not one -- confirmed real need: a
+    genuine exception (crash, timeout, missing element) is slow and
+    usually means something is badly broken, worth stopping quickly
+    for (max_consecutive_failures, default 25). But "the modal opened
+    fine, the field was just empty" is fast, cheap to check, and
+    confirmed real: a real run's first 25 attempts (in whatever order
+    _order_ids_for_scraping produces) were ALL from a batch with no
+    email on file -- but that doesn't mean the OTHER ~1975 remaining
+    ids share the same fate. A 25-count threshold was too small a
+    sample to conclude "systemic" for this specific, cheap-to-check
+    outcome, so it gets its own, much more generous threshold
+    (max_consecutive_empty_fields, default 150) before giving up.
+    Individual empty-field occurrences are no longer printed one at a
+    time either -- confirmed real complaint about log clutter -- they're
+    tallied and reported in the periodic progress line instead (see
+    _format_progress_line), broken down by reason.
 
     Flow -- confirmed from a real, complete HTML trace of the whole
     interaction (card -> popover -> modal), for BOTH never-requested and
@@ -567,6 +577,7 @@ def scrape_creator_emails(
     results: dict = {}
     debug_snapshot_saved = False
     consecutive_failures = 0
+    consecutive_empty_fields = 0
     # Materialized into a list (not left as a lazy iterable) specifically
     # so its length is known upfront, for the "X/Y attempted" progress
     # line below -- confirmed real need: a real run gave no visible sign
@@ -579,6 +590,7 @@ def scrape_creator_emails(
     print(f"scrape_creator_emails: starting -- {total_targets} post(s) to attempt.")
     attempted = 0
     found_count = 0
+    empty_field_count = 0
     PROGRESS_CHECKPOINT = 25
     for media_id in target_ids:
         try:
@@ -590,6 +602,7 @@ def scrape_creator_emails(
                     _save_scrape_failure_snapshot(page, debug_dir, media_id)
                     debug_snapshot_saved = True
                 consecutive_failures += 1
+                consecutive_empty_fields = 0
                 if consecutive_failures >= max_consecutive_failures:
                     print(
                         f"scrape_creator_emails: {consecutive_failures} failures in a row -- "
@@ -644,6 +657,7 @@ def scrape_creator_emails(
                 results[media_id] = email_value
                 found_count += 1
                 consecutive_failures = 0
+                consecutive_empty_fields = 0
                 if on_email_found:
                     try:
                         on_email_found(media_id, email_value)
@@ -652,36 +666,24 @@ def scrape_creator_emails(
                               f"media_id={media_id!r} (email was still found, just not "
                               f"saved incrementally): {e}")
             else:
-                # Confirmed real gap: the flow completing successfully
-                # (no exception at all -- modal opened, Email tab
-                # loaded, field found) but the field being genuinely
-                # EMPTY was invisible before this -- no print, no debug
-                # snapshot, no circuit-breaker counting, just silent
-                # nothing. A real run showed 375 in a row with zero
-                # found and zero per-item error lines, which is exactly
-                # this case, not an exception-based failure. Now logged
-                # explicitly, one-time debug-snapshotted like every
-                # other failure mode, and counted toward the circuit
-                # breaker -- a systemic "field is always blank" pattern
-                # (e.g. Refunnel simply has no email on file for a
-                # given batch of older posts) should stop the run early
-                # the same way the Approved-badge and crashed-browser
-                # patterns already do, instead of grinding through the
-                # entire remaining backlog for nothing.
-                print(f"scrape_creator_emails: media_id={media_id!r} -- modal opened fine, "
-                      f"but the Creator email address field was empty (Refunnel has no "
-                      f"email on file for this post).")
+                # No per-item print here anymore -- confirmed real
+                # complaint about log clutter (25 identical lines in a
+                # row). Tallied instead and reported in the periodic
+                # progress line, broken down by reason. Still worth a
+                # one-time debug snapshot (first occurrence only) for
+                # genuine diagnosis if this pattern ever turns out to
+                # be wrong.
                 if debug_dir and not debug_snapshot_saved:
                     _save_scrape_failure_snapshot(page, debug_dir, media_id)
                     debug_snapshot_saved = True
-                consecutive_failures += 1
-                if consecutive_failures >= max_consecutive_failures:
+                empty_field_count += 1
+                consecutive_empty_fields += 1
+                consecutive_failures = 0  # a clean "field was empty" isn't a crash/error
+                if consecutive_empty_fields >= max_consecutive_empty_fields:
                     print(
-                        f"scrape_creator_emails: {consecutive_failures} failures in a row -- "
-                        f"stopping early rather than grinding through the remaining ids. This "
-                        f"pattern usually means every remaining post shares the same problem "
-                        f"(e.g. no email on file for this whole batch), not bad luck on "
-                        f"individual posts. Returning the {len(results)} email(s) found before "
+                        f"scrape_creator_emails: {consecutive_empty_fields} posts in a row had "
+                        f"no email on file -- stopping early rather than grinding through the "
+                        f"remaining ids. Returning the {len(results)} email(s) found before "
                         f"this happened."
                     )
                     break
@@ -692,6 +694,7 @@ def scrape_creator_emails(
                 _save_scrape_failure_snapshot(page, debug_dir, media_id)
                 debug_snapshot_saved = True
             consecutive_failures += 1
+            consecutive_empty_fields = 0
             if consecutive_failures >= max_consecutive_failures:
                 print(
                     f"scrape_creator_emails: {consecutive_failures} failures in a row -- "
@@ -732,6 +735,6 @@ def scrape_creator_emails(
             # before the run finishes.
             attempted += 1
             if _should_print_progress(attempted, total_targets, PROGRESS_CHECKPOINT):
-                print(_format_progress_line(attempted, total_targets, found_count))
+                print(_format_progress_line(attempted, total_targets, found_count, empty_field_count))
 
     return results
