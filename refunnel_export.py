@@ -48,7 +48,7 @@ from playwright.sync_api import Page
 
 # Turn this on only after you've manually verified scrape_creator_email()
 # against the real site -- see module docstring and README.
-SCRAPE_EMAILS_ENABLED = True
+SCRAPE_EMAILS_ENABLED = False
 
 # Refunnel's "Request usage rights" flow has a "Send request" button
 # (confirmed from your screenshot). We refuse to click anything whose
@@ -487,8 +487,19 @@ def scrape_creator_emails(
     anything -- closes via the Escape key rather than a close button,
     since Escape can't submit a form.
 
-    Returns {media_id: email} for whichever ones had an email available
-    (some won't -- that's expected, not an error).
+    Returns (results, empty_ids): `results` is {media_id: email} for
+    whichever ones had an email available. `empty_ids` is the set of
+    ids CONFIRMED to have no email on file (the modal opened fine, the
+    field was genuinely empty) -- distinct from ids that hit an
+    exception (crash, timeout), which are NOT in this set since their
+    true status is still unknown and they deserve a retry. Confirmed
+    real, serious bug this fixes: a crash-triggered restart was
+    re-scanning the ENTIRE target list from scratch every time,
+    including hundreds of ids already confirmed empty earlier in the
+    SAME run -- pure wasted work. The caller (run_daily_sync.py) is
+    expected to accumulate this set across restarts and exclude it from
+    the next attempt's target list, so a restart only ever spends time
+    on ids that are genuinely still unknown.
 
     If debug_dir is given, the FIRST time a card can't be located, this
     saves a screenshot + the scroll container's scrollTop/scrollHeight/
@@ -574,6 +585,7 @@ def scrape_creator_emails(
     page.wait_for_timeout(500)
 
     results: dict = {}
+    empty_ids: set = set()
     debug_snapshot_saved = False
     consecutive_failures = 0
     consecutive_empty_fields = 0
@@ -676,6 +688,7 @@ def scrape_creator_emails(
                     _save_scrape_failure_snapshot(page, debug_dir, media_id)
                     debug_snapshot_saved = True
                 empty_field_count += 1
+                empty_ids.add(media_id)
                 consecutive_empty_fields += 1
                 consecutive_failures = 0  # a clean "field was empty" isn't a crash/error
                 if max_consecutive_empty_fields is not None and consecutive_empty_fields >= max_consecutive_empty_fields:
@@ -736,4 +749,4 @@ def scrape_creator_emails(
             if _should_print_progress(attempted, total_targets, PROGRESS_CHECKPOINT):
                 print(_format_progress_line(attempted, total_targets, found_count, empty_field_count))
 
-    return results
+    return results, empty_ids
