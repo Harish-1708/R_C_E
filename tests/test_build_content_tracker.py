@@ -1,12 +1,14 @@
 import pytest
 import gspread.exceptions
 
-from build_content_tracker import sync_one_brand
+from build_content_tracker import sync_one_brand, propagate_reviewed_to_master
+import sheets_sync
 
 
 class FakeWorksheet:
     """Minimal gspread-Worksheet-shaped fake -- just what
-    GspreadSheetsClient and sync_tab actually call."""
+    GspreadSheetsClient (including update_single_cell) and sync_tab
+    actually call."""
 
     def __init__(self, rows=None):
         self.rows = [list(r) for r in rows] if rows else []
@@ -25,6 +27,17 @@ class FakeWorksheet:
 
     def freeze(self, rows=1):
         pass
+
+    def row_values(self, row_num):
+        return self.rows[row_num - 1]
+
+    def col_values(self, col_num):
+        return [row[col_num - 1] if col_num - 1 < len(row) else "" for row in self.rows]
+
+    def update_cell(self, row_num, col_num, value):
+        while len(self.rows[row_num - 1]) < col_num:
+            self.rows[row_num - 1].append("")
+        self.rows[row_num - 1][col_num - 1] = value
 
 
 class FakeSpreadsheet:
@@ -162,3 +175,54 @@ def test_sabotage_frozen_column_overwritten_would_be_caught(monkeypatch):
     with pytest.raises(AssertionError):
         assert as_dict["Product"] == "SheRobe"  # wrong -- Product must stay frozen
     assert as_dict["Product"] == "DudeRobe"  # confirms actual correct behavior
+
+
+# ---------- propagate_reviewed_to_master ----------
+
+def test_propagate_reviewed_pushes_yes_into_master_data():
+    master_ws = FakeWorksheet(rows=[
+        ["id", "rights_status", "Reviewed"],
+        ["tk_1", "REQUESTED", ""],
+    ])
+    master_client = sheets_sync.GspreadSheetsClient(master_ws)
+    target_rows = {"tk_1": {"Reviewed": "Yes"}}
+
+    propagated = propagate_reviewed_to_master(target_rows, master_client)
+
+    assert propagated == 1
+    assert master_ws.rows[1] == ["tk_1", "REQUESTED", "Yes"]
+
+
+def test_propagate_reviewed_never_writes_a_blank():
+    master_ws = FakeWorksheet(rows=[
+        ["id", "rights_status", "Reviewed"],
+        ["tk_1", "REQUESTED", "Yes"],  # already reviewed
+    ])
+    master_client = sheets_sync.GspreadSheetsClient(master_ws)
+    target_rows = {"tk_1": {"Reviewed": ""}}  # blank in the tracker
+
+    propagated = propagate_reviewed_to_master(target_rows, master_client)
+
+    assert propagated == 0
+    assert master_ws.rows[1][2] == "Yes"  # untouched, not erased
+
+
+def test_propagate_reviewed_does_nothing_if_master_has_no_reviewed_column():
+    master_ws = FakeWorksheet(rows=[["id", "rights_status"], ["tk_1", "REQUESTED"]])
+    master_client = sheets_sync.GspreadSheetsClient(master_ws)
+    target_rows = {"tk_1": {"Reviewed": "Yes"}}
+
+    propagated = propagate_reviewed_to_master(target_rows, master_client)
+
+    assert propagated == 0  # no crash, just nothing to do
+    assert master_ws.rows[1] == ["tk_1", "REQUESTED"]  # unchanged
+
+
+def test_sabotage_propagate_reviewed_erasing_would_be_caught():
+    master_ws = FakeWorksheet(rows=[["id", "rights_status", "Reviewed"], ["tk_1", "REQUESTED", "Yes"]])
+    master_client = sheets_sync.GspreadSheetsClient(master_ws)
+    target_rows = {"tk_1": {"Reviewed": ""}}
+    propagate_reviewed_to_master(target_rows, master_client)
+    with pytest.raises(AssertionError):
+        assert master_ws.rows[1][2] == ""  # wrong -- would mean it got erased
+    assert master_ws.rows[1][2] == "Yes"  # confirms actual correct behavior
