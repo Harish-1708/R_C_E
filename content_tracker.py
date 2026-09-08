@@ -40,6 +40,7 @@ TRACKER_COLUMNS = [
     "Refunnel Link",
     "Video File",
     "Created At",
+    "Reviewed",
     "Summary",
     "Product Score",
     "Rights Duration",
@@ -55,7 +56,7 @@ FREEZE_ONCE_SET_COLUMNS = [
 ]
 REFRESH_COLUMNS = ["Usage Rights", "Creator Email"]
 MANUAL_COLUMNS = [
-    "Summary", "Product Score", "Rights Duration", "Ad Ready", "Notes",
+    "Reviewed", "Summary", "Product Score", "Rights Duration", "Ad Ready", "Notes",
     "Contact Status", "Last Contacted Date",
 ]
 
@@ -238,6 +239,7 @@ def build_fresh_tracker_row(master_row: Dict[str, str], brand: str) -> Dict[str,
         "Refunnel Link": master_row.get("media_url", ""),
         "Video File": master_row.get("original_post_link", ""),
         "Created At": master_row.get("created_at", ""),
+        "Reviewed": "",
         "Summary": "",
         "Product Score": "",
         "Rights Duration": "",
