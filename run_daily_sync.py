@@ -275,6 +275,29 @@ def main() -> int:
                 if attempt >= max_scrape_restarts:
                     break
 
+                # Confirmed real bug: recovery re-selected the workspace
+                # but never re-scrolled the grid back down, so a fresh
+                # page reload after a crash always starts back at only
+                # the first ~20-120 loaded items. Every subsequent
+                # per-item scrape then had to rely on its own slow,
+                # incremental scrolling to reach anything further down
+                # a now much-longer 2771-item list -- easily explaining
+                # an hour of real elapsed time with almost no email
+                # count growth. Only worth doing here (not on the final
+                # giveup branch above) since we're about to resume
+                # scraping, not heading straight to Payments. Wrapped in
+                # its own try/except -- a re-scroll failing here (e.g.
+                # another crash mid-scroll) shouldn't doom the whole run
+                # when there's already real progress worth saving; just
+                # give up on further scraping and move on to Payments.
+                try:
+                    refunnel_export.scroll_to_load_all(page)
+                except Exception as e:
+                    print(f"WARNING: re-scroll after recovery didn't finish cleanly "
+                          f"({type(e).__name__}: {e}). Giving up on further scraping "
+                          f"this run and moving on with what was found.")
+                    break
+
         # --- 4. NOW it's safe to navigate away and export payments ---
         page.goto(refunnel_auth.REFUNNEL_PAYMENTS_URL)
         payments_csv_path = refunnel_export.export_payments_csv(page, download_dir)
