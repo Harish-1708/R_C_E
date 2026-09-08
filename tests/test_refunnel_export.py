@@ -18,6 +18,8 @@ from refunnel_export import (
     _safe_click,
     _order_ids_for_scraping,
     _pace,
+    _should_print_progress,
+    _format_progress_line,
 )
 
 
@@ -343,3 +345,37 @@ def test_sabotage_pace_out_of_range_would_be_caught():
     with pytest.raises(AssertionError):
         assert any(ms > 900 for ms in page.waited_ms)  # none should exceed the range
     assert all(ms <= 900 for ms in page.waited_ms)  # confirms actual correct behavior
+
+
+# ---------- scrape_creator_emails progress reporting ----------
+
+def test_should_print_progress_at_checkpoint_intervals():
+    assert _should_print_progress(25, 732, 25) is True
+    assert _should_print_progress(50, 732, 25) is True
+    assert _should_print_progress(24, 732, 25) is False
+    assert _should_print_progress(26, 732, 25) is False
+
+
+def test_should_print_progress_on_the_final_item_even_off_checkpoint():
+    # confirmed real need: without this, a run whose total isn't a
+    # multiple of 25 (e.g. 732) would never print a final summary
+    assert _should_print_progress(732, 732, 25) is True
+
+
+def test_should_not_print_progress_between_checkpoints():
+    assert _should_print_progress(1, 732, 25) is False
+    assert _should_print_progress(13, 732, 25) is False
+
+
+def test_format_progress_line_shows_found_and_failed():
+    line = _format_progress_line(attempted=50, total=732, found=8)
+    assert "50/732 attempted" in line
+    assert "8 found" in line
+    assert "42 failed/no-info" in line  # 50 - 8
+
+
+def test_sabotage_progress_checkpoint_missed_would_be_caught():
+    result = _should_print_progress(732, 732, 25)
+    with pytest.raises(AssertionError):
+        assert result is False  # wrong -- final item must always print
+    assert result is True  # confirms actual correct behavior
