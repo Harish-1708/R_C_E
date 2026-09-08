@@ -96,7 +96,7 @@ jobs:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
           echo "$GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT" > service_account.json
-          python run_daily_sync.py
+          python -u run_daily_sync.py
 
       # Save whatever session file exists now (freshly refreshed if the
       # fallback login ran, unchanged otherwise) for the next scheduled run.
