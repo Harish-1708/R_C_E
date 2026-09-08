@@ -82,17 +82,19 @@ run.
   that are genuinely still unknown. Also raised `max_scrape_restarts`
   3 -> 8, since restarts are no longer wasted effort, so more of them
   now means real additional coverage of a large backlog.
-- **New: Content Tracker's "Reviewed" column syncs back to Master
-  Data.** Added right after Created At, as a normal manual column
-  (never auto-touched, same as every other manual column). Marking a
-  row reviewed in the Content Tracker (where the richer Product/Theme/
-  Content Type context lives) now also pushes that marking into Master
-  Data's own Reviewed column -- which drives the EXISTING Human Review
-  mechanism (`apply_human_review.py` / the daily sync's own use of it)
-  -- so there's no need to type "Yes" in two different sheets. Only
-  ever pushes a non-blank value; never erases anything in Master Data,
-  and does nothing (no error) if Master Data doesn't have a Reviewed
-  column yet -- same one-time manual setup step as always.
+- **New: Content Tracker's "Reviewed" column, now genuinely two-way
+  with Master Data.** Added right after Created At, as a normal manual
+  column (never auto-touched, same as every other manual column). Real
+  bug found and fixed: the first version only synced tracker -> Master
+  Data, but a real check showed 20 rows already marked Reviewed
+  directly in Master Data (the original, established mechanism) versus
+  0 in the tracker -- meaning the one direction that existed had
+  nothing to propagate and looked completely broken. Added the other
+  direction (`merge_reviewed_from_master`): a genuine "Yes" already in
+  Master Data now also gets pulled into the tracker. Both directions
+  only ever ADD a Reviewed marking, never erase one -- verified with a
+  simulation of the exact real scenario (20 reviewed, 5 not) before
+  calling this done.
 
 - **The "no email on file" circuit breaker is disabled by default.**
   Even a threshold of 150 stopped a real run at 0/150 found, but you
