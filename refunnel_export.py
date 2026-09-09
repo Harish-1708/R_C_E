@@ -204,12 +204,27 @@ def scroll_to_load_all(
             return None
         return int(match.group(1)), int(match.group(2))
 
-    first_read = read_counts()
+    # Retries with real waits before concluding the counter is genuinely
+    # missing -- confirmed real: a scheduled run failed here, but you
+    # confirmed the exact same URL loads fine when you check it
+    # yourself, meaning this was very likely just the page not having
+    # finished rendering yet on that particular run (the 12-months pull
+    # is a much bigger initial load than before), not an actual
+    # structural change. A single, immediate, zero-retry check couldn't
+    # tell those two situations apart -- this can.
+    first_read = None
+    for _ in range(8):
+        first_read = read_counts()
+        if first_read is not None:
+            break
+        page.wait_for_timeout(2000)
     if first_read is None:
         raise ExportError(
             f"Couldn't find a '<n> of <total> media' counter on the page using pattern "
-            f"{count_text_pattern!r}. The page structure may have changed -- update "
-            f"count_text_pattern in scroll_to_load_all()."
+            f"{count_text_pattern!r}, even after retrying for ~16s. The page structure may "
+            f"have changed -- update count_text_pattern in scroll_to_load_all() -- or this "
+            f"specific run hit a genuinely slow/failed page load beyond just needing more "
+            f"time. Check the saved failure screenshot/HTML to tell which."
         )
 
     idle_rounds = 0
@@ -478,7 +493,7 @@ def scrape_creator_emails(
     media_ids: Iterable[str],
     scroll_container_selector: str = "#scrollableDiv",
     debug_dir: Optional[str] = None,
-    max_consecutive_failures: int = 25,
+    max_consecutive_failures: Optional[int] = None,
     max_consecutive_empty_fields: Optional[int] = None,
     on_email_found: Optional[Callable[[str, str], None]] = None,
 ) -> dict:
@@ -528,21 +543,34 @@ def scrape_creator_emails(
     skipped and the loop moves to the next id. That's the normal,
     expected behavior and needs no special handling.
 
-    Two SEPARATE circuit breakers, not one -- confirmed real need: a
-    genuine exception (crash, timeout, missing element) is slow and
-    usually means something is badly broken, worth stopping quickly
-    for (max_consecutive_failures, default 25). "The modal opened fine,
-    the field was just empty" is a different, DISABLED-by-default
-    breaker (max_consecutive_empty_fields, default None) -- confirmed
-    real: even a threshold of 150 stopped a run at 0/150 found, but you
-    confirmed you want the full ~1949-post backlog actually checked
-    rather than assuming a long empty run means the rest are the same.
-    Pass an int here explicitly if you ever want that safety net back
-    (e.g. to bound worst-case runtime on a very large one-off pull).
-    Individual empty-field occurrences are no longer printed one at a
-    time either -- confirmed real complaint about log clutter -- they're
-    tallied and reported in the periodic progress line instead (see
-    _format_progress_line), broken down by reason.
+    BOTH circuit breakers are DISABLED by default now
+    (max_consecutive_failures and max_consecutive_empty_fields) --
+    confirmed real, explicit, repeated instruction: this must run to
+    completion of the full target list every time, regardless of how
+    many consecutive failures (of any kind, including genuine
+    exceptions/crashes) occur, and regardless of how many posts turn
+    out to have no email on file. A real run's log showed both
+    breakers firing repeatedly, ending scraping well before the full
+    ~2771-post backlog was covered -- exactly the "stops early" problem
+    being fixed here.
+
+    Honest tradeoff, stated plainly: without the exception-based
+    breaker, a genuine browser crash means every remaining item in the
+    current batch will be individually attempted and individually
+    time out before the loop naturally reaches the end and returns --
+    this can take a real, possibly long time during a crash-heavy
+    stretch, rather than failing fast. That's the deliberate cost of
+    "never stop early" -- the loop completes either way, just not
+    always quickly. run_daily_sync.py's own crash-detection (checking
+    if the page survived, AFTER this function returns) still runs
+    exactly as before and still recovers with a fresh session.
+
+    Pass an int for either parameter explicitly if you ever want either
+    safety net back for a specific run (e.g. to bound worst-case
+    runtime deliberately). Individual empty-field occurrences are still
+    not printed one at a time (confirmed real complaint about log
+    clutter) -- they're tallied and reported in the periodic progress
+    line instead (see _format_progress_line), broken down by reason.
 
     Flow -- confirmed from a real, complete HTML trace of the whole
     interaction (card -> popover -> modal), for BOTH never-requested and
@@ -614,7 +642,7 @@ def scrape_creator_emails(
                     debug_snapshot_saved = True
                 consecutive_failures += 1
                 consecutive_empty_fields = 0
-                if consecutive_failures >= max_consecutive_failures:
+                if max_consecutive_failures is not None and consecutive_failures >= max_consecutive_failures:
                     print(
                         f"scrape_creator_emails: {consecutive_failures} failures in a row -- "
                         f"stopping early rather than grinding through the remaining ids. "
@@ -707,7 +735,7 @@ def scrape_creator_emails(
                 debug_snapshot_saved = True
             consecutive_failures += 1
             consecutive_empty_fields = 0
-            if consecutive_failures >= max_consecutive_failures:
+            if max_consecutive_failures is not None and consecutive_failures >= max_consecutive_failures:
                 print(
                     f"scrape_creator_emails: {consecutive_failures} failures in a row -- "
                     f"stopping early rather than grinding through the remaining ids. This "
