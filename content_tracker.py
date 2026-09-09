@@ -103,10 +103,29 @@ CONTENT_TYPE_DISPLAY = {
 # through to Gift-Giving, exactly as you described.
 #
 # Valentine's Day / Mother's Day / Wedding-Honeymoon / Graduation:
-# confirmed 0 matches in the real ~2078-row backlog even with a broad
-# keyword net, kept here anyway for future content and for your
+# confirmed 0 matches in the real backlog (English or Spanish) even with
+# a broad keyword net, kept here anyway for future content and for your
 # year-round campaign planning -- they just won't tag anything in the
 # existing backlog today.
+#
+# Spanish equivalents added for real, evidence-based reasons -- checked
+# actual Master Data and found a genuine Spanish-speaking creator
+# segment (words like "hombre", "bata", "casa" appear hundreds of
+# times) that the original English-only list completely missed.
+# Confirmed real counts before adding anything: "regalo/regalos" (36
+# rows, -> Gift-Giving), "dia del padre" (2, -> Father's Day), "navidad"
+# (1, -> Christmas/Holiday). The rest (cumpleaños, día de la madre, san
+# valentín, aniversario, boda) are at 0 today, included for the same
+# future-proofing reason as their English 0-count counterparts above --
+# not guessed, just not yet observed.
+#
+# Explicitly checked and REJECTED as a false positive: "summerwins" /
+# "summervibes" / "summermusthaves" appear 267 times, but ALWAYS
+# bundled together with confirmed platform-promo tags
+# (#tiktokshopsummersale, #backtoschoolshopping, #weeklydeals) -- this
+# is the same coordinated TikTok Shop campaign-hashtag noise as
+# #tiktokshopbacktoschool below, not real content about summer, so it's
+# deliberately NOT a theme here despite the high raw count.
 #
 # "tiktokshop"-prefixed hashtags are stripped before matching (see
 # _clean_theme_text) -- confirmed real: #tiktokshopbacktoschool and
@@ -114,14 +133,19 @@ CONTENT_TYPE_DISPLAY = {
 # TikTok Shop platform promotional tag, not real content about summer
 # or school), which would otherwise falsely tag hundreds of rows.
 THEME_KEYWORDS = [
-    ("Valentine's Day", ["valentine", "vday"]),
-    ("Mother's Day", ["mothersday", "mother's day", "giftformom", "for mom"]),
-    ("Father's Day", ["fathersday", "father's day"]),
-    ("Wedding/Honeymoon", ["honeymoon", "wedding", "bridal", "groomsmen"]),
-    ("Birthday", ["birthday", "bday"]),
+    ("Valentine's Day", ["valentine", "vday", "san valentin", "san valentín", "sanvalentin"]),
+    ("Mother's Day", [
+        "mothersday", "mother's day", "giftformom", "for mom",
+        "dia de la madre", "día de la madre",
+    ]),
+    ("Father's Day", [
+        "fathersday", "father's day", "dia del padre", "día del padre", "diadelpadre",
+    ]),
+    ("Wedding/Honeymoon", ["honeymoon", "wedding", "bridal", "groomsmen", "boda"]),
+    ("Birthday", ["birthday", "bday", "cumpleaños", "cumpleanos"]),
     ("Graduation", ["graduation", "grad gift"]),
-    ("Christmas/Holiday", ["christmas", "xmas", "holiday", "stocking"]),
-    ("Gift-Giving", ["gift", "present"]),
+    ("Christmas/Holiday", ["christmas", "xmas", "holiday", "stocking", "navidad"]),
+    ("Gift-Giving", ["gift", "present", "regalo", "regalos", "regalar"]),
     ("Self-Care/Cozy", ["selfcare", "self care", "cozy", "relax"]),
     ("Winter/Cold Weather", ["winter", "cold"]),
     ("Athletic/Workout", ["workout", "gym", "ufc", "athletic"]),
