@@ -20,6 +20,7 @@ from refunnel_export import (
     _pace,
     _should_print_progress,
     _format_progress_line,
+    _is_target_crashed,
 )
 
 
@@ -442,4 +443,35 @@ def test_sabotage_progress_checkpoint_missed_would_be_caught():
     result = _should_print_progress(732, 732, 25)
     with pytest.raises(AssertionError):
         assert result is False  # wrong -- final item must always print
+    assert result is True  # confirms actual correct behavior
+
+
+# ---------- _is_target_crashed ----------
+
+def test_detects_real_target_crashed_message():
+    # confirmed real: exact message format seen in a live run's log
+    err = RuntimeError("Locator.count: Target crashed ")
+    assert _is_target_crashed(err) is True
+
+
+def test_detects_crashed_case_insensitively():
+    err = RuntimeError("something something CRASHED something")
+    assert _is_target_crashed(err) is True
+
+
+def test_does_not_flag_a_normal_timeout_as_a_crash():
+    err = RuntimeError("Locator.wait_for: Timeout 5000ms exceeded.")
+    assert _is_target_crashed(err) is False
+
+
+def test_does_not_flag_an_unrelated_error_as_a_crash():
+    err = RuntimeError("couldn't locate media_id on the page after scrolling through everything")
+    assert _is_target_crashed(err) is False
+
+
+def test_sabotage_crash_detection_missed_would_be_caught():
+    err = RuntimeError("Locator.count: Target crashed ")
+    result = _is_target_crashed(err)
+    with pytest.raises(AssertionError):
+        assert result is False  # wrong -- this IS a real crash message
     assert result is True  # confirms actual correct behavior
