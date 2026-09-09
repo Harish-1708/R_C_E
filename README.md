@@ -448,32 +448,62 @@ checked in priority order (see `THEME_KEYWORDS` in
 `content_tracker.py`) so an explicit occasion always wins over generic
 gift language -- "father's day" mentioned -> Father's Day, even though
 the caption likely also says "gift"; "gift for dad" with no explicit
-occasion -> Gift-Giving. Confirmed real distribution across the full
-~2078-row backlog:
+occasion -> Gift-Giving. Real distribution against the live ~2772-row
+backlog (updated after adding Spanish keywords -- see below):
 
 | Theme | Rows |
 |---|---|
-| Gift-Giving | 268 |
-| Self-Care/Cozy | 149 |
-| Father's Day | 90 |
-| Athletic/Workout | 50 |
-| Christmas/Holiday | 24 |
-| Try-On/Haul | 12 |
-| Winter/Cold Weather | 8 |
-| Birthday | 3 |
-| Travel/Vacation | 1 |
-| Unboxing | 1 |
-| *(no match -- left blank)* | 1,472 |
+| Gift-Giving | 359 |
+| Father's Day | 299 |
+| Self-Care/Cozy | 182 |
+| Athletic/Workout | 53 |
+| Christmas/Holiday | 37 |
+| Try-On/Haul | 14 |
+| Winter/Cold Weather | 12 |
+| Birthday | 5 |
+| Travel/Vacation | 2 |
+| Unboxing | 2 |
+| *(no match -- left blank)* | 1,807 |
+
+**Spanish keywords added** after checking the actual live backlog and
+finding a genuine Spanish-speaking creator segment the English-only
+list completely missed (words like "hombre", "bata", "casa" appear
+hundreds of times). Confirmed real counts before adding anything:
+`regalo`/`regalos` (36 rows -> Gift-Giving), `dia del padre` (2 ->
+Father's Day), `navidad` (1 -> Christmas/Holiday). The rest (Spanish
+equivalents for birthday, Mother's Day, Valentine's Day, anniversary,
+wedding) are at 0 today, included for the same future-proofing reason
+as their English 0-count counterparts.
+
+**Explicitly checked and REJECTED as a false positive**: "summerwins" /
+"summervibes" / "summermusthaves" appear 267 times in the real backlog,
+but always bundled together with confirmed platform-promo tags
+(`#tiktokshopsummersale`, `#backtoschoolshopping`, `#weeklydeals`) --
+this is the same coordinated TikTok Shop campaign-hashtag noise as
+`#tiktokshopbacktoschool` below, not real content about summer, so it's
+deliberately NOT a theme despite the high raw count.
 
 Valentine's Day, Mother's Day, Wedding/Honeymoon, and Graduation are
 included as categories for future content and year-round campaign
-planning, but confirmed 0 matches in the current backlog even with a
-broad keyword search -- makes some sense for a men's robe brand.
-`#tiktokshop`-prefixed hashtags (e.g. `#tiktokshopbacktoschool`,
-`#tiktokshopsummersale`) are stripped before matching -- confirmed
-real: those are TikTok Shop's own promotional campaign tags, appearing
-on totally unrelated robe videos, not genuine content about summer or
-school.
+planning, but confirmed 0 matches in the current backlog (English or
+Spanish) even with a broad keyword search -- makes some sense for a
+men's robe brand. `#tiktokshop`-prefixed hashtags (e.g.
+`#tiktokshopbacktoschool`, `#tiktokshopsummersale`) are stripped before
+matching -- confirmed real: those are TikTok Shop's own promotional
+campaign tags, appearing on totally unrelated robe videos, not genuine
+content about summer or school.
+
+**On the ~1,807 still blank**: checked real sample captions directly
+before concluding anything -- they're genuinely generic product
+commentary ("Dudes deserve a nice bathrobe", "#duderobe #robe #comfy")
+with no occasion language in English or Spanish. This isn't a bug or a
+gap in the keyword list; there's a real, natural ceiling here, since no
+keyword system can find a theme that was never mentioned. These rows
+automatically get a fresh detection attempt on every future run (see
+the freeze-once-set-but-blank-gets-a-real-chance behavior below) --
+including immediately after this keyword update -- so nothing further
+needs to be built for that to happen; it already runs on the tracker's
+existing daily schedule.
 
 **A column added to the schema after rows already existed still gets a
 real first value, not frozen at blank forever** -- confirmed real bug
