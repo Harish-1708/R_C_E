@@ -221,13 +221,20 @@ def main() -> int:
             # genuine exception are deliberately NOT added here -- their
             # true status is still unknown, so they get another chance
             # on the next attempt, unlike confirmed-empty ones.
-            # max_scrape_restarts raised 3 -> 8: with restarts no longer
-            # wasting time on already-checked ids, each one now makes
-            # real forward progress, so more of them can actually mean
-            # reaching the end of a large backlog instead of just
-            # burning through the restart budget on repeated no-op work.
+            # max_scrape_restarts raised again, 8 -> 40 -- confirmed
+            # real, explicit, repeated instruction: this must reach the
+            # end of the full backlog every time, not give up after a
+            # limited number of crash-cycles. Combined with removing
+            # the in-loop circuit breakers above and the re-scroll
+            # give-up below, restarts are now the ONLY thing standing
+            # between a crash and completion, so the budget needs to be
+            # generous enough to absorb realistically many crashes
+            # across a ~2771-post backlog. Still a bounded number, not
+            # literally infinite, as a last-resort guard against a
+            # truly stuck loop (e.g. Refunnel itself being down) never
+            # actually finishing.
             already_confirmed_empty: set = set()
-            max_scrape_restarts = 8
+            max_scrape_restarts = 40
             for attempt in range(max_scrape_restarts + 1):
                 target_ids = [
                     mid for mid in parse_refunnel.rows_needing_email_scrape(result)
@@ -316,20 +323,25 @@ def main() -> int:
                 # incremental scrolling to reach anything further down
                 # a now much-longer 2771-item list -- easily explaining
                 # an hour of real elapsed time with almost no email
-                # count growth. Only worth doing here (not on the final
-                # giveup branch above) since we're about to resume
-                # scraping, not heading straight to Payments. Wrapped in
-                # its own try/except -- a re-scroll failing here (e.g.
-                # another crash mid-scroll) shouldn't doom the whole run
-                # when there's already real progress worth saving; just
-                # give up on further scraping and move on to Payments.
+                # count growth.
+                #
+                # If the re-scroll itself fails, this NO LONGER gives up
+                # on the rest of the run -- confirmed real, explicit,
+                # repeated instruction: nothing should end scraping
+                # early except genuinely exhausting max_scrape_restarts.
+                # Continuing anyway means the next scrape attempt starts
+                # from whatever's currently loaded and falls back on its
+                # own per-item incremental scrolling (slower for
+                # far-down items, but it keeps trying rather than
+                # quitting) -- and the loop will attempt another full
+                # recovery (fresh session + re-scroll) again next time
+                # it detects a dead page regardless.
                 try:
                     refunnel_export.scroll_to_load_all(page)
                 except Exception as e:
                     print(f"WARNING: re-scroll after recovery didn't finish cleanly "
-                          f"({type(e).__name__}: {e}). Giving up on further scraping "
-                          f"this run and moving on with what was found.")
-                    break
+                          f"({type(e).__name__}: {e}). Continuing anyway with whatever's "
+                          f"currently loaded -- NOT giving up on the rest of this run.")
 
         # --- 4. NOW it's safe to navigate away and export payments ---
         page.goto(refunnel_auth.REFUNNEL_PAYMENTS_URL)
