@@ -74,6 +74,55 @@ def test_raises_if_counter_text_not_found():
         scroll_to_load_all(page)
 
 
+def test_retries_before_giving_up_if_counter_takes_a_moment_to_appear():
+    # confirmed real: a scheduled run failed here, but the exact same
+    # URL loaded fine when checked manually -- almost certainly just a
+    # slow page render on that particular run, not a real structural
+    # change. This proves the retry actually gives it a real chance
+    # rather than failing on the very first, immediate check.
+    class SlowCounterPage(FakePage):
+        def __init__(self, *a, appears_on_attempt, **kw):
+            super().__init__(*a, **kw)
+            self._attempt = 0
+            self._appears_on_attempt = appears_on_attempt
+
+        def inner_text(self, _selector):
+            self._attempt += 1
+            if self._attempt < self._appears_on_attempt:
+                return "still loading, nothing here yet"
+            return super().inner_text(_selector)
+
+    page = SlowCounterPage(load_schedule=[240, 240], total=240, appears_on_attempt=3)
+    scroll_to_load_all(page, scroll_pause_ms=0)  # doesn't raise -- found it on the 3rd try
+    assert page._attempt >= 3
+
+
+def test_sabotage_no_retry_would_be_caught():
+    # proves the retry is real, not a no-op -- a version that only
+    # checked once would wrongly raise here
+    class SlowCounterPage(FakePage):
+        def __init__(self, *a, appears_on_attempt, **kw):
+            super().__init__(*a, **kw)
+            self._attempt = 0
+            self._appears_on_attempt = appears_on_attempt
+
+        def inner_text(self, _selector):
+            self._attempt += 1
+            if self._attempt < self._appears_on_attempt:
+                return "still loading, nothing here yet"
+            return super().inner_text(_selector)
+
+    page = SlowCounterPage(load_schedule=[240, 240], total=240, appears_on_attempt=3)
+    try:
+        scroll_to_load_all(page, scroll_pause_ms=0)
+        raised = False
+    except ExportError:
+        raised = True
+    with pytest.raises(AssertionError):
+        assert raised is True  # wrong -- a working retry should NOT raise here
+    assert raised is False  # confirms actual correct behavior
+
+
 def test_does_not_scroll_at_all_if_already_fully_loaded():
     page = FakePage(load_schedule=[2078], total=2078)
     scroll_to_load_all(page, scroll_pause_ms=0)
