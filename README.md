@@ -68,6 +68,36 @@ run.
 
 ## What I just added
 
+- **Both circuit breakers disabled by default now, not just one.**
+  Confirmed real, explicit, repeated instruction: nothing should end
+  scraping early except genuinely exhausting the restart budget. The
+  exception-based breaker (crashes, timeouts) is now also disabled by
+  default, matching the empty-field one from before. Honest tradeoff,
+  stated plainly: without it, a genuine browser crash means every
+  remaining item in that batch gets individually attempted and times
+  out before the loop naturally reaches the end -- slower during a
+  crash-heavy stretch, but it completes rather than quitting early.
+- **Recovery no longer gives up if the re-scroll itself fails.**
+  Confirmed real from a live run: when a post-crash re-scroll stalled,
+  the run gave up on all further scraping for the rest of that run --
+  a second, separate way scraping was ending early besides the circuit
+  breakers. Now logs a warning and continues anyway with whatever's
+  currently loaded, falling back on per-item incremental scrolling,
+  rather than abandoning the rest of the run.
+- **Restart budget raised again, 8 -> 40.** With the above two fixes,
+  restarts are now the only thing standing between a crash and
+  completion, so the budget needs real headroom across a ~2771-post
+  backlog. Still bounded, not literally infinite, as a last-resort
+  guard against a truly stuck loop never finishing at all.
+- **The initial "media counter not found" check now retries.**
+  Confirmed real: a scheduled run failed here, but the exact same URL
+  loaded fine when checked manually -- almost certainly just a slow
+  page render on that specific run (the 12-months pull is a much
+  bigger initial load), not a real structural change. A single,
+  immediate, zero-retry check couldn't tell those two situations
+  apart. Now retries for ~16s before concluding the page structure
+  genuinely changed.
+
 - **Fixed a serious, confirmed bug: crash-recovery was re-scanning
   already-checked posts from scratch.** Real log evidence: after a
   crash and restart, the run re-attempted the exact same 875 posts it
