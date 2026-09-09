@@ -287,6 +287,46 @@ def test_theme_valentines_mothers_wedding_still_detectable_even_if_rare_today():
     assert derive_theme("Wore this on our honeymoon", "#honeymoon") == "Wedding/Honeymoon"
 
 
+def test_theme_spanish_gift_language():
+    # confirmed real: 36 rows in the actual backlog use "regalo"/
+    # "regalos" with no English equivalent at all -- a genuine Spanish-
+    # speaking creator segment the original list completely missed
+    theme = derive_theme("El mejor regalo para el", "#regalosparahombre")
+    assert theme == "Gift-Giving"
+
+
+def test_theme_spanish_fathers_day_beats_generic_spanish_gift():
+    # same priority rule as the English version, in Spanish: explicit
+    # occasion wins over generic gift language
+    theme = derive_theme("El mejor regalo para el dia del padre", "")
+    assert theme == "Father's Day"
+
+
+def test_theme_spanish_christmas():
+    # confirmed real: at least 1 real row uses "navidad"
+    theme = derive_theme("Ya llegó la navidad a mi casa", "#navidad")
+    assert theme == "Christmas/Holiday"
+
+
+def test_theme_summer_hashtags_are_deliberately_not_a_theme():
+    # confirmed real and explicitly rejected: summerwins/summervibes
+    # always appear bundled with confirmed platform-promo tags
+    # (#tiktokshopsummersale, #backtoschoolshopping) -- not genuine
+    # content about summer, so this must stay blank, not become a
+    # false-positive "Summer" theme
+    theme = derive_theme(
+        "dude robe", "#tiktokshopsummersale,summerwins,summerfinds,backtoschoolshopping"
+    )
+    assert theme == ""
+
+
+def test_sabotage_spanish_keywords_missing_would_be_caught():
+    theme = derive_theme("El mejor regalo", "")
+    with pytest.raises(AssertionError):
+        assert theme == ""  # wrong -- "regalo" should be detected
+    assert theme == "Gift-Giving"  # confirms actual correct behavior
+
+
 def test_theme_case_insensitive_and_blank_safe():
     assert derive_theme("FATHER'S DAY SPECIAL", "") == "Father's Day"
     assert derive_theme("", "") == ""
