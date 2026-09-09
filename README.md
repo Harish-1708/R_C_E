@@ -72,11 +72,23 @@ run.
   Confirmed real, explicit, repeated instruction: nothing should end
   scraping early except genuinely exhausting the restart budget. The
   exception-based breaker (crashes, timeouts) is now also disabled by
-  default, matching the empty-field one from before. Honest tradeoff,
-  stated plainly: without it, a genuine browser crash means every
-  remaining item in that batch gets individually attempted and times
-  out before the loop naturally reaches the end -- slower during a
-  crash-heavy stretch, but it completes rather than quitting early.
+  default, matching the empty-field one from before.
+- **A real run then showed the honest cost of that change, and this
+  fixes it properly.** Without the exception breaker, a real log
+  showed the loop spending a huge amount of wall-clock time
+  individually failing on ~1070 posts, one at a time, after the
+  browser had already crashed -- confirmed NOT a restart-from-zero bug
+  (the numbers proved it: 1944 attempted - 868 confirmed-empty = 1076
+  correctly re-attempted next time), just a lot of wasted time
+  *reaching* that correct resume point. Fixed with a THIRD, different
+  mechanism: if an exception's own message says the browser target
+  crashed, that's treated as an immediate, direct fact (not a pattern
+  needing 25 repeats to confirm) and stops the current attempt right
+  away -- costing nothing in coverage, since every remaining id is
+  still retried next time exactly like any other unresolved id already
+  is. A slower, non-crash failure (a timeout, a missing element) is
+  still NOT caught early anymore -- only a confirmed crash is, which is
+  a deliberate, narrower net than before.
 - **Recovery no longer gives up if the re-scroll itself fails.**
   Confirmed real from a live run: when a post-crash re-scroll stalled,
   the run gave up on all further scraping for the rest of that run --
