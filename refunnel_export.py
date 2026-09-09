@@ -476,6 +476,21 @@ def _should_print_progress(attempted: int, total: int, checkpoint: int) -> bool:
     return attempted % checkpoint == 0 or attempted == total
 
 
+def _is_target_crashed(exception: Exception) -> bool:
+    """True if this specific exception means the whole browser target
+    has crashed, not just this one post. Confirmed real: a run's log
+    showed the loop grinding through ~1070 individually-failing posts,
+    each taking real time, after the browser had already crashed --
+    because the old circuit breaker was removed, but nothing replaced
+    it with a way to notice "the whole page is dead" immediately.
+    "Target crashed" is Playwright's own, unambiguous message for
+    exactly this -- unlike a generic timeout, which really might just
+    be one post's own issue, this is a direct fact, not something that
+    needs N repeats to become believable.
+    """
+    return "crashed" in str(exception).lower()
+
+
 def _format_progress_line(attempted: int, total: int, found: int, empty_fields: int = 0) -> str:
     # Broken down by reason -- confirmed real need: a plain "failed"
     # count doesn't tell you WHY, and "empty email field on file" (a
@@ -543,32 +558,40 @@ def scrape_creator_emails(
     skipped and the loop moves to the next id. That's the normal,
     expected behavior and needs no special handling.
 
-    BOTH circuit breakers are DISABLED by default now
+    BOTH threshold-based circuit breakers are DISABLED by default now
     (max_consecutive_failures and max_consecutive_empty_fields) --
     confirmed real, explicit, repeated instruction: this must run to
     completion of the full target list every time, regardless of how
     many consecutive failures (of any kind, including genuine
     exceptions/crashes) occur, and regardless of how many posts turn
-    out to have no email on file. A real run's log showed both
-    breakers firing repeatedly, ending scraping well before the full
-    ~2771-post backlog was covered -- exactly the "stops early" problem
-    being fixed here.
+    out to have no email on file.
 
-    Honest tradeoff, stated plainly: without the exception-based
-    breaker, a genuine browser crash means every remaining item in the
-    current batch will be individually attempted and individually
-    time out before the loop naturally reaches the end and returns --
-    this can take a real, possibly long time during a crash-heavy
-    stretch, rather than failing fast. That's the deliberate cost of
-    "never stop early" -- the loop completes either way, just not
-    always quickly. run_daily_sync.py's own crash-detection (checking
-    if the page survived, AFTER this function returns) still runs
-    exactly as before and still recovers with a fresh session.
+    A THIRD, DIFFERENT mechanism is always on, and isn't a threshold at
+    all: if an exception's own message says the browser target itself
+    crashed (see _is_target_crashed), this stops the current attempt
+    IMMEDIATELY -- not after N repeats, since one such message is
+    already a direct fact that the whole page is dead, not a pattern
+    that needs confirming. Confirmed real need: without this, a run's
+    log showed the loop spending a huge amount of wall-clock time
+    individually failing on ~1070 posts, one at a time, after the
+    browser had already crashed -- each one doomed from the start, but
+    with nothing to notice that until the whole list was exhausted.
+    This costs NOTHING in coverage -- every id still in the list when
+    this fires is simply retried on the next attempt, exactly like any
+    other unresolved id already is (confirmed by the numbers matching
+    exactly in a real run: 1944 attempted - 868 confirmed-empty = 1076
+    correctly re-attempted next time, not a restart from zero).
 
-    Pass an int for either parameter explicitly if you ever want either
-    safety net back for a specific run (e.g. to bound worst-case
-    runtime deliberately). Individual empty-field occurrences are still
-    not printed one at a time (confirmed real complaint about log
+    Honest tradeoff for the two DISABLED breakers, stated plainly: a
+    slow, non-crash failure (a timeout, a missing element) still isn't
+    caught early anymore -- only a confirmed crash is. That's a
+    deliberate, narrower net than before, on purpose.
+
+    Pass an int for either max_consecutive_* parameter explicitly if
+    you ever want either threshold-based safety net back for a specific
+    run (e.g. to bound worst-case runtime deliberately). Individual
+    empty-field occurrences are still not printed one at a time
+    (confirmed real complaint about log
     clutter) -- they're tallied and reported in the periodic progress
     line instead (see _format_progress_line), broken down by reason.
 
@@ -735,6 +758,19 @@ def scrape_creator_emails(
                 debug_snapshot_saved = True
             consecutive_failures += 1
             consecutive_empty_fields = 0
+            if _is_target_crashed(e):
+                print(
+                    "scrape_creator_emails: the browser target itself has crashed (not just "
+                    "this one post) -- stopping this attempt immediately rather than "
+                    "continuing to individually fail on every remaining post against a "
+                    "browser that's confirmed dead. Nothing is lost: every remaining id is "
+                    "still in the target list and will be correctly retried once a fresh "
+                    "session is ready. This is a direct detection, not the old N-in-a-row "
+                    "guess -- confirmed real need: without it, a real run spent a huge amount "
+                    "of wasted time individually failing ~1070 posts one at a time after the "
+                    "browser had already died."
+                )
+                break
             if max_consecutive_failures is not None and consecutive_failures >= max_consecutive_failures:
                 print(
                     f"scrape_creator_emails: {consecutive_failures} failures in a row -- "
