@@ -75,7 +75,7 @@ def apply_human_review_for_brand(gc: "gspread.Client", brand_config: dict) -> No
         print(f"{brand}: skipping -- {secret_name} isn't set.")
         return
 
-    sh = gc.open_by_key(spreadsheet_id)
+    sh = sheets_sync.retry_on_transient_error(gc.open_by_key, spreadsheet_id)
     try:
         master_ws = sh.worksheet(MASTER_DATA_TAB)
     except gspread.exceptions.WorksheetNotFound:
