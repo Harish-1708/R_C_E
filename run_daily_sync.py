@@ -158,7 +158,7 @@ def main() -> int:
                   f"{dict(list(duplicate_links.items())[:5])}")
 
         gc = gspread.service_account(filename=service_account_path)
-        sh = gc.open_by_key(spreadsheet_id)
+        sh = sheets_sync.retry_on_transient_error(gc.open_by_key, spreadsheet_id)
         master_ws = sheets_sync.get_or_create_worksheet(sh, "Master Data")
         master_client = sheets_sync.GspreadSheetsClient(master_ws)
 
