@@ -68,6 +68,21 @@ run.
 
 ## What I just added
 
+- **Transient Google Sheets API errors (503, 429, 500, 502, 504) are
+  now retried automatically, everywhere.** Confirmed real: a scheduled
+  run failed entirely on a single 503 from Google's own API, at the
+  very first step (connecting to the spreadsheet) -- completely
+  unrelated to Refunnel, which was confirmed working fine at the same
+  time. gspread has no built-in retry for this, and these blips are
+  known to be brief and usually self-resolve within seconds --
+  `retry_on_transient_error` in `sheets_sync.py` retries with
+  exponential backoff (2s, 4s, 8s, 16s) up to 5 attempts, applied to
+  every real Google Sheets network call across all three scripts
+  (opening a spreadsheet, reading/writing a tab, updating a single
+  cell, creating a worksheet). A genuinely permanent error (bad
+  credentials, sheet not found, a real bug) is deliberately NOT
+  retried -- it still fails immediately, since waiting wouldn't help.
+
 - **Both circuit breakers disabled by default now, not just one.**
   Confirmed real, explicit, repeated instruction: nothing should end
   scraping early except genuinely exhausting the restart budget. The
