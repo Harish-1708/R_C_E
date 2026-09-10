@@ -14,6 +14,8 @@ from sheets_sync import (
     GspreadSheetsClient,
     get_or_create_worksheet,
     _flatten_cell,
+    is_transient_gspread_error,
+    retry_on_transient_error,
 )
 import gspread.exceptions
 
@@ -527,3 +529,87 @@ def test_sabotage_blank_header_check_missing_would_be_caught():
     with pytest.raises(AssertionError):
         assert summary["extra_columns_preserved"] == ["", ""]  # wrong -- blanks shouldn't count
     assert summary["extra_columns_preserved"] == []  # confirms actual correct behavior
+
+
+# ---------- is_transient_gspread_error / retry_on_transient_error ----------
+
+def test_recognizes_the_real_503_message_format():
+    # confirmed real, exact format from a live scheduled-run failure
+    err = RuntimeError("APIError: [503]: The service is currently unavailable.")
+    assert is_transient_gspread_error(err) is True
+
+
+def test_recognizes_other_transient_status_codes():
+    for code in (429, 500, 502, 503, 504):
+        err = RuntimeError(f"APIError: [{code}]: some transient message")
+        assert is_transient_gspread_error(err) is True
+
+
+def test_does_not_flag_a_permanent_error_as_transient():
+    err = RuntimeError("APIError: [404]: Requested entity was not found.")
+    assert is_transient_gspread_error(err) is False
+
+
+def test_does_not_flag_an_unrelated_error_as_transient():
+    err = ValueError("some completely unrelated error")
+    assert is_transient_gspread_error(err) is False
+
+
+def test_retry_succeeds_after_transient_failures():
+    calls = {"count": 0}
+
+    def flaky():
+        calls["count"] += 1
+        if calls["count"] < 3:
+            raise RuntimeError("APIError: [503]: The service is currently unavailable.")
+        return "success"
+
+    result = retry_on_transient_error(flaky, max_attempts=5, initial_delay_seconds=0.001)
+    assert result == "success"
+    assert calls["count"] == 3
+
+
+def test_retry_passes_through_args_and_kwargs():
+    def add(a, b, c=0):
+        return a + b + c
+
+    result = retry_on_transient_error(add, 1, 2, max_attempts=3, initial_delay_seconds=0.001, c=10)
+    assert result == 13
+
+
+def test_retry_gives_up_after_max_attempts():
+    calls = {"count": 0}
+
+    def always_fails():
+        calls["count"] += 1
+        raise RuntimeError("APIError: [503]: The service is currently unavailable.")
+
+    with pytest.raises(RuntimeError, match="503"):
+        retry_on_transient_error(always_fails, max_attempts=3, initial_delay_seconds=0.001)
+    assert calls["count"] == 3
+
+
+def test_retry_never_retries_a_non_transient_error():
+    calls = {"count": 0}
+
+    def permanent_failure():
+        calls["count"] += 1
+        raise RuntimeError("APIError: [404]: Requested entity was not found.")
+
+    with pytest.raises(RuntimeError, match="404"):
+        retry_on_transient_error(permanent_failure, max_attempts=5, initial_delay_seconds=0.001)
+    assert calls["count"] == 1  # never retried -- a real 404 retrying wouldn't fix
+
+
+def test_sabotage_non_transient_error_wrongly_retried_would_be_caught():
+    calls = {"count": 0}
+
+    def permanent_failure():
+        calls["count"] += 1
+        raise RuntimeError("APIError: [404]: Requested entity was not found.")
+
+    with pytest.raises(RuntimeError):
+        retry_on_transient_error(permanent_failure, max_attempts=5, initial_delay_seconds=0.001)
+    with pytest.raises(AssertionError):
+        assert calls["count"] == 5  # wrong -- a 404 should never be retried at all
+    assert calls["count"] == 1  # confirms actual correct behavior
