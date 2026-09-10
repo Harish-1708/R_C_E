@@ -90,7 +90,7 @@ def sync_one_brand(gc: "gspread.Client", tracker_sh, brand_config: dict) -> None
         print(f"{brand}: skipping -- {secret_name} isn't set.")
         return
 
-    source_sh = gc.open_by_key(source_spreadsheet_id)
+    source_sh = sheets_sync.retry_on_transient_error(gc.open_by_key, source_spreadsheet_id)
     try:
         master_ws = source_sh.worksheet(MASTER_DATA_TAB)
     except gspread.exceptions.WorksheetNotFound:
@@ -153,7 +153,7 @@ def main() -> int:
 
     try:
         gc = gspread.service_account(filename=service_account_path)
-        tracker_sh = gc.open_by_key(tracker_spreadsheet_id)
+        tracker_sh = sheets_sync.retry_on_transient_error(gc.open_by_key, tracker_spreadsheet_id)
 
         workspaces = load_workspaces()
         for brand_config in workspaces:
