@@ -30,10 +30,59 @@ should get a manual smoke test once real credentials are available.
 from __future__ import annotations
 
 import re
+import time
 from typing import Dict, List, Optional, Protocol
 
 from gspread.utils import rowcol_to_a1
 import gspread.exceptions
+
+# Confirmed real: a scheduled run failed entirely on a single 503 from
+# Google's own API, at the very first step (connecting to the
+# spreadsheet) -- completely unrelated to Refunnel, which was
+# confirmed working fine at the time. gspread has no built-in retry for
+# this, and Google's APIs are known to have occasional brief hiccups
+# that usually resolve within seconds -- retrying a few times with a
+# short backoff is the standard fix, not something to just accept as
+# "the run fails sometimes".
+#
+# Matched by STRING, not by inspecting gspread's internal exception
+# object structure -- confirmed real, exact format from a live failure:
+# "APIError: [503]: The service is currently unavailable." String
+# matching on that confirmed format is safer than guessing at
+# gspread's internal APIError attributes without being able to verify
+# them against a live install.
+_TRANSIENT_ERROR_MARKERS = ("[429]", "[500]", "[502]", "[503]", "[504]")
+
+
+def is_transient_gspread_error(exception: Exception) -> bool:
+    """True if this looks like a temporary Google-side hiccup worth
+    retrying (rate limit or a 5xx server error), not a real, permanent
+    problem (bad credentials, sheet doesn't exist, a genuine bug) that
+    retrying would never fix."""
+    return any(marker in str(exception) for marker in _TRANSIENT_ERROR_MARKERS)
+
+
+def retry_on_transient_error(func, *args, max_attempts: int = 5, initial_delay_seconds: float = 2.0, **kwargs):
+    """Calls func(*args, **kwargs), retrying with exponential backoff
+    (2s, 4s, 8s, 16s by default) if it fails with a transient-looking
+    Google API error. A non-transient error (bad credentials, sheet not
+    found, a real bug) is NOT retried -- it raises immediately, since
+    waiting wouldn't help and would just delay a real failure for no
+    reason. Used to wrap every real Google Sheets API call in this
+    project (opening a spreadsheet, reading/writing a tab, etc.) so a
+    single transient blip doesn't kill an entire run.
+    """
+    delay = initial_delay_seconds
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            if not is_transient_gspread_error(e) or attempt == max_attempts:
+                raise
+            print(f"Transient Google Sheets API error (attempt {attempt}/{max_attempts}): "
+                  f"{type(e).__name__}: {e}. Retrying in {delay:.0f}s...")
+            time.sleep(delay)
+            delay *= 2
 
 
 class SheetsClient(Protocol):
@@ -257,15 +306,15 @@ class GspreadSheetsClient:
         self._ws = worksheet
 
     def read_all(self) -> List[List[str]]:
-        return self._ws.get_all_values()
+        return retry_on_transient_error(self._ws.get_all_values)
 
     def overwrite_all(self, rows: List[List[str]]) -> None:
-        self._ws.clear()
+        retry_on_transient_error(self._ws.clear)
         if not rows:
             return
         # value_input_option="RAW" avoids Sheets trying to reinterpret
         # things like a caption that starts with "=" as a formula.
-        self._ws.update(rows, value_input_option="RAW")
+        retry_on_transient_error(self._ws.update, rows, value_input_option="RAW")
 
         # Uneven row heights (a long caption wrapping to several lines
         # right next to single-line rows) were flagged as hard to read.
@@ -275,14 +324,14 @@ class GspreadSheetsClient:
         last_row = len(rows)
         last_col = len(rows[0]) if rows else 1
         full_range = f"A1:{rowcol_to_a1(last_row, last_col)}"
-        self._ws.format(full_range, {"wrapStrategy": "CLIP"})
+        retry_on_transient_error(self._ws.format, full_range, {"wrapStrategy": "CLIP"})
 
         # Bold header + frozen header row, so it stays visible on scroll
         # and reads clearly as a header rather than a data row.
         header_range = f"A1:{rowcol_to_a1(1, last_col)}"
-        self._ws.format(header_range, {"textFormat": {"bold": True}})
+        retry_on_transient_error(self._ws.format, header_range, {"textFormat": {"bold": True}})
         try:
-            self._ws.freeze(rows=1)
+            retry_on_transient_error(self._ws.freeze, rows=1)
         except Exception:
             pass  # cosmetic only -- never worth failing the whole sync over
 
@@ -297,16 +346,16 @@ class GspreadSheetsClient:
         Returns True if the row was found and updated, False if no row
         with that id exists in the sheet yet.
         """
-        header = self._ws.row_values(1)
+        header = retry_on_transient_error(self._ws.row_values, 1)
         if id_col not in header or column_name not in header:
             return False
         id_col_idx = header.index(id_col) + 1  # gspread is 1-indexed
         target_col_idx = header.index(column_name) + 1
 
-        id_values = self._ws.col_values(id_col_idx)
+        id_values = retry_on_transient_error(self._ws.col_values, id_col_idx)
         for row_num, val in enumerate(id_values[1:], start=2):  # skip header row
             if val == row_id:
-                self._ws.update_cell(row_num, target_col_idx, value)
+                retry_on_transient_error(self._ws.update_cell, row_num, target_col_idx, value)
                 return True
         return False
 
@@ -326,6 +375,6 @@ def get_or_create_worksheet(spreadsheet, title: str, cols: int = 30):
     error one level down.
     """
     try:
-        return spreadsheet.worksheet(title)
+        return retry_on_transient_error(spreadsheet.worksheet, title)
     except gspread.exceptions.WorksheetNotFound:
-        return spreadsheet.add_worksheet(title=title, rows=1000, cols=cols)
+        return retry_on_transient_error(spreadsheet.add_worksheet, title=title, rows=1000, cols=cols)
