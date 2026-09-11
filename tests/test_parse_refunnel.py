@@ -24,6 +24,7 @@ from parse_refunnel import (
     find_duplicate_post_links,
     RIGHTS_STATUS_MAP,
     HUMAN_REVIEW_COLUMNS,
+    MASTER_COLUMNS,
 )
 
 MEDIA_CSV = os.path.join(os.path.dirname(__file__), "fixtures", "sample_media.csv")
@@ -209,6 +210,57 @@ def test_sabotage_human_review_wrong_bucket_would_be_caught():
     with pytest.raises(AssertionError):
         assert requested_id in result.rights_requested  # wrong -- it moved out
     assert requested_id in result.rights_reviewed  # confirms actual correct behavior
+
+
+# ---------- moved_to_human_review_at freeze-once-set tests ----------
+
+def test_moved_to_human_review_at_gets_a_fresh_timestamp_for_a_new_row():
+    result = parse_media_csv(MEDIA_CSV)
+    approved_id = next(iter(result.rights_approved))
+    apply_human_review_flags(result, [approved_id])
+    rows = build_human_review_rows(result)
+    assert rows[approved_id]["moved_to_human_review_at"]  # non-blank, some timestamp assigned
+
+
+def test_moved_to_human_review_at_keeps_its_original_date_on_a_later_run():
+    result = parse_media_csv(MEDIA_CSV)
+    approved_id = next(iter(result.rights_approved))
+    apply_human_review_flags(result, [approved_id])
+
+    original_date = "2026-01-01T00:00:00+00:00"
+    rows = build_human_review_rows(result, existing_moved_dates={approved_id: original_date})
+    assert rows[approved_id]["moved_to_human_review_at"] == original_date  # NOT overwritten with "now"
+
+
+def test_moved_to_human_review_at_is_independent_per_row():
+    result = parse_media_csv(MEDIA_CSV)
+    approved_id = next(iter(result.rights_approved))
+    requested_id = next(iter(result.rights_requested))
+    apply_human_review_flags(result, [approved_id, requested_id])
+
+    existing = {approved_id: "2026-01-01T00:00:00+00:00"}  # only one of the two has history
+    rows = build_human_review_rows(result, existing_moved_dates=existing)
+    assert rows[approved_id]["moved_to_human_review_at"] == "2026-01-01T00:00:00+00:00"
+    assert rows[requested_id]["moved_to_human_review_at"] != "2026-01-01T00:00:00+00:00"
+    assert rows[requested_id]["moved_to_human_review_at"]  # still got its own fresh one
+
+
+def test_moved_to_human_review_at_never_appears_in_master_data_columns():
+    # confirmed real requirement: this column belongs ONLY in Human
+    # Review, never in Master Data
+    assert "moved_to_human_review_at" not in MASTER_COLUMNS
+
+
+def test_sabotage_moved_to_human_review_at_reset_on_rerun_would_be_caught():
+    result = parse_media_csv(MEDIA_CSV)
+    approved_id = next(iter(result.rights_approved))
+    apply_human_review_flags(result, [approved_id])
+
+    original_date = "2026-01-01T00:00:00+00:00"
+    rows = build_human_review_rows(result, existing_moved_dates={approved_id: original_date})
+    with pytest.raises(AssertionError):
+        assert rows[approved_id]["moved_to_human_review_at"] != original_date  # wrong -- would mean it reset
+    assert rows[approved_id]["moved_to_human_review_at"] == original_date  # confirms actual correct behavior
 
 
 # ---------- malformed-input tests ----------
