@@ -101,7 +101,14 @@ def apply_human_review_for_brand(gc: "gspread.Client", brand_config: dict) -> No
     moved = parse_refunnel.apply_human_review_flags(result, reviewed_ids)
     print(f"{brand}: {moved} row(s) moved into Human Review this run.")
 
-    human_review_rows = parse_refunnel.build_human_review_rows(result)
+    # Read the Human Review tab's CURRENT moved_to_human_review_at
+    # values before rebuilding it -- confirmed real want: knowing WHEN
+    # something was pushed here, to filter by it, which a full rewrite
+    # would otherwise silently reset to "now" every run.
+    human_review_ws = sheets_sync.get_or_create_worksheet(sh, "Human Review")
+    human_review_client = sheets_sync.GspreadSheetsClient(human_review_ws)
+    existing_moved_dates = sheets_sync.read_column_values(human_review_client, "moved_to_human_review_at")
+    human_review_rows = parse_refunnel.build_human_review_rows(result, existing_moved_dates)
 
     # Usage Rights tabs and Human Review are expected to shrink/grow as
     # rows move between them by design -- no never_delete/max_shrink
