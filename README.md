@@ -68,6 +68,24 @@ run.
 
 ## What I just added
 
+- **New "moved_to_human_review_at" column, in Human Review only, never
+  Master Data.** Set once, the first time a row is pushed into Human
+  Review, and never changed again on later runs -- confirmed real
+  want: know WHEN something was pushed there, to filter by it. Human
+  Review is normally a full rewrite every run, which would otherwise
+  silently reset this to "now" every single time; both scripts that
+  write this tab (`run_daily_sync.py` and `apply_human_review.py`) now
+  read the tab's current values first and carry forward anything
+  already there. Verified end-to-end with a real two-run simulation
+  through the actual orchestration function, not just the underlying
+  logic in isolation -- confirmed the timestamp survives a second run
+  unchanged.
+- **Confirmed already working, no new code needed**: marking "Yes" in
+  Master Data's Reviewed column already flows into the Content
+  Tracker's own Reviewed column automatically (`merge_reviewed_from_master`
+  in `content_tracker.py`, built earlier and confirmed against a real
+  20-row check). Nothing further needed for that direction.
+
 - **Transient Google Sheets API errors (503, 429, 500, 502, 504) are
   now retried automatically, everywhere.** Confirmed real: a scheduled
   run failed entirely on a single 503 from Google's own API, at the
