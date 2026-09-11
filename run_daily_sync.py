@@ -367,7 +367,14 @@ def main() -> int:
         )
 
         # --- 5. push to sheets ---
-        human_review_rows = parse_refunnel.build_human_review_rows(result)
+        # Read the Human Review tab's CURRENT moved_to_human_review_at
+        # values before rebuilding it -- confirmed real want: knowing
+        # WHEN something was pushed here, to filter by it, which a full
+        # rewrite would otherwise silently reset to "now" every run.
+        human_review_ws = sheets_sync.get_or_create_worksheet(sh, "Human Review")
+        human_review_client = sheets_sync.GspreadSheetsClient(human_review_ws)
+        existing_moved_dates = sheets_sync.read_column_values(human_review_client, "moved_to_human_review_at")
+        human_review_rows = parse_refunnel.build_human_review_rows(result, existing_moved_dates)
 
         # max_shrink_fraction is only set for tabs that should only ever
         # grow or hold steady (Master Data, Payments) -- Usage Rights
