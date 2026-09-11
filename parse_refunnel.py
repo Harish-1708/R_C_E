@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Optional
 
 
@@ -92,6 +93,7 @@ HUMAN_REVIEW_COLUMNS = [
     "creator_email",
     "followers",
     "updated_at",
+    "moved_to_human_review_at",
 ]
 
 PAYMENT_COLUMNS = [
@@ -265,13 +267,33 @@ def apply_human_review_flags(result: ParseResult, reviewed_ids: Iterable[str]) -
     return moved
 
 
-def build_human_review_rows(result: ParseResult) -> Dict[str, dict]:
+def build_human_review_rows(
+    result: ParseResult, existing_moved_dates: Optional[Dict[str, str]] = None
+) -> Dict[str, dict]:
     """Rows moved into Human Review by apply_human_review_flags(),
-    trimmed to HUMAN_REVIEW_COLUMNS."""
-    return {
-        media_id: {col: row.get(col, "") for col in HUMAN_REVIEW_COLUMNS}
-        for media_id, row in result.rights_reviewed.items()
-    }
+    trimmed to HUMAN_REVIEW_COLUMNS.
+
+    moved_to_human_review_at is set ONCE, the first time a row appears
+    here, and never changed again on later runs -- confirmed real want:
+    you need to know WHEN something was pushed into Human Review, so
+    you can filter by it, and this tab is normally written as a full
+    rewrite, which would otherwise silently reset the date to "now"
+    every single run. Pass the tab's CURRENT moved_to_human_review_at
+    values (read from the sheet before calling this, e.g. via
+    sheets_sync.read_column_values) as existing_moved_dates -- an id
+    already there keeps its original date; a genuinely new id gets a
+    fresh timestamp. Deliberately only in this tab, never in Master
+    Data (that column doesn't belong there, and isn't added there by
+    this function).
+    """
+    existing_moved_dates = existing_moved_dates or {}
+    now = datetime.now(timezone.utc).isoformat()
+    rows = {}
+    for media_id, row in result.rights_reviewed.items():
+        out = {col: row.get(col, "") for col in HUMAN_REVIEW_COLUMNS if col != "moved_to_human_review_at"}
+        out["moved_to_human_review_at"] = existing_moved_dates.get(media_id) or now
+        rows[media_id] = out
+    return rows
 
 
 def propagate_emails_by_username(result: ParseResult) -> int:
