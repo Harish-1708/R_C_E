@@ -125,6 +125,62 @@ def test_reviewed_row_moves_out_of_usage_rights_and_into_human_review(monkeypatc
     assert human_review_ids == {"tk_1"}
 
 
+def test_moved_to_human_review_at_column_is_populated_and_preserved_on_rerun(monkeypatch):
+    monkeypatch.setenv("SPREADSHEET_ID_DUDEROBE", "sheet123")
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _master_row("tk_1", status="REQUESTED", reviewed="Yes")])
+    requested_ws = FakeWorksheet(rows=[MASTER_HEADER[:-1], _master_row("tk_1")[:-1]])
+    sh = FakeSpreadsheet(worksheets={"Master Data": master_ws, "Usage Rights - Requested": requested_ws})
+    gc = FakeClient({"sheet123": sh})
+
+    # First run: id is newly moved, should get a real, non-blank timestamp
+    apply_human_review_for_brand(gc, {"name": "Duderobe", "spreadsheet_id_secret": "SPREADSHEET_ID_DUDEROBE"})
+    human_review_ws = sh.worksheet("Human Review")
+    header = human_review_ws.rows[0]
+    date_idx = header.index("moved_to_human_review_at")
+    first_run_row = next(r for r in human_review_ws.rows[1:] if r[0] == "tk_1")
+    first_timestamp = first_run_row[date_idx]
+    assert first_timestamp  # confirmed non-blank
+
+    # Second run against the SAME sheets (simulating a later scheduled
+    # run): the timestamp must NOT reset to a new "now" value
+    apply_human_review_for_brand(gc, {"name": "Duderobe", "spreadsheet_id_secret": "SPREADSHEET_ID_DUDEROBE"})
+    second_run_row = next(r for r in human_review_ws.rows[1:] if r[0] == "tk_1")
+    assert second_run_row[date_idx] == first_timestamp  # unchanged, not reset to "now"
+
+
+def test_moved_to_human_review_at_never_appears_in_master_data(monkeypatch):
+    monkeypatch.setenv("SPREADSHEET_ID_DUDEROBE", "sheet123")
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _master_row("tk_1", status="REQUESTED", reviewed="Yes")])
+    requested_ws = FakeWorksheet(rows=[MASTER_HEADER[:-1], _master_row("tk_1")[:-1]])
+    sh = FakeSpreadsheet(worksheets={"Master Data": master_ws, "Usage Rights - Requested": requested_ws})
+    gc = FakeClient({"sheet123": sh})
+
+    apply_human_review_for_brand(gc, {"name": "Duderobe", "spreadsheet_id_secret": "SPREADSHEET_ID_DUDEROBE"})
+
+    assert "moved_to_human_review_at" not in master_ws.rows[0]
+
+
+def test_sabotage_timestamp_reset_on_rerun_would_be_caught(monkeypatch):
+    monkeypatch.setenv("SPREADSHEET_ID_DUDEROBE", "sheet123")
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _master_row("tk_1", status="REQUESTED", reviewed="Yes")])
+    requested_ws = FakeWorksheet(rows=[MASTER_HEADER[:-1], _master_row("tk_1")[:-1]])
+    sh = FakeSpreadsheet(worksheets={"Master Data": master_ws, "Usage Rights - Requested": requested_ws})
+    gc = FakeClient({"sheet123": sh})
+
+    apply_human_review_for_brand(gc, {"name": "Duderobe", "spreadsheet_id_secret": "SPREADSHEET_ID_DUDEROBE"})
+    human_review_ws = sh.worksheet("Human Review")
+    header = human_review_ws.rows[0]
+    date_idx = header.index("moved_to_human_review_at")
+    first_timestamp = next(r for r in human_review_ws.rows[1:] if r[0] == "tk_1")[date_idx]
+
+    apply_human_review_for_brand(gc, {"name": "Duderobe", "spreadsheet_id_secret": "SPREADSHEET_ID_DUDEROBE"})
+    second_timestamp = next(r for r in human_review_ws.rows[1:] if r[0] == "tk_1")[date_idx]
+
+    with pytest.raises(AssertionError):
+        assert second_timestamp != first_timestamp  # wrong -- would mean it reset
+    assert second_timestamp == first_timestamp  # confirms actual correct behavior
+
+
 def test_unreviewed_row_stays_put(monkeypatch):
     monkeypatch.setenv("SPREADSHEET_ID_DUDEROBE", "sheet123")
     master_ws = FakeWorksheet(rows=[MASTER_HEADER, _master_row("tk_1", status="REQUESTED", reviewed="No")])
