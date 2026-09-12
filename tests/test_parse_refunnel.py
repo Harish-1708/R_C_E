@@ -91,9 +91,9 @@ def test_payments_csv_parses_all_rows():
 def test_payment_row_fields_map_correctly():
     result = parse_payments_csv(PAYMENTS_CSV)
     row = result.payments["16013"]
-    assert row["creator"] == "shepp.andrea"
-    assert row["handle"] == "andrealshepperd"
-    assert row["email"] == "shepp.andrea@gmail.com"
+    assert row["creator"] == "creator.one"
+    assert row["handle"] == "creatorone"
+    assert row["email"] == "creator.one@example.com"
     assert row["amount"] == "250.00"
     assert row["status"] == "Completed"
 
