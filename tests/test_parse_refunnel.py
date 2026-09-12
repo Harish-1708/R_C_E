@@ -25,6 +25,7 @@ from parse_refunnel import (
     RIGHTS_STATUS_MAP,
     HUMAN_REVIEW_COLUMNS,
     MASTER_COLUMNS,
+    is_reviewed_value,
 )
 
 MEDIA_CSV = os.path.join(os.path.dirname(__file__), "fixtures", "sample_media.csv")
@@ -519,3 +520,28 @@ def test_sabotage_propagate_emails_wrong_target_would_be_caught():
     with pytest.raises(AssertionError):
         assert result.master["id4"]["creator_email"] == "alice@example.com"  # wrong -- different creator
     assert result.master["id4"]["creator_email"] == ""  # confirms actual correct behavior
+
+
+# ---------- is_reviewed_value: one shared definition (audit fix) ----------
+
+@pytest.mark.parametrize("value", ["Yes", "yes", "YES", " yes ", "y", "Y", "true", "TRUE", "1"])
+def test_is_reviewed_value_accepts_real_reviewed_markers(value):
+    assert is_reviewed_value(value) is True
+
+
+@pytest.mark.parametrize("value", ["", "   ", "No", "no", "n", "false", "0", "TBD", "maybe", "pending"])
+def test_is_reviewed_value_rejects_everything_else(value):
+    assert is_reviewed_value(value) is False
+
+
+def test_is_reviewed_value_handles_none():
+    assert is_reviewed_value(None) is False
+
+
+def test_sabotage_any_nonblank_treated_as_reviewed_would_be_caught():
+    # the exact bug this fixes: "No" was being treated as reviewed by
+    # the Content Tracker sync while the row-moving logic ignored it
+    result = is_reviewed_value("No")
+    with pytest.raises(AssertionError):
+        assert result is True  # wrong -- "No" must not mean reviewed
+    assert result is False  # confirms actual correct behavior
