@@ -207,3 +207,81 @@ def test_sabotage_reviewed_row_left_in_place_would_be_caught(monkeypatch):
     with pytest.raises(AssertionError):
         assert "tk_1" in requested_ids  # wrong -- should have moved out
     assert requested_ids == set()  # confirms actual correct behavior
+
+
+# ---------- Human Review sort order (audit fix) ----------
+
+def test_human_review_is_sorted_newest_pushed_first(monkeypatch):
+    # confirmed real gap: this script wrote the tab with NO sort at all,
+    # so row order silently differed depending on whether this script or
+    # run_daily_sync.py wrote it last -- and neither used the
+    # moved_to_human_review_at column that exists precisely for this.
+    monkeypatch.setenv("SPREADSHEET_ID_DUDEROBE", "sheet123")
+    master_ws = FakeWorksheet(rows=[
+        MASTER_HEADER,
+        _master_row("tk_old", status="REQUESTED", reviewed="Yes"),
+        _master_row("tk_new", status="REQUESTED", reviewed="Yes"),
+    ])
+    requested_ws = FakeWorksheet(rows=[
+        MASTER_HEADER[:-1], _master_row("tk_old")[:-1], _master_row("tk_new")[:-1],
+    ])
+    # pre-seed Human Review so both ids already have known, differing dates
+    human_review_ws = FakeWorksheet(rows=[
+        ["id", "username", "platform", "rights_status", "original_post_link",
+         "creator_email", "followers", "updated_at", "moved_to_human_review_at"],
+        ["tk_old", "alice", "TIKTOK", "REQUESTED", "", "", "", "", "2026-01-01T00:00:00+00:00"],
+        ["tk_new", "alice", "TIKTOK", "REQUESTED", "", "", "", "", "2026-06-01T00:00:00+00:00"],
+    ])
+    sh = FakeSpreadsheet(worksheets={
+        "Master Data": master_ws,
+        "Usage Rights - Requested": requested_ws,
+        "Human Review": human_review_ws,
+    })
+    gc = FakeClient({"sheet123": sh})
+
+    apply_human_review_for_brand(gc, {"name": "Duderobe", "spreadsheet_id_secret": "SPREADSHEET_ID_DUDEROBE"})
+
+    data_ids = [r[0] for r in human_review_ws.rows[1:]]
+    assert data_ids == ["tk_new", "tk_old"]  # newest pushed first
+
+
+def test_sabotage_unsorted_human_review_would_be_caught(monkeypatch):
+    monkeypatch.setenv("SPREADSHEET_ID_DUDEROBE", "sheet123")
+    master_ws = FakeWorksheet(rows=[
+        MASTER_HEADER,
+        _master_row("tk_old", status="REQUESTED", reviewed="Yes"),
+        _master_row("tk_new", status="REQUESTED", reviewed="Yes"),
+    ])
+    requested_ws = FakeWorksheet(rows=[
+        MASTER_HEADER[:-1], _master_row("tk_old")[:-1], _master_row("tk_new")[:-1],
+    ])
+    human_review_ws = FakeWorksheet(rows=[
+        ["id", "username", "platform", "rights_status", "original_post_link",
+         "creator_email", "followers", "updated_at", "moved_to_human_review_at"],
+        ["tk_old", "alice", "TIKTOK", "REQUESTED", "", "", "", "", "2026-01-01T00:00:00+00:00"],
+        ["tk_new", "alice", "TIKTOK", "REQUESTED", "", "", "", "", "2026-06-01T00:00:00+00:00"],
+    ])
+    sh = FakeSpreadsheet(worksheets={
+        "Master Data": master_ws,
+        "Usage Rights - Requested": requested_ws,
+        "Human Review": human_review_ws,
+    })
+    gc = FakeClient({"sheet123": sh})
+    apply_human_review_for_brand(gc, {"name": "Duderobe", "spreadsheet_id_secret": "SPREADSHEET_ID_DUDEROBE"})
+    data_ids = [r[0] for r in human_review_ws.rows[1:]]
+    with pytest.raises(AssertionError):
+        assert data_ids == ["tk_old", "tk_new"]  # wrong -- that's oldest-first
+    assert data_ids == ["tk_new", "tk_old"]  # confirms actual correct behavior
+
+
+def test_a_no_value_in_master_does_not_move_a_row(monkeypatch):
+    # shared strict rule, end-to-end through the orchestration
+    monkeypatch.setenv("SPREADSHEET_ID_DUDEROBE", "sheet123")
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _master_row("tk_1", status="REQUESTED", reviewed="TBD")])
+    requested_ws = FakeWorksheet(rows=[MASTER_HEADER[:-1], _master_row("tk_1")[:-1]])
+    sh = FakeSpreadsheet(worksheets={"Master Data": master_ws, "Usage Rights - Requested": requested_ws})
+    gc = FakeClient({"sheet123": sh})
+
+    apply_human_review_for_brand(gc, {"name": "Duderobe", "spreadsheet_id_secret": "SPREADSHEET_ID_DUDEROBE"})
+
+    assert {r[0] for r in requested_ws.rows[1:]} == {"tk_1"}  # stayed put
