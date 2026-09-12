@@ -1,0 +1,12 @@
+# Dependencies for the two sheets-only workflows (content-tracker.yml,
+# human-review.yml). Deliberately separate from requirements.txt: those
+# workflows do pure Google Sheets read/write with no browser at all, so
+# pulling in Playwright would just slow every run down for nothing.
+#
+# Version floors are kept IN SYNC with requirements.txt on purpose --
+# confirmed real gap: these two workflows previously ran a bare
+# `pip install gspread PyYAML` with no pins at all, so a future
+# breaking gspread release would have silently affected only these two
+# while the main sync stayed pinned and fine.
+gspread>=6.0
+PyYAML>=6.0
