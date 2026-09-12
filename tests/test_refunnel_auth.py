@@ -45,3 +45,74 @@ def test_sabotage_hardcoded_date_would_be_caught():
     with pytest.raises(AssertionError):
         assert "to_date=%222025-09-06%22" in url  # wrong -- that's not today
     assert f"to_date=%22{date.today().isoformat()}%22" in url
+
+
+# ---------- resource cleanup on failure (audit fix) ----------
+
+import refunnel_auth  # noqa: E402
+
+
+class _FakeBrowser:
+    def __init__(self):
+        self.closed = False
+
+    def new_context(self, **kwargs):
+        raise RuntimeError("simulated failure opening a context")
+
+    def close(self):
+        self.closed = True
+
+
+class _FakePlaywright:
+    def __init__(self, browser):
+        self.chromium = self
+        self._browser = browser
+        self.stopped = False
+
+    def launch(self, **kwargs):
+        return self._browser
+
+    def stop(self):
+        self.stopped = True
+
+
+def test_browser_and_playwright_are_cleaned_up_when_login_fails(monkeypatch, tmp_path):
+    # confirmed real leak this covers: if anything raised partway
+    # through, the browser AND the playwright process were both left
+    # running -- only one specific failure path cleaned up
+    browser = _FakeBrowser()
+    fake_p = _FakePlaywright(browser)
+
+    class _Starter:
+        def start(self):
+            return fake_p
+
+    monkeypatch.setattr(refunnel_auth, "sync_playwright", lambda: _Starter())
+
+    with pytest.raises(RuntimeError, match="simulated failure"):
+        refunnel_auth.load_or_refresh_session(
+            email="x@example.com",
+            session_file=str(tmp_path / "nonexistent_session.json"),
+        )
+
+    assert browser.closed is True
+    assert fake_p.stopped is True
+
+
+def test_sabotage_leaked_browser_would_be_caught(monkeypatch, tmp_path):
+    browser = _FakeBrowser()
+    fake_p = _FakePlaywright(browser)
+
+    class _Starter:
+        def start(self):
+            return fake_p
+
+    monkeypatch.setattr(refunnel_auth, "sync_playwright", lambda: _Starter())
+    with pytest.raises(RuntimeError):
+        refunnel_auth.load_or_refresh_session(
+            email="x@example.com",
+            session_file=str(tmp_path / "nonexistent_session.json"),
+        )
+    with pytest.raises(AssertionError):
+        assert browser.closed is False  # wrong -- would mean it leaked
+    assert browser.closed is True  # confirms actual correct behavior
