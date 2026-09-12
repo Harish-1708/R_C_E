@@ -2,5 +2,8 @@ playwright>=1.45
 gspread>=6.0
 requests>=2.31
 PyYAML>=6.0
+# Used by build_preview_workbook.py -- was missing entirely, so that
+# script would ImportError on a clean checkout.
+openpyxl>=3.1
 pytest>=8.0
 pyflakes>=3.2
