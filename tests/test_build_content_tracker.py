@@ -226,3 +226,31 @@ def test_sabotage_propagate_reviewed_erasing_would_be_caught():
     with pytest.raises(AssertionError):
         assert master_ws.rows[1][2] == ""  # wrong -- would mean it got erased
     assert master_ws.rows[1][2] == "Yes"  # confirms actual correct behavior
+
+
+# ---------- propagate uses the shared strict rule too (audit fix) ----------
+
+def test_propagate_reviewed_ignores_a_non_reviewed_value():
+    master_ws = FakeWorksheet(rows=[["id", "rights_status", "Reviewed"], ["tk_1", "REQUESTED", ""]])
+    master_client = sheets_sync.GspreadSheetsClient(master_ws)
+    target_rows = {"tk_1": {"Reviewed": "No"}}
+
+    propagated = propagate_reviewed_to_master(target_rows, master_client)
+
+    assert propagated == 0
+    assert master_ws.rows[1][2] == ""  # "No" never written across
+
+
+def test_propagate_reviewed_handles_none_valued_cell():
+    master_ws = FakeWorksheet(rows=[["id", "rights_status", "Reviewed"], ["tk_1", "REQUESTED", ""]])
+    master_client = sheets_sync.GspreadSheetsClient(master_ws)
+    assert propagate_reviewed_to_master({"tk_1": {"Reviewed": None}}, master_client) == 0
+
+
+def test_sabotage_propagating_a_no_value_would_be_caught():
+    master_ws = FakeWorksheet(rows=[["id", "rights_status", "Reviewed"], ["tk_1", "REQUESTED", ""]])
+    master_client = sheets_sync.GspreadSheetsClient(master_ws)
+    propagate_reviewed_to_master({"tk_1": {"Reviewed": "TBD"}}, master_client)
+    with pytest.raises(AssertionError):
+        assert master_ws.rows[1][2] == "TBD"  # wrong -- not a reviewed marker
+    assert master_ws.rows[1][2] == ""  # confirms actual correct behavior
