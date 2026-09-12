@@ -23,7 +23,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install Python dependencies
-        run: pip install gspread PyYAML
+        run: pip install -r requirements-sheets.txt
 
       - name: Apply Human Review flags
         env:
