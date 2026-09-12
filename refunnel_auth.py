@@ -114,7 +114,17 @@ def _find_first(page: Page, selector: str, step_name: str, timeout_ms: int = 100
 
 def is_session_valid(context: BrowserContext) -> bool:
     """Open a fresh page in this context and check whether Refunnel
-    treats us as logged in (doesn't bounce to /login)."""
+    treats us as logged in (doesn't bounce to /login).
+
+    A failure here is reported, not silently swallowed -- confirmed
+    real gap: returning a bare False for ANY exception meant a genuine
+    outage, a DNS failure, or a Playwright crash looked identical to
+    "the session expired", sending the run into a pointless full
+    Gmail-OTP re-login and discarding the only diagnostic information
+    about what actually went wrong. Still returns False either way
+    (treating it as "can't confirm we're logged in" is the safe
+    default), but now says why.
+    """
     page = context.new_page()
     try:
         page.goto(REFUNNEL_LOGIN_URL, wait_until="domcontentloaded", timeout=20000)
@@ -122,10 +132,15 @@ def is_session_valid(context: BrowserContext) -> bool:
         page.wait_for_timeout(2000)
         still_on_login = REFUNNEL_LOGIN_URL_FRAGMENT in page.url
         return not still_on_login
-    except Exception:
+    except Exception as e:
+        print(f"is_session_valid: couldn't confirm session validity "
+              f"({type(e).__name__}: {e}). Treating the session as invalid.")
         return False
     finally:
-        page.close()
+        try:
+            page.close()
+        except Exception:
+            pass
 
 
 def _perform_login(page: Page, email: str, otp_wait_seconds: int = 90) -> None:
@@ -202,25 +217,46 @@ def load_or_refresh_session(
     p = sync_playwright().start()
     browser = p.chromium.launch(headless=headless)
 
-    session_path = Path(session_file)
-    if session_path.exists():
-        context = browser.new_context(storage_state=str(session_path))
-        if is_session_valid(context):
-            return p, browser, context
-        context.close()
+    def _cleanup():
+        # Confirmed real leak this fixes: if _perform_login() raised
+        # (bad selector, OTP never arrived, Refunnel down), the browser
+        # and the Playwright process were both left running -- only the
+        # "login completed but session still invalid" path below cleaned
+        # up. Harmless on a throwaway CI VM, a real leak anywhere
+        # longer-lived, and trivially avoidable either way.
+        try:
+            browser.close()
+        except Exception:
+            pass
+        try:
+            p.stop()
+        except Exception:
+            pass
 
-    # saved session missing or expired -- fall back to a fresh login
-    context = browser.new_context()
-    page = context.new_page()
     try:
-        _perform_login(page, email)
-    finally:
-        page.close()
+        session_path = Path(session_file)
+        if session_path.exists():
+            context = browser.new_context(storage_state=str(session_path))
+            if is_session_valid(context):
+                return p, browser, context
+            context.close()
 
-    if not is_session_valid(context):
-        browser.close()
-        p.stop()
-        raise LoginError("Fresh login via Gmail-OTP fallback did not result in a valid session.")
+        # saved session missing or expired -- fall back to a fresh login
+        context = browser.new_context()
+        page = context.new_page()
+        try:
+            _perform_login(page, email)
+        finally:
+            try:
+                page.close()
+            except Exception:
+                pass
 
-    context.storage_state(path=session_file)
-    return p, browser, context
+        if not is_session_valid(context):
+            raise LoginError("Fresh login via Gmail-OTP fallback did not result in a valid session.")
+
+        context.storage_state(path=session_file)
+        return p, browser, context
+    except Exception:
+        _cleanup()
+        raise
