@@ -40,6 +40,7 @@ import gspread.exceptions
 import yaml
 
 import content_tracker
+import parse_refunnel
 import sheets_sync
 
 CONFIG_PATH = "config/workspaces.yaml"
@@ -73,8 +74,8 @@ def propagate_reviewed_to_master(target_rows: dict, master_client: sheets_sync.G
     """
     propagated = 0
     for media_id, row in target_rows.items():
-        reviewed_value = row.get("Reviewed", "").strip()
-        if reviewed_value:
+        reviewed_value = (row.get("Reviewed") or "").strip()
+        if parse_refunnel.is_reviewed_value(reviewed_value):
             found = master_client.update_single_cell(media_id, "Reviewed", reviewed_value)
             if found:
                 propagated += 1
