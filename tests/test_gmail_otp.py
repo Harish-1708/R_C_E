@@ -133,3 +133,114 @@ def test_sabotage_stale_check_removed_would_be_caught(monkeypatch):
 
     code = fetch_latest_code(requested_after_ts=now - 7200, max_wait_seconds=5, poll_interval_seconds=1)
     assert code == "111111"
+
+
+# ---------- extract_code: context-aware patterns (audit fix) ----------
+
+def test_extract_code_prefers_a_number_presented_as_a_code():
+    # the real risk: a bare "any 4-8 digit number" match could pick up
+    # an order number or a year from an unrelated email
+    body = "Order 99887766 confirmed in 2026. Your Refunnel login code is 483920."
+    assert gmail_otp.extract_code(body) == "483920"
+
+
+def test_extract_code_handles_code_first_phrasing():
+    body = "483920 is your verification code."
+    assert gmail_otp.extract_code(body) == "483920"
+
+
+def test_extract_code_handles_colon_phrasing():
+    body = "Login code: 774411"
+    assert gmail_otp.extract_code(body) == "774411"
+
+
+def test_extract_code_falls_back_to_generic_pattern():
+    # an unanticipated format still works rather than failing outright
+    body = "Here it is -- 556677 -- use it soon."
+    assert gmail_otp.extract_code(body) == "556677"
+
+
+def test_extract_code_returns_none_when_nothing_matches():
+    assert gmail_otp.extract_code("no numbers here at all") is None
+
+
+def test_sabotage_context_pattern_ignored_would_be_caught():
+    body = "Order 99887766 confirmed. Your login code is 483920."
+    result = gmail_otp.extract_code(body)
+    with pytest.raises(AssertionError):
+        assert result == "99887766"  # wrong -- that's the order number
+    assert result == "483920"  # confirms actual correct behavior
+
+
+# ---------- poll loop resilience (audit fix) ----------
+
+def test_transient_imap_failure_does_not_abort_the_whole_wait(monkeypatch):
+    now = time.time()
+    raw = _make_raw_email(now, "Your Refunnel login code is 112233.")
+    good = FakeImap(messages={b"1": raw}, matching_ids=[b"1"])
+    calls = {"count": 0}
+
+    def flaky_connect():
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise ConnectionResetError("connection reset by peer")
+        return good
+
+    monkeypatch.setattr(gmail_otp, "_connect", flaky_connect)
+    code = fetch_latest_code(requested_after_ts=now - 1, max_wait_seconds=30, poll_interval_seconds=1)
+    assert code == "112233"  # recovered on the retry instead of dying
+    assert calls["count"] == 2
+
+
+def test_bad_search_status_is_retried_not_fatal(monkeypatch):
+    now = time.time()
+    raw = _make_raw_email(now, "Your Refunnel login code is 445566.")
+
+    class FlakySearchImap(FakeImap):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.search_calls = 0
+
+        def search(self, charset, criteria):
+            self.search_calls += 1
+            if self.search_calls == 1:
+                return "NO", [b""]
+            return super().search(charset, criteria)
+
+    fake = FlakySearchImap(messages={b"1": raw}, matching_ids=[b"1"])
+    monkeypatch.setattr(gmail_otp, "_connect", lambda: fake)
+    code = fetch_latest_code(requested_after_ts=now - 1, max_wait_seconds=30, poll_interval_seconds=1)
+    assert code == "445566"
+
+
+def test_unreadable_code_is_still_a_hard_error_not_retried_forever(monkeypatch):
+    # found the right email but genuinely can't read a code out of it --
+    # a real config problem that retrying would only hide
+    now = time.time()
+    raw = _make_raw_email(now, "Your login link is ready, no numeric code here.")
+    fake = FakeImap(messages={b"1": raw}, matching_ids=[b"1"])
+    monkeypatch.setattr(gmail_otp, "_connect", lambda: fake)
+
+    with pytest.raises(OtpNotFoundError, match="couldn't extract"):
+        fetch_latest_code(requested_after_ts=now - 1, max_wait_seconds=30, poll_interval_seconds=1)
+
+
+def test_imap_is_logged_out_even_when_a_transient_failure_happens(monkeypatch):
+    now = time.time()
+    raw = _make_raw_email(now, "Your Refunnel login code is 778899.")
+
+    class FailingSearchImap(FakeImap):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.search_calls = 0
+
+        def search(self, charset, criteria):
+            self.search_calls += 1
+            if self.search_calls == 1:
+                raise RuntimeError("transient blip")
+            return super().search(charset, criteria)
+
+    fake = FailingSearchImap(messages={b"1": raw}, matching_ids=[b"1"])
+    monkeypatch.setattr(gmail_otp, "_connect", lambda: fake)
+    fetch_latest_code(requested_after_ts=now - 1, max_wait_seconds=30, poll_interval_seconds=1)
+    assert fake.logged_out is True  # no leaked connection on the failing cycle
