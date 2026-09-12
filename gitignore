@@ -1,0 +1,68 @@
+# ---------------------------------------------------------------
+# CREDENTIALS -- never commit these. This repo is public.
+# ---------------------------------------------------------------
+# A logged-in Refunnel session. This is a LOGIN CREDENTIAL -- anyone
+# with this file can act as your Refunnel account without a password
+# or an OTP. It's written to the repo root at runtime by
+# refunnel_auth.py, so without this rule a stray `git add -A` would
+# publish it.
+refunnel_session.json
+
+# Google service-account private key. Written to the repo root at
+# runtime by every workflow (`echo "$..." > service_account.json`),
+# so the same stray-commit risk applies.
+service_account.json
+*-service-account.json
+credentials.json
+token.json
+client_secret*.json
+
+# Generic credential patterns
+.env
+.env.*
+*.pem
+*.key
+*_secret*
+*credentials*
+
+# ---------------------------------------------------------------
+# RUNTIME OUTPUT -- real creator data, not code
+# ---------------------------------------------------------------
+# Exported CSVs contain real creator usernames, emails, payment
+# amounts and post-level metrics. Debug artifacts are worse: failure
+# screenshots and page HTML dumps are captured from a LOGGED-IN
+# session, so they can contain both creator PII and session-bearing
+# markup.
+downloads/
+*.har
+
+# Preview workbook built from real data
+preview_workbook.xlsx
+# Generated preview workbook -- build_preview_workbook.py writes this
+# from REAL exported data (real creator handles and emails), so it must
+# never be committed. Two copies were previously committed to a public
+# repo; both were deleted and this rule keeps them from coming back.
+refunnel_sync_preview.xlsx
+tests/fixtures/refunnel_sync_preview.xlsx
+
+
+# ---------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+.coverage
+htmlcov/
+
+# ---------------------------------------------------------------
+# OS / editor
+# ---------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
