@@ -42,6 +42,21 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      # max-parallel: 1 is deliberate and load-bearing, not a perf
+      # setting. All workspaces share ONE Refunnel login, and an OTP
+      # code is single-use. Running them in parallel meant that on any
+      # run where the cached session was cold for everyone at once
+      # (e.g. right after the bootstrap secret's session expires), every
+      # matrix job would request its own fresh code from the same inbox
+      # at the same time -- and gmail_otp.py can only ever pick "the
+      # most recent matching email", with no way to tell which job's
+      # request produced which code. Most of them would grab the wrong
+      # (or an already-consumed) code and fail, precisely when there's
+      # no cached session left to fall back on. Serializing also makes
+      # the session-cache save deterministic: the first job refreshes
+      # the session, later jobs reuse it, instead of several branches
+      # racing to write the same immutable cache key.
+      max-parallel: 1
       matrix:
         workspace: ${{ fromJson(needs.determine-workspaces.outputs.matrix) }}
     steps:
