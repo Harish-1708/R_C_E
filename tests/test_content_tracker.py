@@ -548,3 +548,46 @@ def test_sabotage_reviewed_sync_direction_missing_would_be_caught():
         assert merged == 0  # wrong -- would mean the real bug is still there
     assert merged == 20  # confirms actual correct behavior
     assert all(row["Reviewed"] == "Yes" for row in target_rows.values())
+
+
+# ---------- Reviewed sync now uses the shared strict rule (audit fix) ----------
+
+def test_merge_reviewed_from_master_ignores_a_non_reviewed_value():
+    # confirmed real bug: "No" used to be copied across as though it
+    # meant reviewed, because any non-blank value counted
+    target_rows = {"tk_1": {"Reviewed": ""}}
+    master_rows = {"tk_1": {"Reviewed": "No"}}
+    merged = merge_reviewed_from_master(target_rows, master_rows)
+    assert merged == 0
+    assert target_rows["tk_1"]["Reviewed"] == ""
+
+
+def test_merge_reviewed_from_master_accepts_alternate_true_spellings():
+    target_rows = {"tk_1": {"Reviewed": ""}, "tk_2": {"Reviewed": ""}}
+    master_rows = {"tk_1": {"Reviewed": "TRUE"}, "tk_2": {"Reviewed": "y"}}
+    merged = merge_reviewed_from_master(target_rows, master_rows)
+    assert merged == 2
+
+
+def test_merge_reviewed_overwrites_a_stale_non_reviewed_tracker_value():
+    # tracker says "No" (not a reviewed marker), master says "Yes" --
+    # the real marking should win rather than being blocked by noise
+    target_rows = {"tk_1": {"Reviewed": "No"}}
+    master_rows = {"tk_1": {"Reviewed": "Yes"}}
+    merge_reviewed_from_master(target_rows, master_rows)
+    assert target_rows["tk_1"]["Reviewed"] == "Yes"
+
+
+def test_merge_reviewed_handles_none_valued_reviewed_cell():
+    target_rows = {"tk_1": {"Reviewed": None}}
+    master_rows = {"tk_1": {"Reviewed": None}}
+    assert merge_reviewed_from_master(target_rows, master_rows) == 0
+
+
+def test_sabotage_no_value_synced_as_reviewed_would_be_caught():
+    target_rows = {"tk_1": {"Reviewed": ""}}
+    master_rows = {"tk_1": {"Reviewed": "No"}}
+    merge_reviewed_from_master(target_rows, master_rows)
+    with pytest.raises(AssertionError):
+        assert target_rows["tk_1"]["Reviewed"] == "No"  # wrong -- must not sync
+    assert target_rows["tk_1"]["Reviewed"] == ""  # confirms actual correct behavior
