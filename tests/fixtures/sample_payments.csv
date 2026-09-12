@@ -1,0 +1,4 @@
+ID,Creator,Handle,Email,Type,Purpose,Campaign,Amount,Currency,Date,Status
+"16013","creator.one","creatorone","creator.one@example.com","Usage Rights","Payment for usage rights","Payment for usage rights","250.00","USD","Sep 4, 2026","Completed"
+"93550","creatortwo","creator.two.handle","creatortwo@example.com","Usage Rights","Payment for usage rights","Payment for usage rights","150.00","USD","Sep 4, 2026","Completed"
+"DB066","creator.three.ugc","creatorthreehandle","creator.three.ugc@example.com","Custom","200$ for 6 months contract.","200$ for 6 months contract.","200.00","USD","Sep 3, 2026","Completed"
