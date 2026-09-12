@@ -68,6 +68,58 @@ run.
 
 ## What I just added
 
+Full A-to-Z audit of all 12 modules, 3 workflows, and the test suite.
+Eight real issues found and fixed; test count 234 -> 278.
+
+- **Fixed a concurrent-login race that could break every workspace at
+  once.** All workspaces share ONE Refunnel login and an OTP code is
+  single-use, but the matrix ran them in PARALLEL -- so on any run
+  where the cached session was cold for everyone simultaneously, every
+  job would request its own code from the same inbox at the same time,
+  and `gmail_otp.py` can only pick "the most recent matching email"
+  with no way to tell which request produced which code. Most would
+  fail, exactly when there's no cached session to fall back on. Fixed
+  with `max-parallel: 1` (load-bearing, not a perf setting), which
+  also makes the session-cache save deterministic.
+- **One shared definition of "reviewed".** `run_daily_sync.py` and
+  `apply_human_review.py` required an exact `yes/y/true/1`, but the
+  Content Tracker's two-way sync treated ANY non-blank value as
+  reviewed -- so typing "No" or "TBD" got copied across as though it
+  meant reviewed, while the row-moving logic correctly ignored it.
+  Everything now routes through `parse_refunnel.is_reviewed_value()`.
+- **Browser/Playwright no longer leak when login fails.** Only one
+  specific failure path cleaned up; any other exception (bad selector,
+  OTP never arrived, Refunnel down) left both running.
+- **The OTP poll loop now survives transient IMAP failures.** A single
+  connection reset or flaky search aborted the entire wait, despite
+  the loop being built to keep polling until its deadline. A genuinely
+  unreadable code is still a hard error -- retrying would only hide it.
+- **OTP code extraction is context-aware.** The old "any 4-8 digit
+  number" pattern could match an order number, a year, or a price from
+  an unrelated email in the same window. Now tries patterns that look
+  for a number actually presented AS a code first, with the generic
+  pattern still there as a fallback.
+- **`is_session_valid` reports why it failed** instead of silently
+  returning False for everything -- an outage or a Playwright crash
+  used to look identical to "session expired", triggering a pointless
+  full re-login and discarding the only diagnostic info.
+- **Human Review now sorts newest-pushed-first** on
+  `moved_to_human_review_at` (the whole point of that column), and
+  `apply_human_review.py` sorts at all -- it previously wrote the same
+  tabs with NO sort, so row order silently changed depending on which
+  script wrote it last.
+- **Pinned dependencies in the two sheets-only workflows**, which ran a
+  bare unpinned `pip install gspread PyYAML` -- a future breaking
+  gspread release would have hit only those two. New
+  `requirements-sheets.txt`, deliberately without Playwright since
+  neither needs a browser.
+
+**Deliberately NOT changed**: once Reviewed=Yes exists in both sheets,
+clearing it in one won't stick -- the other re-propagates it. That's
+the safer default (prevents accidental un-reviewing) and changing it
+would mean one sheet silently erasing the other's data. Flagged rather
+than "fixed" because it's a real design tradeoff, not a bug.
+
 - **New "moved_to_human_review_at" column, in Human Review only, never
   Master Data.** Set once, the first time a row is pushed into Human
   Review, and never changed again on later runs -- confirmed real
