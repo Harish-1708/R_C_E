@@ -352,7 +352,7 @@ def main() -> int:
         # add to Master Data yourself) out of Approved/Requested/Declined
         # and into Human Review instead.
         reviewed_values = sheets_sync.read_column_values(master_client, "Reviewed")
-        reviewed_ids = {mid for mid, val in reviewed_values.items() if val.strip().lower() in ("yes", "y", "true", "1")}
+        reviewed_ids = {mid for mid, val in reviewed_values.items() if parse_refunnel.is_reviewed_value(val)}
         moved = parse_refunnel.apply_human_review_flags(result, reviewed_ids)
         if moved:
             print(f"Moved {moved} reviewed row(s) into Human Review.")
@@ -399,7 +399,7 @@ def main() -> int:
             ("Usage Rights - Approved", parse_refunnel.MASTER_COLUMNS, result.rights_approved, False, "created_at"),
             ("Usage Rights - Requested", parse_refunnel.MASTER_COLUMNS, result.rights_requested, False, "created_at"),
             ("Usage Rights - Declined", parse_refunnel.MASTER_COLUMNS, result.rights_declined, False, "created_at"),
-            ("Human Review", parse_refunnel.HUMAN_REVIEW_COLUMNS, human_review_rows, False, "updated_at"),
+            ("Human Review", parse_refunnel.HUMAN_REVIEW_COLUMNS, human_review_rows, False, "moved_to_human_review_at"),
             ("Payments", parse_refunnel.PAYMENT_COLUMNS, result.payments, True, None),
         ]
 
