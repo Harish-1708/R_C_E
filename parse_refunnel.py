@@ -246,6 +246,25 @@ def parse_payments_csv(path: str, result: Optional[ParseResult] = None) -> Parse
     return result
 
 
+REVIEWED_TRUE_VALUES = ("yes", "y", "true", "1")
+
+
+def is_reviewed_value(value: Optional[str]) -> bool:
+    """Single shared definition of "this row is marked reviewed".
+
+    Confirmed real inconsistency this fixes: run_daily_sync.py and
+    apply_human_review.py both required an exact match against
+    REVIEWED_TRUE_VALUES before moving a row into Human Review, but
+    content_tracker.py's two-way Reviewed sync treated ANY non-blank
+    value as reviewed. So typing "No" or "TBD" into either sheet would
+    get copied across to the other sheet as though it meant reviewed,
+    while the actual row-moving logic correctly ignored it -- two
+    different answers to the same question, in the same pipeline.
+    Everything now routes through this one function.
+    """
+    return (value or "").strip().lower() in REVIEWED_TRUE_VALUES
+
+
 def apply_human_review_flags(result: ParseResult, reviewed_ids: Iterable[str]) -> int:
     """Move rows marked reviewed (via a manual 'Reviewed' column you add
     to Master Data yourself -- mark it 'Yes' for any row) OUT of
