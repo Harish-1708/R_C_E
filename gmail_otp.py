@@ -41,10 +41,29 @@ DEFAULT_SENDER_QUERY = os.environ.get("REFUNNEL_OTP_SENDER_QUERY", "refunnel.com
 # format differs (e.g. alphanumeric).
 DEFAULT_CODE_PATTERN = os.environ.get("REFUNNEL_OTP_CODE_PATTERN", r"\b(\d{4,8})\b")
 
+# Tried FIRST, before the generic pattern above -- a bare "any 4-8 digit
+# number" match is broad enough that an unrelated Refunnel email
+# arriving in the same window (a receipt, an order number, a year, a
+# price) could be misread as the login code. These look for a number
+# that's actually presented AS a code, which is far more likely to be
+# the real one. If none of these match, the generic pattern is still
+# used as a fallback, so a format we haven't anticipated still works.
+CODE_CONTEXT_PATTERNS = [
+    r"(?:verification|login|security|one[- ]time|access)\s+code[^0-9]{0,40}?(\d{4,8})",
+    r"\bcode\s*(?:is|:)?\s*[^0-9]{0,10}?(\d{4,8})",
+    r"(\d{4,8})\s*(?:is your|is the)\s+(?:verification|login|security|one[- ]time|access)?\s*code",
+]
+
 IMAP_HOST = "imap.gmail.com"
 
 
 class OtpNotFoundError(RuntimeError):
+    pass
+
+
+class _TransientImapError(RuntimeError):
+    """Internal only -- signals "this poll cycle failed, try the next
+    one", never escapes fetch_latest_code()."""
     pass
 
 
@@ -89,6 +108,26 @@ def _message_timestamp(message: email.message.Message) -> float:
     return email.utils.mktime_tz(parsed)
 
 
+def extract_code(body: str, code_pattern: str = DEFAULT_CODE_PATTERN) -> Optional[str]:
+    """Pull the login code out of an email body.
+
+    Tries the context-aware patterns first (a number actually presented
+    as a code), then falls back to the plain pattern. Returns None if
+    nothing matches at all.
+
+    The two-stage approach exists because the fallback pattern -- any
+    4-8 digit number -- is broad enough to match an order number, a
+    year, or a price if an unrelated email from the same sender happens
+    to land in the search window.
+    """
+    for pattern in CODE_CONTEXT_PATTERNS:
+        match = re.search(pattern, body, re.I)
+        if match:
+            return match.group(1)
+    match = re.search(code_pattern, body)
+    return match.group(1) if match else None
+
+
 def fetch_latest_code(
     sender_query: str = DEFAULT_SENDER_QUERY,
     code_pattern: str = DEFAULT_CODE_PATTERN,
@@ -115,11 +154,23 @@ def fetch_latest_code(
     search_criteria = f'(FROM "{sender_query}" SINCE {since_date})'
 
     while time.time() < deadline:
-        imap = _connect()
+        # A transient IMAP failure (connection reset, a momentary Gmail
+        # hiccup, a flaky search) used to abort the entire wait
+        # immediately -- confirmed real gap: the loop is structured to
+        # keep polling until the deadline, but any exception inside it
+        # escaped and killed the whole login. Now a transient failure
+        # just ends THIS poll cycle and the loop tries again, which is
+        # what the deadline is for. OtpNotFoundError is deliberately
+        # re-raised rather than swallowed -- that one means "found the
+        # right email but genuinely couldn't read a code out of it",
+        # which is a real configuration problem that retrying would
+        # only hide.
+        imap = None
         try:
+            imap = _connect()
             status, data = imap.search(None, search_criteria)
             if status != "OK":
-                raise OtpNotFoundError(f"IMAP search failed: {status}")
+                raise _TransientImapError(f"IMAP search returned status {status}")
 
             msg_ids = data[0].split() if data and data[0] else []
             candidates = []
@@ -137,19 +188,25 @@ def fetch_latest_code(
                 candidates.sort(key=lambda pair: pair[0], reverse=True)
                 _, newest = candidates[0]
                 body = _extract_body_text(newest)
-                match = re.search(code_pattern, body)
-                if match:
-                    return match.group(1)
+                code = extract_code(body, code_pattern)
+                if code:
+                    return code
                 raise OtpNotFoundError(
                     "Found a matching email from Refunnel but couldn't extract a code from it "
-                    "with the current pattern. Check the real email body and adjust "
+                    "with the current patterns. Check the real email body and adjust "
                     "REFUNNEL_OTP_CODE_PATTERN."
                 )
+        except OtpNotFoundError:
+            raise
+        except Exception as e:
+            print(f"gmail_otp: transient problem while checking for the code "
+                  f"({type(e).__name__}: {e}) -- will retry until the deadline.")
         finally:
-            try:
-                imap.logout()
-            except Exception:
-                pass
+            if imap is not None:
+                try:
+                    imap.logout()
+                except Exception:
+                    pass
 
         time.sleep(poll_interval_seconds)
 
