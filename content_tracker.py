@@ -22,6 +22,8 @@ from __future__ import annotations
 import re
 from typing import Dict, Optional
 
+import parse_refunnel
+
 TRACKER_COLUMNS = [
     "id",  # internal key for matching rows across runs -- not one of
            # your named columns, but required for the freeze/refresh
@@ -345,10 +347,10 @@ def merge_reviewed_from_master(target_rows: Dict[str, Dict[str, str]], master_ro
     """
     merged = 0
     for media_id, row in target_rows.items():
-        if row.get("Reviewed", ""):
+        if parse_refunnel.is_reviewed_value(row.get("Reviewed", "")):
             continue
-        master_value = master_rows.get(media_id, {}).get("Reviewed", "").strip()
-        if master_value:
+        master_value = (master_rows.get(media_id, {}).get("Reviewed") or "").strip()
+        if parse_refunnel.is_reviewed_value(master_value):
             row["Reviewed"] = master_value
             merged += 1
     return merged
