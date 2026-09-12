@@ -96,7 +96,7 @@ def apply_human_review_for_brand(gc: "gspread.Client", brand_config: dict) -> No
     reviewed_values = sheets_sync.read_column_values(master_client, "Reviewed")
     reviewed_ids = {
         mid for mid, val in reviewed_values.items()
-        if val.strip().lower() in ("yes", "y", "true", "1")
+        if parse_refunnel.is_reviewed_value(val)
     }
     moved = parse_refunnel.apply_human_review_flags(result, reviewed_ids)
     print(f"{brand}: {moved} row(s) moved into Human Review this run.")
@@ -113,16 +113,24 @@ def apply_human_review_for_brand(gc: "gspread.Client", brand_config: dict) -> No
     # Usage Rights tabs and Human Review are expected to shrink/grow as
     # rows move between them by design -- no never_delete/max_shrink
     # protection here, same as run_daily_sync.py's own equivalent step.
+    # sort_key mirrors run_daily_sync.py's own tab_plan exactly --
+    # confirmed real inconsistency otherwise: this script wrote the same
+    # tabs with NO sort at all, so the Human Review tab's row order
+    # silently changed depending on which of the two scripts happened to
+    # write it last. Human Review sorts newest-pushed-first on
+    # moved_to_human_review_at (the whole point of that column being
+    # there); the Usage Rights tabs sort on created_at like everywhere
+    # else.
     tab_plan = [
-        ("Usage Rights - Approved", parse_refunnel.MASTER_COLUMNS, result.rights_approved),
-        ("Usage Rights - Requested", parse_refunnel.MASTER_COLUMNS, result.rights_requested),
-        ("Usage Rights - Declined", parse_refunnel.MASTER_COLUMNS, result.rights_declined),
-        ("Human Review", parse_refunnel.HUMAN_REVIEW_COLUMNS, human_review_rows),
+        ("Usage Rights - Approved", parse_refunnel.MASTER_COLUMNS, result.rights_approved, "created_at"),
+        ("Usage Rights - Requested", parse_refunnel.MASTER_COLUMNS, result.rights_requested, "created_at"),
+        ("Usage Rights - Declined", parse_refunnel.MASTER_COLUMNS, result.rights_declined, "created_at"),
+        ("Human Review", parse_refunnel.HUMAN_REVIEW_COLUMNS, human_review_rows, "moved_to_human_review_at"),
     ]
-    for title, columns, rows in tab_plan:
+    for title, columns, rows, sort_key in tab_plan:
         ws = sheets_sync.get_or_create_worksheet(sh, title)
         client = sheets_sync.GspreadSheetsClient(ws)
-        summary = sheets_sync.sync_tab(client, columns, rows)
+        summary = sheets_sync.sync_tab(client, columns, rows, sort_key=sort_key, sort_reverse=True)
         print(f"{brand} / {title}: wrote {summary['rows_written']} row(s)")
 
 
