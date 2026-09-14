@@ -21,6 +21,7 @@ from refunnel_export import (
     _should_print_progress,
     _format_progress_line,
     _is_target_crashed,
+    _scroll_until_card_found,
 )
 
 
@@ -475,3 +476,96 @@ def test_sabotage_crash_detection_missed_would_be_caught():
     with pytest.raises(AssertionError):
         assert result is False  # wrong -- this IS a real crash message
     assert result is True  # confirms actual correct behavior
+
+
+# ---------- _scroll_until_card_found: the 160,000px ceiling bug ----------
+
+class ScrollSearchPage:
+    """Simulates a react-virtuoso container: the card only becomes
+    findable once we've scrolled past appears_at_scroll_top."""
+
+    def __init__(self, scroll_height, client_height=720, appears_at_scroll_top=None):
+        self.scroll_top = 0
+        self.scroll_height = scroll_height
+        self.client_height = client_height
+        self.appears_at = appears_at_scroll_top
+        self.rounds = 0
+
+    def locator(self, _selector):
+        page = self
+
+        class _Loc:
+            def count(self):
+                if page.appears_at is None:
+                    return 0
+                return 1 if page.scroll_top >= page.appears_at else 0
+
+            @property
+            def first(self):
+                return "found-card"
+
+        return _Loc()
+
+    def evaluate(self, _script, args=None):
+        self.rounds += 1
+        if isinstance(args, dict) and "step" in args:
+            max_top = max(0, self.scroll_height - self.client_height)
+            self.scroll_top = min(self.scroll_top + args["step"], max_top)
+        return {
+            "scrollTop": self.scroll_top,
+            "scrollHeight": self.scroll_height,
+            "clientHeight": self.client_height,
+        }
+
+    def wait_for_timeout(self, _ms):
+        pass
+
+
+def test_finds_a_card_past_the_old_160000px_ceiling():
+    # the exact production scenario: real scrollHeight was 327,922 and
+    # the old fixed 200x800 cap stalled at ~159,951, making the bottom
+    # half of the grid permanently unreachable
+    page = ScrollSearchPage(scroll_height=327922, appears_at_scroll_top=250000)
+    card, diagnostics = _scroll_until_card_found(page, "tk_deep", "#scrollableDiv", scroll_step=800)
+    assert card == "found-card"
+    assert diagnostics is None  # None means "found it", not "gave up"
+    assert page.scroll_top >= 250000  # genuinely scrolled past the old ceiling
+
+
+def test_gives_up_at_the_real_bottom_not_an_arbitrary_round_count():
+    page = ScrollSearchPage(scroll_height=327922, appears_at_scroll_top=None)  # never appears
+    card, diagnostics = _scroll_until_card_found(page, "tk_missing", "#scrollableDiv", scroll_step=800)
+    assert card is None
+    # reached the genuine bottom before giving up
+    assert diagnostics["scrollTop"] + diagnostics["clientHeight"] >= diagnostics["scrollHeight"] - 2
+
+
+def test_stops_promptly_once_at_the_bottom_rather_than_spinning():
+    page = ScrollSearchPage(scroll_height=8000, appears_at_scroll_top=None)
+    _scroll_until_card_found(page, "tk_missing", "#scrollableDiv", scroll_step=800)
+    # ~10 rounds to reach bottom + a few confirming rounds, nowhere near max_rounds
+    assert page.rounds < 30
+
+
+def test_handles_a_missing_scroll_container_without_spinning():
+    class NoContainerPage(ScrollSearchPage):
+        def evaluate(self, _script, args=None):
+            self.rounds += 1
+            return None
+
+    page = NoContainerPage(scroll_height=1000)
+    card, diagnostics = _scroll_until_card_found(page, "tk_x", "#missing", scroll_step=800)
+    assert card is None
+    assert page.rounds < 5  # bailed immediately, didn't grind through max_rounds
+
+
+def test_sabotage_old_fixed_ceiling_would_be_caught():
+    # proves the test above genuinely exercises the bug: with the old
+    # 200-round cap, a card at 250,000px is unreachable
+    page = ScrollSearchPage(scroll_height=327922, appears_at_scroll_top=250000)
+    card, _ = _scroll_until_card_found(
+        page, "tk_deep", "#scrollableDiv", max_rounds=200, scroll_step=800
+    )
+    with pytest.raises(AssertionError):
+        assert card == "found-card"  # wrong -- 200*800 can't reach 250,000
+    assert card is None  # confirms the old limit really was the problem
