@@ -409,17 +409,41 @@ def _scroll_until_card_found(
     page: Page,
     media_id: str,
     scroll_container_selector: str,
-    max_rounds: int = 200,
+    max_rounds: int = 3000,
     scroll_step: int = 800,
     pace_ms_range: tuple = SCROLL_SEARCH_PACE_MS,
+    bottom_rounds_before_giving_up: int = 4,
 ):
     """react-virtuoso (the grid library this page uses) only keeps
     nearby cards mounted in the DOM, unmounting far-off ones as you
-    scroll -- confirmed from a real HTML dump. So a card matching
-    media_id may simply not exist in the DOM yet/anymore. This scrolls
+    scroll -- confirmed from a real HTML dump (a real failure snapshot
+    had just 10 cards in the entire DOM). So a card matching media_id
+    may simply not exist in the DOM yet/anymore. This scrolls
     `scroll_container_selector` forward in small steps until a card
     containing that media_id's thumbnail (matched by image src, which
-    embeds the id) appears, or gives up.
+    embeds the id) appears, or until the container is genuinely at the
+    bottom with nothing left to load.
+
+    CONFIRMED REAL BUG this fixes: the old version stopped after a
+    FIXED 200 rounds x 800px = 160,000px of scrolling, whatever the
+    actual list length was. Real failure diagnostics showed scrollTop
+    stalling at 159,951 / 159,933 -- exactly that ceiling -- while the
+    container's real scrollHeight was 327,922px. So roughly the bottom
+    HALF of the grid was permanently unreachable, and any post living
+    there could never be scraped: it failed identically on every run,
+    forever, with a misleading "couldn't locate ... after scrolling
+    through everything" message. It had never actually scrolled through
+    everything.
+
+    Now the stopping condition is the real one -- "we reached the
+    bottom and the card still isn't here" -- instead of an arbitrary
+    round count that silently became wrong as the backlog grew. The
+    bottom must be observed for several consecutive rounds
+    (bottom_rounds_before_giving_up) so a lazily-loading grid gets a
+    chance to extend scrollHeight before we conclude there's no more.
+    max_rounds stays only as a last-resort infinite-loop guard, now set
+    far above any realistic list height rather than acting as the
+    routine limit.
 
     Returns (locator_or_none, diagnostics_dict). diagnostics_dict has
     scrollTop/scrollHeight/clientHeight read from the container right
@@ -430,28 +454,48 @@ def _scroll_until_card_found(
     card still never rendered."
     """
     selector = f"div.rf-virtuoso-item:has(img[src*='{media_id}'])"
+    state = None
+    rounds_at_bottom = 0
+
     for _ in range(max_rounds):
         card = page.locator(selector)
         if card.count() > 0:
             return card.first, None
-        page.evaluate(
+
+        # Scroll and read the container's geometry in ONE evaluate call
+        # rather than two, so checking "are we at the bottom yet?" every
+        # round costs no extra round-trip over the old blind scroll.
+        state = page.evaluate(
             "(args) => { const el = document.querySelector(args.sel); "
-            "if (el) { el.scrollTop += args.step; } }",
+            "if (!el) { return null; } "
+            "el.scrollTop += args.step; "
+            "return {scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, "
+            "clientHeight: el.clientHeight}; }",
             {"sel": scroll_container_selector, "step": scroll_step},
         )
         _pace(page, pace_ms_range)
 
-    try:
-        diagnostics = page.evaluate(
-            "(sel) => { const el = document.querySelector(sel); "
-            "return el ? {scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, "
-            "clientHeight: el.clientHeight} : null; }",
-            scroll_container_selector,
-        )
-    except Exception as e:
-        diagnostics = {"diagnostic_read_failed": str(e)}
+        if not state:
+            break  # container isn't on the page at all -- scrolling can't help
 
-    return None, diagnostics
+        # 2px of slack: browsers report fractional/rounded scroll values.
+        at_bottom = state["scrollTop"] + state["clientHeight"] >= state["scrollHeight"] - 2
+        rounds_at_bottom = rounds_at_bottom + 1 if at_bottom else 0
+        if rounds_at_bottom >= bottom_rounds_before_giving_up:
+            break
+
+    if state is None:
+        try:
+            state = page.evaluate(
+                "(sel) => { const el = document.querySelector(sel); "
+                "return el ? {scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, "
+                "clientHeight: el.clientHeight} : null; }",
+                scroll_container_selector,
+            )
+        except Exception as e:
+            state = {"diagnostic_read_failed": str(e)}
+
+    return None, state
 
 
 def _save_scrape_failure_snapshot(page: Page, debug_dir: str, media_id: str) -> None:
