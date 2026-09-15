@@ -22,6 +22,7 @@ from refunnel_export import (
     _format_progress_line,
     _is_target_crashed,
     _scroll_until_card_found,
+    _is_logged_out,
 )
 
 
@@ -569,3 +570,36 @@ def test_sabotage_old_fixed_ceiling_would_be_caught():
     with pytest.raises(AssertionError):
         assert card == "found-card"  # wrong -- 200*800 can't reach 250,000
     assert card is None  # confirms the old limit really was the problem
+
+
+# ---------- _is_logged_out: mid-run session loss ----------
+
+class _UrlPage:
+    def __init__(self, url):
+        self.url = url
+
+
+def test_detects_the_real_capital_l_login_redirect():
+    # the exact URL from the production failure log
+    assert _is_logged_out(_UrlPage("https://app.refunnel.com/Login")) is True
+
+
+def test_does_not_flag_the_social_listening_page_as_logged_out():
+    page = _UrlPage("https://app.refunnel.com/dashboard/content/social-listening?snv=true")
+    assert _is_logged_out(page) is False
+
+
+def test_is_logged_out_survives_a_page_that_raises_on_url():
+    class _Exploding:
+        @property
+        def url(self):
+            raise RuntimeError("target crashed")
+
+    assert _is_logged_out(_Exploding()) is False  # never masks a crash as a logout
+
+
+def test_sabotage_missed_logout_would_be_caught():
+    result = _is_logged_out(_UrlPage("https://app.refunnel.com/Login"))
+    with pytest.raises(AssertionError):
+        assert result is False  # wrong -- this IS the logged-out page
+    assert result is True
