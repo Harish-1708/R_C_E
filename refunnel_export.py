@@ -45,6 +45,8 @@ from typing import Callable, Iterable, Optional
 
 from playwright.sync_api import Page
 
+import refunnel_auth
+
 
 # Turn this on only after you've manually verified scrape_creator_email()
 # against the real site -- see module docstring and README.
@@ -498,6 +500,24 @@ def _scroll_until_card_found(
     return None, state
 
 
+def _is_logged_out(page: Page) -> bool:
+    """True if the page has been bounced to Refunnel's login screen.
+
+    Confirmed real: a session can expire MID-RUN. When that happened,
+    nothing noticed -- the browser was perfectly alive, so the crash
+    detector said "fine", and the scrape loop then failed all 625
+    remaining posts one at a time against the login screen ("Container
+    state: None", because #scrollableDiv doesn't exist there) before
+    the run finally died on the Payments export ~40 minutes later.
+    A logged-out page is recoverable in exactly the same way a crashed
+    one is -- get a fresh session -- but only if something detects it.
+    """
+    try:
+        return refunnel_auth.is_login_url(page.url)
+    except Exception:
+        return False
+
+
 def _save_scrape_failure_snapshot(page: Page, debug_dir: str, media_id: str) -> None:
     """One-time diagnostic capture for scrape_creator_emails -- a
     screenshot and the raw page HTML, saved once (not per-failure) so
@@ -702,6 +722,16 @@ def scrape_creator_emails(
         try:
             grid_item, diagnostics = _scroll_until_card_found(page, media_id, scroll_container_selector)
             if grid_item is None:
+                if _is_logged_out(page):
+                    print(
+                        "scrape_creator_emails: the session has been logged out mid-run (the "
+                        "page is now Refunnel's login screen, which is why no cards can be "
+                        "found). Stopping this attempt immediately rather than failing every "
+                        "remaining post one at a time against a login page. Nothing is lost: "
+                        "every remaining id stays in the target list and is retried once a "
+                        "fresh session is ready."
+                    )
+                    break
                 print(f"scrape_creator_emails: couldn't locate media_id={media_id!r} on the page "
                       f"after scrolling through everything. Container state: {diagnostics}")
                 if debug_dir and not debug_snapshot_saved:
@@ -802,6 +832,14 @@ def scrape_creator_emails(
                 debug_snapshot_saved = True
             consecutive_failures += 1
             consecutive_empty_fields = 0
+            if _is_logged_out(page):
+                print(
+                    "scrape_creator_emails: the session has been logged out mid-run -- "
+                    "stopping this attempt immediately rather than failing every remaining "
+                    "post against a login page. Nothing is lost: every remaining id stays in "
+                    "the target list and is retried once a fresh session is ready."
+                )
+                break
             if _is_target_crashed(e):
                 print(
                     "scrape_creator_emails: the browser target itself has crashed (not just "
