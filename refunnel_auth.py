@@ -83,6 +83,21 @@ REFUNNEL_PAYMENTS_URL = f"{REFUNNEL_BASE_URL}/dashboard/payments/history"
 REFUNNEL_LOGGED_IN_URL_FRAGMENT = "app.refunnel.com"
 REFUNNEL_LOGIN_URL_FRAGMENT = "login"
 
+
+def is_login_url(url: str) -> bool:
+    """Case-INSENSITIVE check for "this URL is the login page".
+
+    CONFIRMED REAL BUG this fixes: Refunnel redirects logged-out users
+    to "https://app.refunnel.com/Login" -- capital L. Every check here
+    was a case-SENSITIVE `"login" in page.url`, which is False for
+    "/Login". So is_session_valid() reported a dead, logged-out session
+    as perfectly valid, load_or_refresh_session() happily reused it
+    instead of re-authenticating, and a real run then spent ~40 minutes
+    failing 625 posts in a row against the login screen before dying on
+    the Payments export. One capital letter.
+    """
+    return REFUNNEL_LOGIN_URL_FRAGMENT in (url or "").lower()
+
 DEFAULT_SESSION_FILE = "refunnel_session.json"
 
 # --- CONFIG: centralize all login-form selectors here for easy fixing ---
@@ -130,7 +145,7 @@ def is_session_valid(context: BrowserContext) -> bool:
         page.goto(REFUNNEL_LOGIN_URL, wait_until="domcontentloaded", timeout=20000)
         # If already logged in, Refunnel should redirect away from /login.
         page.wait_for_timeout(2000)
-        still_on_login = REFUNNEL_LOGIN_URL_FRAGMENT in page.url
+        still_on_login = is_login_url(page.url)
         return not still_on_login
     except Exception as e:
         print(f"is_session_valid: couldn't confirm session validity "
@@ -170,7 +185,7 @@ def _perform_login(page: Page, email: str, otp_wait_seconds: int = 90) -> None:
     submit_button.click()
 
     page.wait_for_timeout(3000)
-    if REFUNNEL_LOGIN_URL_FRAGMENT in page.url:
+    if is_login_url(page.url):
         raise LoginError(
             "Submitted the code but Refunnel didn't redirect away from /login -- "
             "the code may have been wrong, expired, or a selector matched the wrong element."
