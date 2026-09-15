@@ -158,6 +158,112 @@ def is_session_valid(context: BrowserContext) -> bool:
             pass
 
 
+CODE_INPUT_SELECTORS = [
+    "input[autocomplete='one-time-code']",
+    "input[maxlength='1']",
+    "input[placeholder*='code' i]",
+    "input[inputmode='numeric']",
+]
+
+
+def _type_into(box, text: str) -> None:
+    """Enter text with REAL per-character key events rather than
+    setting the value in one shot.
+
+    Confirmed real: Refunnel's code screen is a React form whose Verify
+    button only enables once it considers a valid code entered.
+    A plain .fill() sets the value without the keystroke events those
+    widgets listen for, so the button can stay disabled even when the
+    text is visibly in the box.
+    """
+    box.click()
+    try:
+        box.press_sequentially(text, delay=50)
+    except AttributeError:
+        # Older Playwright (and simple test fakes) expose .type() instead.
+        box.type(text, delay=50)
+
+
+def _enter_login_code(page: Page, code: str, timeout_ms: int = 10000) -> None:
+    """Put `code` into Refunnel's code entry, handling BOTH layouts.
+
+    CONFIRMED REAL BUG this fixes: Refunnel uses SIX SEPARATE
+    single-digit boxes. The old code did .fill(code) on the first
+    matching input, which dumps all six digits into box one -- so the
+    form never saw a complete code, the Verify button stayed
+    `disabled`, and Playwright burned 62 retries over 30s before the
+    whole run died with "element is not enabled".
+
+    Handles the multi-box case (one digit per box) and still supports a
+    single combined box, so a future Refunnel redesign either way keeps
+    working.
+    """
+    last_seen = None
+    for index, selector in enumerate(CODE_INPUT_SELECTORS):
+        boxes = page.locator(selector)
+        try:
+            # Generous wait on the first (most specific) selector only;
+            # the rest are fallbacks and shouldn't each cost 10s.
+            boxes.first.wait_for(state="visible", timeout=timeout_ms if index == 0 else 2000)
+        except Exception:
+            continue
+
+        count = boxes.count()
+        last_seen = f"{selector!r} -> {count} input(s)"
+
+        if count >= len(code):
+            for i, char in enumerate(code):
+                _type_into(boxes.nth(i), char)
+            return
+        if count == 1:
+            _type_into(boxes.first, code)
+            return
+
+    raise LoginError(
+        f"Couldn't find a usable code entry for a {len(code)}-character code on Refunnel's "
+        f"login page (closest match: {last_seen or 'nothing matched'}). Refunnel's code-entry "
+        f"markup may have changed -- update CODE_INPUT_SELECTORS in refunnel_auth.py."
+    )
+
+
+def _submit_login_code(page: Page, enable_timeout_ms: int = 15000) -> None:
+    """Click Verify once it's actually enabled.
+
+    Waits for the button to become enabled instead of clicking at it
+    while it's disabled -- confirmed real: the old code clicked
+    immediately, so Playwright sat retrying a permanently-disabled
+    button for 30s and reported a generic timeout that said nothing
+    about WHY. A button that never enables means the code didn't
+    register, so this says exactly that.
+
+    Some OTP widgets auto-submit once the last digit lands, so a page
+    that has already left the login screen counts as success.
+    """
+    if not is_login_url(page.url):
+        return  # auto-submitted the moment the last digit went in
+
+    submit_button = _find_first(page, SELECTORS["submit_code_button"], "submit code button")
+
+    deadline = time.time() + (enable_timeout_ms / 1000)
+    while time.time() < deadline:
+        if not is_login_url(page.url):
+            return  # auto-submitted while we were waiting
+        try:
+            if submit_button.is_enabled():
+                submit_button.click()
+                return
+        except Exception:
+            pass
+        page.wait_for_timeout(250)
+
+    raise LoginError(
+        "Entered the login code but Refunnel's Verify button never became enabled. That "
+        "means the form didn't accept the code as complete/valid -- most likely the code "
+        "didn't land in the entry boxes correctly (check CODE_INPUT_SELECTORS in "
+        "refunnel_auth.py), or the code itself was wrong or already expired."
+    )
+
+
 def _perform_login(page: Page, email: str, otp_wait_seconds: int = 90) -> None:
     """Full automated login: enter email, request code, fetch it from
     Gmail, submit it. Raises LoginError on any step failure."""
@@ -178,11 +284,8 @@ def _perform_login(page: Page, email: str, otp_wait_seconds: int = 90) -> None:
     except gmail_otp.OtpNotFoundError as e:
         raise LoginError(f"Automated login couldn't get a code from Gmail: {e}") from e
 
-    code_input = _find_first(page, SELECTORS["code_input"], "code input")
-    code_input.fill(code)
-
-    submit_button = _find_first(page, SELECTORS["submit_code_button"], "submit code button")
-    submit_button.click()
+    _enter_login_code(page, code)
+    _submit_login_code(page)
 
     page.wait_for_timeout(3000)
     if is_login_url(page.url):
