@@ -277,24 +277,38 @@ def main() -> int:
 
                 try:
                     page.evaluate("() => 1")
-                    page_survived = True
+                    page_alive = True
                 except Exception:
-                    page_survived = False
+                    page_alive = False
+
+                # A logged-out page is ALIVE but useless -- confirmed
+                # real: a session expired mid-run, page.evaluate() kept
+                # answering fine (it's a perfectly healthy login page),
+                # so this check said "survived", broke out of the retry
+                # loop without re-authenticating, and the run then died
+                # on the Payments export. Being bounced to the login
+                # screen needs exactly the same recovery as a crash --
+                # a fresh session -- so it must not count as survival.
+                logged_out = page_alive and refunnel_export._is_logged_out(page)
+                page_survived = page_alive and not logged_out
 
                 if page_survived:
                     # Scraping stopped for a reason other than a crash
-                    # (e.g. the circuit breaker tripped on a genuine,
-                    # non-crash problem) -- retrying won't help there,
-                    # so don't burn a restart on it.
+                    # or a lost session (e.g. the circuit breaker
+                    # tripped on a genuine, non-crash problem) --
+                    # retrying won't help there, so don't burn a
+                    # restart on it.
                     break
 
+                reason = "The session was logged out" if logged_out else "Browser crashed"
+
                 if attempt >= max_scrape_restarts:
-                    print(f"Browser crashed and the {max_scrape_restarts}-restart budget for "
-                          f"this run is used up -- moving on with what was found. The rest "
-                          f"will be picked up on a future run.")
+                    print(f"{reason} during scraping and the {max_scrape_restarts}-restart "
+                          f"budget for this run is used up -- moving on with what was found. "
+                          f"The rest will be picked up on a future run.")
 
                 else:
-                    print(f"Browser crashed during scraping -- recovering and resuming "
+                    print(f"{reason} during scraping -- recovering and resuming "
                           f"(restart {attempt + 1} of {max_scrape_restarts})...")
 
                 # Either way (final giveup or about to retry), we need a
@@ -344,9 +358,22 @@ def main() -> int:
                           f"currently loaded -- NOT giving up on the rest of this run.")
 
         # --- 4. NOW it's safe to navigate away and export payments ---
-        page.goto(refunnel_auth.REFUNNEL_PAYMENTS_URL)
-        payments_csv_path = refunnel_export.export_payments_csv(page, download_dir)
-        result = parse_refunnel.parse_payments_csv(payments_csv_path, result=result)
+        # A failure here NO LONGER kills the entire run -- confirmed
+        # real: a logged-out session made this Export click time out,
+        # and that single exception threw away everything the run had
+        # just spent over an hour doing (no sheet tabs written at all,
+        # not even Master Data's finished state). Payments is one small
+        # tab; media data is the bulk of the value. The Payments tab is
+        # written with never_delete=True, so skipping it simply carries
+        # the existing rows forward untouched rather than clearing them.
+        try:
+            page.goto(refunnel_auth.REFUNNEL_PAYMENTS_URL)
+            payments_csv_path = refunnel_export.export_payments_csv(page, download_dir)
+            result = parse_refunnel.parse_payments_csv(payments_csv_path, result=result)
+        except Exception as e:
+            print(f"WARNING: couldn't export Payments this run ({type(e).__name__}: {e}). "
+                  f"Continuing anyway and writing every other tab -- the Payments tab keeps "
+                  f"its existing rows (never_delete=True) rather than being cleared.")
 
         # Move anything you've marked "Reviewed" (a manual column you
         # add to Master Data yourself) out of Approved/Requested/Declined
