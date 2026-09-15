@@ -154,3 +154,171 @@ def test_sabotage_case_sensitive_check_would_be_caught():
         assert old_style_result is True  # wrong -- the old check missed it entirely
     assert old_style_result is False     # confirms the old behaviour really was broken
     assert new_result is True            # confirms the fix catches it
+
+
+# ---------- OTP code entry: 6 separate single-digit boxes ----------
+
+class _FakeBox:
+    def __init__(self, owner, maxlength=1):
+        self.owner = owner
+        self.value = ""
+        self.maxlength = maxlength
+
+    def click(self):
+        pass
+
+    def wait_for(self, state=None, timeout=None):
+        pass
+
+    def press_sequentially(self, text, delay=None):
+        # mimics a real box: honours maxlength, like the browser does
+        self.value = (self.value + text)[: self.maxlength]
+        self.owner.keystrokes += len(text)
+
+    def is_enabled(self):
+        return self.owner.submit_enabled()
+
+
+class _FakeLoginPage:
+    """Simulates Refunnel's real code screen: N single-digit boxes, and
+    a Verify button that only enables once every box holds a digit."""
+
+    def __init__(self, num_boxes=6, code_length=6, selector="input[maxlength='1']"):
+        self.boxes = [_FakeBox(self, maxlength=1) for _ in range(num_boxes)]
+        self.code_length = code_length
+        self.selector = selector
+        self.keystrokes = 0
+        self.url = "https://app.refunnel.com/Login"
+        self.clicked_submit = False
+
+    def submit_enabled(self):
+        filled = [b for b in self.boxes if b.value]
+        return len(filled) >= self.code_length
+
+    def entered_code(self):
+        return "".join(b.value for b in self.boxes)
+
+    def locator(self, selector):
+        page = self
+        matches = page.boxes if selector == page.selector else []
+
+        class _Loc:
+            def count(self):
+                return len(matches)
+
+            @property
+            def first(self):
+                if not matches:
+                    raise RuntimeError("no match")
+                return matches[0]
+
+            def nth(self, i):
+                return matches[i]
+
+            def wait_for(self, state=None, timeout=None):
+                if not matches:
+                    raise RuntimeError("no match")
+
+        return _Loc()
+
+    def wait_for_timeout(self, _ms):
+        pass
+
+
+def test_enters_one_digit_per_box_across_six_boxes():
+    page = _FakeLoginPage(num_boxes=6, code_length=6)
+    refunnel_auth._enter_login_code(page, "483920")
+    assert page.entered_code() == "483920"
+    assert [b.value for b in page.boxes] == ["4", "8", "3", "9", "2", "0"]
+
+
+def test_six_box_entry_leaves_the_verify_button_enabled():
+    page = _FakeLoginPage(num_boxes=6, code_length=6)
+    refunnel_auth._enter_login_code(page, "483920")
+    assert page.submit_enabled() is True
+
+
+def test_still_supports_a_single_combined_input_box():
+    page = _FakeLoginPage(num_boxes=1, code_length=6)
+    page.boxes[0].maxlength = 6
+    refunnel_auth._enter_login_code(page, "483920")
+    assert page.boxes[0].value == "483920"
+
+
+def test_uses_real_keystrokes_not_a_bulk_value_set():
+    # the React form only enables Verify on real key events
+    page = _FakeLoginPage(num_boxes=6, code_length=6)
+    refunnel_auth._enter_login_code(page, "483920")
+    assert page.keystrokes == 6
+
+
+def test_raises_a_clear_error_when_no_code_entry_exists():
+    page = _FakeLoginPage(num_boxes=0, code_length=6)
+    with pytest.raises(refunnel_auth.LoginError, match="code entry"):
+        refunnel_auth._enter_login_code(page, "483920", timeout_ms=10)
+
+
+def test_sabotage_old_single_fill_behaviour_would_be_caught():
+    # reproduces the exact production bug: all six digits into box one
+    page = _FakeLoginPage(num_boxes=6, code_length=6)
+    page.boxes[0].maxlength = 6          # pretend fill() dumped it all in box 1
+    page.boxes[0].press_sequentially("483920")
+    with pytest.raises(AssertionError):
+        assert page.submit_enabled() is True  # wrong -- Verify stays DISABLED
+    assert page.submit_enabled() is False     # confirms why the run timed out
+
+
+# ---------- _submit_login_code: wait for enabled, don't click a dead button ----------
+
+class _SubmitPage(_FakeLoginPage):
+    def __init__(self, enabled_after_calls=0, auto_submit=False, **kw):
+        super().__init__(**kw)
+        self._calls = 0
+        self._enabled_after = enabled_after_calls
+        self._auto_submit = auto_submit
+
+    def locator(self, selector):
+        page = self
+
+        class _Btn:
+            def wait_for(self, state=None, timeout=None):
+                pass
+
+            def is_enabled(self):
+                page._calls += 1
+                return page._calls > page._enabled_after
+
+            def click(self):
+                page.clicked_submit = True
+                page.url = "https://app.refunnel.com/dashboard/content/social-listening"
+
+            @property
+            def first(self):
+                return self
+
+        return _Btn()
+
+
+def test_clicks_verify_once_it_becomes_enabled():
+    page = _SubmitPage(enabled_after_calls=3)
+    refunnel_auth._submit_login_code(page)
+    assert page.clicked_submit is True
+
+
+def test_returns_immediately_if_the_widget_auto_submitted():
+    page = _SubmitPage()
+    page.url = "https://app.refunnel.com/dashboard/content/social-listening"
+    refunnel_auth._submit_login_code(page)
+    assert page.clicked_submit is False  # nothing to click, already through
+
+
+def test_raises_a_useful_error_if_verify_never_enables():
+    class _NeverEnables(_SubmitPage):
+        def locator(self, selector):
+            btn = super().locator(selector)
+            btn.is_enabled = lambda: False
+            return btn
+
+    page = _NeverEnables()
+    with pytest.raises(refunnel_auth.LoginError, match="never became enabled"):
+        refunnel_auth._submit_login_code(page, enable_timeout_ms=50)
