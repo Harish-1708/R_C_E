@@ -116,3 +116,41 @@ def test_sabotage_leaked_browser_would_be_caught(monkeypatch, tmp_path):
     with pytest.raises(AssertionError):
         assert browser.closed is False  # wrong -- would mean it leaked
     assert browser.closed is True  # confirms actual correct behavior
+
+
+# ---------- case-insensitive login detection (the /Login bug) ----------
+
+@pytest.mark.parametrize("url", [
+    "https://app.refunnel.com/Login",   # the REAL redirect seen in production
+    "https://app.refunnel.com/login",
+    "https://app.refunnel.com/LOGIN",
+    "https://app.refunnel.com/Login?next=/dashboard",
+])
+def test_recognizes_every_casing_of_the_login_url(url):
+    assert refunnel_auth.is_login_url(url) is True
+
+
+@pytest.mark.parametrize("url", [
+    "https://app.refunnel.com/dashboard/content/social-listening",
+    "https://app.refunnel.com/dashboard/payments/history",
+    "",
+])
+def test_does_not_flag_a_real_dashboard_url_as_login(url):
+    assert refunnel_auth.is_login_url(url) is False
+
+
+def test_is_login_url_handles_none():
+    assert refunnel_auth.is_login_url(None) is False
+
+
+def test_sabotage_case_sensitive_check_would_be_caught():
+    # this is the exact bug: Refunnel redirects to "/Login" with a
+    # capital L, and the old case-SENSITIVE check read that as
+    # "still logged in", so a dead session was reused for ~40 minutes
+    url = "https://app.refunnel.com/Login"
+    old_style_result = "login" in url          # what the code used to do
+    new_result = refunnel_auth.is_login_url(url)
+    with pytest.raises(AssertionError):
+        assert old_style_result is True  # wrong -- the old check missed it entirely
+    assert old_style_result is False     # confirms the old behaviour really was broken
+    assert new_result is True            # confirms the fix catches it
