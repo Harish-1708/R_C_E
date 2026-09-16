@@ -258,6 +258,13 @@ class FakeWorksheet:
             self.rows[row_num - 1].append("")
         self.rows[row_num - 1][col_num - 1] = value
 
+    def batch_update(self, data, value_input_option="RAW"):
+        from gspread.utils import a1_to_rowcol
+        self.batch_update_calls = getattr(self, "batch_update_calls", 0) + 1
+        for entry in data:
+            row_num, col_num = a1_to_rowcol(entry["range"])
+            self.update_cell(row_num, col_num, entry["values"][0][0])
+
 
 def test_update_single_cell_updates_the_right_row_and_column():
     ws = FakeWorksheet([
@@ -613,3 +620,60 @@ def test_sabotage_non_transient_error_wrongly_retried_would_be_caught():
     with pytest.raises(AssertionError):
         assert calls["count"] == 5  # wrong -- a 404 should never be retried at all
     assert calls["count"] == 1  # confirms actual correct behavior
+
+
+# ---------- update_cells_by_id: the actual 429-quota fix ----------
+
+def test_update_cells_by_id_writes_every_row_in_one_batch_call():
+    rows = [["id", "username", "Reviewed"]]
+    updates = {}
+    for i in range(50):
+        rows.append([f"tk_{i}", "creator", ""])
+        updates[f"tk_{i}"] = "Yes"
+    ws = FakeWorksheet(rows)
+    client = GspreadSheetsClient(ws)
+
+    written = client.update_cells_by_id(updates, "Reviewed")
+
+    assert written == 50
+    assert all(row[2] == "Yes" for row in ws.rows[1:])
+    # THE actual fix: one HTTP call no matter how many rows changed --
+    # confirmed real bug used the per-row path, which meant 2 full-sheet
+    # reads for EVERY reviewed row, every run, and eventually hit
+    # Google's per-minute read quota once enough rows had accumulated
+    assert ws.batch_update_calls == 1
+
+
+def test_update_cells_by_id_skips_unknown_ids():
+    ws = FakeWorksheet([["id", "Reviewed"], ["tk_1", ""]])
+    client = GspreadSheetsClient(ws)
+    written = client.update_cells_by_id({"tk_1": "Yes", "tk_ghost": "Yes"}, "Reviewed")
+    assert written == 1
+    assert ws.rows[1] == ["tk_1", "Yes"]
+
+
+def test_update_cells_by_id_returns_zero_for_empty_updates_with_no_api_call():
+    ws = FakeWorksheet([["id", "Reviewed"], ["tk_1", ""]])
+    client = GspreadSheetsClient(ws)
+    written = client.update_cells_by_id({}, "Reviewed")
+    assert written == 0
+    assert getattr(ws, "batch_update_calls", 0) == 0  # no wasted API call
+
+
+def test_update_cells_by_id_returns_zero_if_column_missing():
+    ws = FakeWorksheet([["id", "username"], ["tk_1", "alice"]])
+    client = GspreadSheetsClient(ws)
+    written = client.update_cells_by_id({"tk_1": "Yes"}, "Reviewed")
+    assert written == 0
+
+
+def test_sabotage_per_row_api_calls_would_be_caught():
+    # proves the old per-row approach really would have cost 100 calls
+    # for 50 rows (2 reads each), versus the fix's constant 1 write
+    rows = [["id", "Reviewed"]] + [[f"tk_{i}", ""] for i in range(50)]
+    ws = FakeWorksheet(rows)
+    client = GspreadSheetsClient(ws)
+    client.update_cells_by_id({f"tk_{i}": "Yes" for i in range(50)}, "Reviewed")
+    with pytest.raises(AssertionError):
+        assert ws.batch_update_calls == 50  # wrong -- would mean no batching happened
+    assert ws.batch_update_calls == 1  # confirms actual correct, quota-safe behavior
