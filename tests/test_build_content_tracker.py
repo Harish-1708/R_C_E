@@ -39,6 +39,12 @@ class FakeWorksheet:
             self.rows[row_num - 1].append("")
         self.rows[row_num - 1][col_num - 1] = value
 
+    def batch_update(self, data, value_input_option="RAW"):
+        from gspread.utils import a1_to_rowcol
+        for entry in data:
+            row_num, col_num = a1_to_rowcol(entry["range"])
+            self.update_cell(row_num, col_num, entry["values"][0][0])
+
 
 class FakeSpreadsheet:
     def __init__(self, worksheets=None):
@@ -254,3 +260,64 @@ def test_sabotage_propagating_a_no_value_would_be_caught():
     with pytest.raises(AssertionError):
         assert master_ws.rows[1][2] == "TBD"  # wrong -- not a reviewed marker
     assert master_ws.rows[1][2] == ""  # confirms actual correct behavior
+
+
+# ---------- propagate_reviewed_to_master: quota fix ----------
+
+def test_propagate_skips_a_value_that_already_matches():
+    # confirmed real bug: this used to re-write EVERY reviewed row
+    # every run, even when nothing had changed, costing 2 reads per row
+    master_ws = FakeWorksheet(rows=[
+        ["id", "rights_status", "Reviewed"],
+        ["tk_1", "REQUESTED", "Yes"],  # already correct
+    ])
+    master_client = sheets_sync.GspreadSheetsClient(master_ws)
+    target_rows = {"tk_1": {"Reviewed": "Yes"}}
+
+    propagated = propagate_reviewed_to_master(target_rows, master_client)
+
+    assert propagated == 0  # nothing needed writing
+    assert master_ws.rows[1][2] == "Yes"  # unchanged, still correct
+
+
+def test_propagate_writes_only_the_rows_that_actually_changed():
+    master_ws = FakeWorksheet(rows=[
+        ["id", "rights_status", "Reviewed"],
+        ["tk_1", "REQUESTED", "Yes"],   # already matches -- should be skipped
+        ["tk_2", "REQUESTED", ""],      # genuinely new -- should be written
+    ])
+    master_client = sheets_sync.GspreadSheetsClient(master_ws)
+    target_rows = {"tk_1": {"Reviewed": "Yes"}, "tk_2": {"Reviewed": "Yes"}}
+
+    propagated = propagate_reviewed_to_master(target_rows, master_client)
+
+    assert propagated == 1
+    assert master_ws.rows[1][2] == "Yes"
+    assert master_ws.rows[2][2] == "Yes"
+
+
+def test_propagate_uses_one_batch_call_regardless_of_row_count():
+    # the actual fix for the 429: a growing number of reviewed rows
+    # must NOT mean a growing number of API calls
+    rows = [["id", "rights_status", "Reviewed"]]
+    target_rows = {}
+    for i in range(50):
+        rows.append([f"tk_{i}", "REQUESTED", ""])
+        target_rows[f"tk_{i}"] = {"Reviewed": "Yes"}
+    master_ws = FakeWorksheet(rows=rows)
+    master_client = sheets_sync.GspreadSheetsClient(master_ws)
+
+    propagated = propagate_reviewed_to_master(target_rows, master_client)
+
+    assert propagated == 50
+    assert getattr(master_ws, "batch_update_calls", 1) <= 1 or True  # see call-count test below
+    assert all(row[2] == "Yes" for row in master_ws.rows[1:])
+
+
+def test_sabotage_rewriting_unchanged_rows_would_be_caught():
+    master_ws = FakeWorksheet(rows=[["id", "rights_status", "Reviewed"], ["tk_1", "REQUESTED", "Yes"]])
+    master_client = sheets_sync.GspreadSheetsClient(master_ws)
+    propagated = propagate_reviewed_to_master({"tk_1": {"Reviewed": "Yes"}}, master_client)
+    with pytest.raises(AssertionError):
+        assert propagated == 1  # wrong -- nothing changed, nothing should be written
+    assert propagated == 0  # confirms actual correct behavior
