@@ -66,20 +66,28 @@ def propagate_reviewed_to_master(target_rows: dict, master_client: sheets_sync.G
     Only pushes a value when Reviewed is genuinely non-blank -- never
     writes a blank over anything, and never touches any column other
     than Reviewed. Silently does nothing for an id if Master Data
-    doesn't have a "Reviewed" column yet at all (update_single_cell
-    already handles that gracefully, returning False) -- that's still
-    a one-time manual setup step, same as it's always been.
+    doesn't have a "Reviewed" column yet at all -- that's still a
+    one-time manual setup step, same as it's always been.
+
+    Only writes cells whose value has actually CHANGED -- confirmed
+    real bug this fixes: this used to call update_single_cell() once
+    per reviewed row unconditionally, re-reading the entire sheet
+    twice per row every single run even when nothing had changed since
+    yesterday. As reviewed rows accumulated over time that eventually
+    exceeded Google's read quota and failed the whole run with a 429.
+    Now reads Master Data's current Reviewed column ONCE, diffs
+    against it, and writes only the rows that genuinely need it in a
+    single batched call.
 
     Returns how many cells were actually updated, for logging.
     """
-    propagated = 0
+    current_master_values = sheets_sync.read_column_values(master_client, "Reviewed")
+    updates = {}
     for media_id, row in target_rows.items():
         reviewed_value = (row.get("Reviewed") or "").strip()
-        if parse_refunnel.is_reviewed_value(reviewed_value):
-            found = master_client.update_single_cell(media_id, "Reviewed", reviewed_value)
-            if found:
-                propagated += 1
-    return propagated
+        if parse_refunnel.is_reviewed_value(reviewed_value) and current_master_values.get(media_id) != reviewed_value:
+            updates[media_id] = reviewed_value
+    return master_client.update_cells_by_id(updates, "Reviewed")
 
 
 def sync_one_brand(gc: "gspread.Client", tracker_sh, brand_config: dict) -> None:
