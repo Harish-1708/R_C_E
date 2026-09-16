@@ -359,6 +359,47 @@ class GspreadSheetsClient:
                 return True
         return False
 
+    def update_cells_by_id(self, updates: Dict[str, str], column_name: str, id_col: str = "id") -> int:
+        """Batch version of update_single_cell: writes ONE column across
+        MANY rows, keyed by id, in a small, fixed number of API calls no
+        matter how many rows are involved -- one read for the header,
+        one read for the id column, and one write (gspread's
+        batch_update, a single HTTP request for every changed cell).
+
+        CONFIRMED REAL BUG this fixes: propagate_reviewed_to_master()
+        called update_single_cell() once per reviewed row, and THAT
+        re-read the entire header and id column from scratch on every
+        single call -- 2 full-sheet reads per row, every run, forever,
+        even for rows whose value hadn't changed since yesterday. With
+        enough reviewed rows accumulated over time, a real run hit
+        Google's 60-reads-per-minute quota and failed outright with a
+        429. Callers should also skip ids whose value hasn't actually
+        changed before calling this, so this only ever does real work.
+
+        Returns how many cells were written (ids not found in the
+        sheet are silently skipped, same as update_single_cell).
+        """
+        if not updates:
+            return 0
+        header = retry_on_transient_error(self._ws.row_values, 1)
+        if id_col not in header or column_name not in header:
+            return 0
+        id_col_idx = header.index(id_col) + 1  # gspread is 1-indexed
+        target_col_idx = header.index(column_name) + 1
+
+        id_values = retry_on_transient_error(self._ws.col_values, id_col_idx)
+        row_by_id = {val: row_num for row_num, val in enumerate(id_values[1:], start=2) if val}
+
+        batch = []
+        for media_id, value in updates.items():
+            row_num = row_by_id.get(media_id)
+            if row_num is not None:
+                batch.append({"range": rowcol_to_a1(row_num, target_col_idx), "values": [[value]]})
+
+        if batch:
+            retry_on_transient_error(self._ws.batch_update, batch, value_input_option="RAW")
+        return len(batch)
+
 
 def get_or_create_worksheet(spreadsheet, title: str, cols: int = 30):
     """Fetch a worksheet by title, creating it (blank) if missing. Used
