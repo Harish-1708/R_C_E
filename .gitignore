@@ -8,6 +8,14 @@
 # publish it.
 refunnel_session.json
 
+# A local intermediate file some setups use when base64-encoding
+# refunnel_session.json to paste into the INITIAL_REFUNNEL_SESSION_B64
+# GitHub secret. No script in this repo creates or reads it -- it's a
+# manual, one-off local file -- but it's a raw login credential exactly
+# like refunnel_session.json itself, so it must never be committed.
+session_b64.txt
+*_b64.txt
+
 # Google service-account private key. Written to the repo root at
 # runtime by every workflow (`echo "$..." > service_account.json`),
 # so the same stray-commit risk applies.
