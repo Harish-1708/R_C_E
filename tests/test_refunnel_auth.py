@@ -322,3 +322,116 @@ def test_raises_a_useful_error_if_verify_never_enables():
     page = _NeverEnables()
     with pytest.raises(refunnel_auth.LoginError, match="never became enabled"):
         refunnel_auth._submit_login_code(page, enable_timeout_ms=50)
+
+
+# ---------- load_or_refresh_session: clear logging on every path (the "did it use a cached session or a fresh login?" gap) ----------
+
+class _FakeContext:
+    def __init__(self, valid, storage_state_path=None):
+        self.valid = valid
+        self.closed = False
+        self.storage_state_path = storage_state_path
+
+    def close(self):
+        self.closed = True
+
+    def new_page(self):
+        return _FakePage()
+
+    def storage_state(self, path):
+        self.storage_state_path = path
+
+
+class _FakePage:
+    def close(self):
+        pass
+
+
+class _SessionBrowser:
+    def __init__(self, valid_for_cached, valid_after_fresh_login=True):
+        self.valid_for_cached = valid_for_cached
+        self.valid_after_fresh_login = valid_after_fresh_login
+        self.contexts_created = []
+
+    def new_context(self, storage_state=None):
+        is_cached = storage_state is not None
+        valid = self.valid_for_cached if is_cached else self.valid_after_fresh_login
+        ctx = _FakeContext(valid=valid)
+        self.contexts_created.append(ctx)
+        return ctx
+
+    def close(self):
+        pass
+
+
+class _SessionPlaywright:
+    def __init__(self, browser):
+        self.chromium = self
+        self._browser = browser
+
+    def launch(self, **kwargs):
+        return self._browser
+
+    def stop(self):
+        pass
+
+
+def test_logs_cached_session_reuse(monkeypatch, tmp_path, capsys):
+    session_file = tmp_path / "session.json"
+    session_file.write_text("{}")  # exists, so the cached path is taken
+
+    browser = _SessionBrowser(valid_for_cached=True)
+    monkeypatch.setattr(refunnel_auth, "sync_playwright", lambda: type("S", (), {"start": lambda self: _SessionPlaywright(browser)})())
+    monkeypatch.setattr(refunnel_auth, "is_session_valid", lambda ctx: ctx.valid)
+
+    refunnel_auth.load_or_refresh_session(email="x@example.com", session_file=str(session_file))
+
+    out = capsys.readouterr().out
+    assert "Reused the cached Refunnel session" in out
+    assert "Fresh login" not in out
+
+
+def test_logs_expired_cached_session_falling_back(monkeypatch, tmp_path, capsys):
+    session_file = tmp_path / "session.json"
+    session_file.write_text("{}")
+
+    browser = _SessionBrowser(valid_for_cached=False, valid_after_fresh_login=True)
+    monkeypatch.setattr(refunnel_auth, "sync_playwright", lambda: type("S", (), {"start": lambda self: _SessionPlaywright(browser)})())
+    monkeypatch.setattr(refunnel_auth, "is_session_valid", lambda ctx: ctx.valid)
+    monkeypatch.setattr(refunnel_auth, "_perform_login", lambda page, email: None)
+
+    refunnel_auth.load_or_refresh_session(email="x@example.com", session_file=str(session_file))
+
+    out = capsys.readouterr().out
+    assert "no longer valid" in out
+    assert "Fresh login via Gmail OTP succeeded" in out
+
+
+def test_logs_no_cached_session_found(monkeypatch, tmp_path, capsys):
+    session_file = tmp_path / "does_not_exist.json"  # never created
+
+    browser = _SessionBrowser(valid_for_cached=False, valid_after_fresh_login=True)
+    monkeypatch.setattr(refunnel_auth, "sync_playwright", lambda: type("S", (), {"start": lambda self: _SessionPlaywright(browser)})())
+    monkeypatch.setattr(refunnel_auth, "is_session_valid", lambda ctx: ctx.valid)
+    monkeypatch.setattr(refunnel_auth, "_perform_login", lambda page, email: None)
+
+    refunnel_auth.load_or_refresh_session(email="x@example.com", session_file=str(session_file))
+
+    out = capsys.readouterr().out
+    assert "No cached session found" in out
+
+
+def test_sabotage_silent_success_would_be_caught(monkeypatch, tmp_path, capsys):
+    # this is the exact real problem: a genuinely successful run
+    # produced no distinguishing output at all
+    session_file = tmp_path / "session.json"
+    session_file.write_text("{}")
+    browser = _SessionBrowser(valid_for_cached=True)
+    monkeypatch.setattr(refunnel_auth, "sync_playwright", lambda: type("S", (), {"start": lambda self: _SessionPlaywright(browser)})())
+    monkeypatch.setattr(refunnel_auth, "is_session_valid", lambda ctx: ctx.valid)
+
+    refunnel_auth.load_or_refresh_session(email="x@example.com", session_file=str(session_file))
+    out = capsys.readouterr().out
+    with pytest.raises(AssertionError):
+        assert out.strip() == ""  # wrong -- this used to be true, and was the whole problem
+    assert "Reused the cached Refunnel session" in out  # confirms the fix
