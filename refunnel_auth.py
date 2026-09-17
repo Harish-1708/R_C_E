@@ -356,8 +356,19 @@ def load_or_refresh_session(
         if session_path.exists():
             context = browser.new_context(storage_state=str(session_path))
             if is_session_valid(context):
+                # Confirmed real gap: this function never printed
+                # anything on success, in either path, so a clean run
+                # gave no way to tell "reused the cached session" apart
+                # from "did a fresh login that happened to succeed
+                # silently" -- both looked like zero login-related
+                # output. Now it always says which one happened.
+                print(f"Reused the cached Refunnel session from {session_file} -- no login needed.")
                 return p, browser, context
+            print(f"Cached session in {session_file} exists but is no longer valid "
+                  f"(expired or logged out) -- falling back to a fresh login.")
             context.close()
+        else:
+            print(f"No cached session found at {session_file} -- doing a fresh login.")
 
         # saved session missing or expired -- fall back to a fresh login
         context = browser.new_context()
@@ -374,6 +385,8 @@ def load_or_refresh_session(
             raise LoginError("Fresh login via Gmail-OTP fallback did not result in a valid session.")
 
         context.storage_state(path=session_file)
+        print(f"Fresh login via Gmail OTP succeeded -- session saved to {session_file} "
+              f"for the next run to reuse.")
         return p, browser, context
     except Exception:
         _cleanup()
