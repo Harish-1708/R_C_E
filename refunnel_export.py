@@ -47,6 +47,15 @@ from playwright.sync_api import Page
 
 import refunnel_auth
 
+# Best guess based on a screenshot showing three icons appear on an
+# Approved card's thumbnail on hover (a link icon, a "+", and a
+# download icon) -- confirmed NOT verified against real markup, unlike
+# the Request-usage-rights selectors elsewhere in this file, which
+# came from an actual HTML dump. Centralized here so a real run's
+# failure message (see download_approved_video) points straight at
+# what to fix, same pattern as refunnel_auth.py's SELECTORS dict.
+DOWNLOAD_BUTTON_SELECTOR = "button[aria-label*='download' i], [class*='download' i]"
+
 
 # Turn this on only after you've manually verified scrape_creator_email()
 # against the real site -- see module docstring and README.
@@ -564,6 +573,50 @@ def _format_progress_line(attempted: int, total: int, found: int, empty_fields: 
     return (f"scrape_creator_emails: progress {attempted}/{total} attempted "
             f"-- {found} found, {empty_fields} had no email on file, "
             f"{other_failed} other error(s)")
+
+
+def download_approved_video(
+    page: Page,
+    media_id: str,
+    download_dir: str,
+    scroll_container_selector: str = "#scrollableDiv",
+    download_button_selector: str = DOWNLOAD_BUTTON_SELECTOR,
+    timeout_ms: int = 30000,
+) -> Optional[Path]:
+    """Locates the card for media_id (reusing _scroll_until_card_found,
+    same as email scraping) and clicks its download button, saving the
+    resulting file under download_dir as "<media_id>.<real extension>".
+
+    This filename is a TEMPORARY, download-step-only name -- the final
+    Drive filename (brand/handle/id) is applied separately at upload
+    time by download_approved_to_drive.py, keeping this function's only
+    job "get the real file onto disk," not "know Drive's naming".
+
+    Returns None if the card can't be located (same meaning as
+    scrape_creator_emails' "couldn't locate" case -- not yet loaded in
+    this virtualized grid, or genuinely not on this page). Raises on
+    a real problem (download button not found/clickable, download
+    timed out) rather than returning None for those, since those
+    usually mean the DOWNLOAD_BUTTON_SELECTOR guess above needs fixing,
+    not "try again later".
+    """
+    grid_item, _ = _scroll_until_card_found(page, media_id, scroll_container_selector)
+    if grid_item is None:
+        return None
+
+    grid_item.hover()
+    download_button = grid_item.locator(download_button_selector).first
+    download_button.wait_for(state="visible", timeout=timeout_ms)
+
+    with page.expect_download(timeout=timeout_ms) as download_info:
+        download_button.click()
+    download = download_info.value
+
+    suggested = download.suggested_filename or f"{media_id}.mp4"
+    extension = Path(suggested).suffix or ".mp4"
+    dest = Path(download_dir) / f"{media_id}{extension}"
+    download.save_as(str(dest))
+    return dest
 
 
 def scrape_creator_emails(
