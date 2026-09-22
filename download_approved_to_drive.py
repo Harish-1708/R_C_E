@@ -124,8 +124,7 @@ def process_one_brand(
     p, browser, context = refunnel_auth.load_or_refresh_session(email=email)
     try:
         page = context.new_page()
-        page.goto(refunnel_auth.refunnel_social_listening_url())
-        refunnel_export.select_workspace(page, refunnel_workspace_name, known_workspace_names)
+        refunnel_export.goto_social_listening_for_workspace(page, refunnel_workspace_name, known_workspace_names)
 
         uploaded, failed = 0, 0
         for media_id in target_ids:
