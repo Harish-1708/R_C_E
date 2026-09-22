@@ -1,11 +1,11 @@
 """
 build_content_tracker.py
 
-Builds/updates the Content Tracker -- a separate Google Sheet from any
-Refunnel-export spreadsheet, with one tab per brand (Duderobe,
-Swoveralls, Defi Snacks, Kelson -- whatever's in config/workspaces.yaml).
-Each brand's tab is derived from that brand's own Master Data tab, using
-content_tracker.py's freeze/refresh/manual column policy.
+Builds/updates the Content Tracker for every brand in
+config/workspaces.yaml. Each brand gets its OWN dedicated Content
+Tracker spreadsheet -- a completely separate sheet, not a tab inside a
+shared one -- matching the same per-brand-secret pattern already used
+for the Refunnel export spreadsheets.
 
 Deliberately entirely separate from run_daily_sync.py -- different
 schedule, no Playwright/browser involved at all (pure Google Sheets
@@ -15,19 +15,24 @@ brand's Master Data has had a chance to finish updating first.
 
 Required env vars:
     GOOGLE_SERVICE_ACCOUNT_JSON -- same service account used by the
-        main export pipeline (needs edit access to both the tracker
-        spreadsheet and every brand's own Master Data spreadsheet).
-    CONTENT_TRACKER_SPREADSHEET_ID -- the ID of the dedicated tracker
-        spreadsheet (a brand-new sheet, NOT any brand's own export sheet).
+        main export pipeline (needs edit access to both every brand's
+        Content Tracker spreadsheet and every brand's own Master Data
+        spreadsheet).
+    One tracker_spreadsheet_id_secret env var per brand that has one
+        set in config/workspaces.yaml (e.g.
+        CONTENT_TRACKER_SPREADSHEET_ID_DUDEROBE) -- each a brand-new
+        sheet, NOT that brand's own Refunnel export sheet.
 
 A brand is skipped (with a clear log line, not a failure) if:
-    - its spreadsheet_id_secret env var isn't set, or
+    - it has no tracker_spreadsheet_id_secret configured, or that env
+      var isn't set,
+    - its Refunnel spreadsheet_id_secret env var isn't set, or
     - that spreadsheet has no "Master Data" tab yet (hasn't been run
       through the main export pipeline yet).
-This means Swoveralls/Defi Snacks/Kelson can sit in
-config/workspaces.yaml with nothing configured yet, and this script
-just quietly does nothing for them until they're set up, rather than
-failing the whole run over brands that aren't ready.
+This means Defi Snacks/Kelson can sit in config/workspaces.yaml with
+nothing configured yet, and this script just quietly does nothing for
+them until they're set up, rather than failing the whole run over
+brands that aren't ready.
 """
 from __future__ import annotations
 
@@ -45,6 +50,11 @@ import sheets_sync
 
 CONFIG_PATH = "config/workspaces.yaml"
 MASTER_DATA_TAB = "Master Data"
+# Every brand's Content Tracker has exactly one tab, and it always uses
+# this name -- unlike the old shared-spreadsheet design, the brand name
+# no longer needs to double as the tab name to keep brands apart, but
+# keeping a fixed, recognizable name is simpler than inventing a new one.
+TRACKER_TAB = "Content Tracker"
 
 
 def load_workspaces(path: str = CONFIG_PATH) -> list:
@@ -90,13 +100,23 @@ def propagate_reviewed_to_master(target_rows: dict, master_client: sheets_sync.G
     return master_client.update_cells_by_id(updates, "Reviewed")
 
 
-def sync_one_brand(gc: "gspread.Client", tracker_sh, brand_config: dict) -> None:
+def sync_one_brand(gc: "gspread.Client", brand_config: dict) -> None:
     brand = brand_config["name"]
     secret_name = brand_config["spreadsheet_id_secret"]
     source_spreadsheet_id = os.environ.get(secret_name)
 
     if not source_spreadsheet_id:
         print(f"{brand}: skipping -- {secret_name} isn't set.")
+        return
+
+    tracker_secret_name = brand_config.get("tracker_spreadsheet_id_secret")
+    if not tracker_secret_name:
+        print(f"{brand}: skipping -- no tracker_spreadsheet_id_secret configured "
+              f"in config/workspaces.yaml for this brand's Content Tracker.")
+        return
+    tracker_spreadsheet_id = os.environ.get(tracker_secret_name)
+    if not tracker_spreadsheet_id:
+        print(f"{brand}: skipping -- {tracker_secret_name} isn't set.")
         return
 
     source_sh = sheets_sync.retry_on_transient_error(gc.open_by_key, source_spreadsheet_id)
@@ -115,7 +135,12 @@ def sync_one_brand(gc: "gspread.Client", tracker_sh, brand_config: dict) -> None
     master_header, master_data = master_all[0], master_all[1:]
     master_rows = sheets_sync.index_by_id(master_header, master_data, "id")
 
-    tracker_ws = sheets_sync.get_or_create_worksheet(tracker_sh, brand)
+    # This brand's OWN dedicated Content Tracker spreadsheet -- opened
+    # fresh here rather than passed in, since it's now a different
+    # spreadsheet per brand instead of one shared spreadsheet with a
+    # tab per brand.
+    tracker_sh = sheets_sync.retry_on_transient_error(gc.open_by_key, tracker_spreadsheet_id)
+    tracker_ws = sheets_sync.get_or_create_worksheet(tracker_sh, TRACKER_TAB)
     tracker_client = sheets_sync.GspreadSheetsClient(tracker_ws)
     tracker_all = tracker_client.read_all()
     tracker_header = tracker_all[0] if tracker_all else list(content_tracker.TRACKER_COLUMNS)
@@ -153,20 +178,17 @@ def main() -> int:
     sys.stdout.reconfigure(line_buffering=True)
 
     service_account_path = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
-    tracker_spreadsheet_id = os.environ.get("CONTENT_TRACKER_SPREADSHEET_ID")
 
-    if not service_account_path or not tracker_spreadsheet_id:
-        print("Missing required env vars: need GOOGLE_SERVICE_ACCOUNT_JSON, "
-              "CONTENT_TRACKER_SPREADSHEET_ID.", file=sys.stderr)
+    if not service_account_path:
+        print("Missing required env var: GOOGLE_SERVICE_ACCOUNT_JSON.", file=sys.stderr)
         return 1
 
     try:
         gc = gspread.service_account(filename=service_account_path)
-        tracker_sh = sheets_sync.retry_on_transient_error(gc.open_by_key, tracker_spreadsheet_id)
 
         workspaces = load_workspaces()
         for brand_config in workspaces:
-            sync_one_brand(gc, tracker_sh, brand_config)
+            sync_one_brand(gc, brand_config)
 
         return 0
     except Exception as e:
