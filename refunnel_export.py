@@ -52,6 +52,14 @@ import refunnel_auth
 # against the real site -- see module docstring and README.
 SCRAPE_EMAILS_ENABLED = True
 
+# Confirmed real, exact text from the live page's own markup
+# (.urq-title inside a .usage-rights-requested-card). A card showing
+# this is awaiting the brand's own approve/decline decision, and its
+# menu has NO usage-rights option at all -- see scrape_creator_emails'
+# skip logic for the full confirmed evidence and why the class name
+# alone can't be used to detect it.
+PENDING_REVIEW_TITLE_TEXT = "Pending review"
+
 # Refunnel's "Request usage rights" flow has a "Send request" button
 # (confirmed from your screenshot). We refuse to click anything whose
 # accessible name matches this, as a hard safety net independent of
@@ -1125,6 +1133,7 @@ def scrape_creator_emails(
     attempted = 0
     found_count = 0
     empty_field_count = 0
+    pending_review_skipped = 0
     PROGRESS_CHECKPOINT = 25
     for media_id in target_ids:
         try:
@@ -1207,6 +1216,47 @@ def scrape_creator_emails(
                 ".pop-up-menu > [aria-controls]:has(.usage-rights-requested-card)"
             )
             request_toggle = grid_item.locator(usage_rights_toggle_selector).first
+
+            # CONFIRMED REAL, from live screenshots of BOTH menu types
+            # plus the saved HTML: a post awaiting the brand's own
+            # approve/decline decision shows "Pending review", and its
+            # menu contains ONLY "Upload to Google Drive" and "Attach
+            # to a campaign" -- there is NO "Request usage-rights" item
+            # in it at all. A normal card's menu does have it (along
+            # with Set usage-rights labels / Upload to Meta).
+            #
+            # So a Pending-review post can NEVER yield a creator email:
+            # the scraper opens the menu, waits the full timeout for an
+            # item that structurally cannot appear, and fails. Confirmed
+            # against real data: ig_18018159830937735 -- the id that
+            # failed FIRST on every single run, with exactly that menu
+            # timeout -- is a Pending review card in the saved HTML.
+            #
+            # Detected by the card's TITLE text, not its class: a
+            # Pending-review card uses .usage-rights-requested-card,
+            # the SAME class as a genuine "Usage rights requested"
+            # card, so the class alone genuinely cannot tell them
+            # apart. The title text is the only real distinguisher.
+            #
+            # Skipped BEFORE opening the menu -- no click, no wasted
+            # timeout, and (importantly) no risk of leaving a stray
+            # menu open to interfere with the next post.
+            try:
+                is_pending_review = grid_item.locator(
+                    f".urq-title:has-text('{PENDING_REVIEW_TITLE_TEXT}')"
+                ).count() > 0
+            except Exception:
+                is_pending_review = False
+            if is_pending_review:
+                print(f"scrape_creator_emails: skipping media_id={media_id!r} -- it's awaiting "
+                      f"your own approve/decline decision ({PENDING_REVIEW_TITLE_TEXT!r}), and "
+                      f"that menu has no usage-rights option at all, so no email can be read "
+                      f"from it. Not a failure.")
+                pending_review_skipped += 1
+                attempted += 1
+                consecutive_failures = 0
+                consecutive_empty_fields = 0
+                continue
 
             # Re-finds the card fresh on each attempt (re-scrolling if
             # needed) rather than retrying the SAME stale locator chain
@@ -1400,4 +1450,9 @@ def scrape_creator_emails(
             if _should_print_progress(attempted, total_targets, PROGRESS_CHECKPOINT):
                 print(_format_progress_line(attempted, total_targets, found_count, empty_field_count))
 
+    if pending_review_skipped:
+        print(f"scrape_creator_emails: skipped {pending_review_skipped} post(s) awaiting your own "
+              f"approve/decline decision ({PENDING_REVIEW_TITLE_TEXT!r}) -- those have no "
+              f"usage-rights option to read an email from. Approving or declining them in "
+              f"Refunnel makes them scrapeable on a future run.")
     return results, empty_ids
