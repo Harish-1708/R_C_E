@@ -261,3 +261,67 @@ def test_sabotage_stale_tag_left_in_place_would_be_caught(monkeypatch):
     with pytest.raises(AssertionError):
         assert master_ws.rows[1][idx] == "Old Campaign"  # wrong -- would mean it's stuck stale
     assert master_ws.rows[1][idx] == ""  # confirms actual correct behavior
+
+
+# ---------- genuinely empty campaigns (confirmed real: Refunnel's "No results" state) ----------
+
+def test_a_genuinely_empty_campaign_is_recorded_as_zero_not_a_failure(monkeypatch, capsys):
+    # confirmed real from live debug screenshots: all 5 of Duderobe's
+    # campaigns show Refunnel's own "No results for these filters(s)"
+    # message, matching a manual check exactly -- this must be recorded
+    # as a genuine, valid 0-post result, not logged as a failure
+    monkeypatch.setenv("SPREADSHEET_ID_DUDEROBE", "sheet1")
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1", campaigns="Old Campaign")])
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+
+    monkeypatch.setattr(sc.refunnel_export, "list_available_campaigns", lambda page, **kw: ["Old Campaign"])
+    monkeypatch.setattr(sc.refunnel_export, "has_no_results_for_filter", lambda page: True)
+
+    scroll_called = []
+    monkeypatch.setattr(sc.refunnel_export, "scroll_to_load_all", lambda *a, **kw: scroll_called.append(1))
+
+    sc.sync_campaigns_for_brand(gc, _brand_config(), "x@example.com", ["Duderobe"])
+
+    out = capsys.readouterr().out
+    assert "0 post(s)" in out
+    assert "couldn't process" not in out  # not treated as a failure
+    assert scroll_called == []  # never attempted -- there's nothing to scroll
+
+    header = master_ws.rows[0]
+    idx = header.index("campaigns")
+    assert master_ws.rows[1][idx] == ""  # correctly cleared -- tk_1 no longer in it
+
+
+def test_a_real_campaign_still_scrolls_and_exports_normally(monkeypatch):
+    # confirms the empty-state check doesn't short-circuit a genuinely
+    # non-empty campaign
+    monkeypatch.setenv("SPREADSHEET_ID_DUDEROBE", "sheet1")
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1")])
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+
+    monkeypatch.setattr(sc.refunnel_export, "list_available_campaigns", lambda page, **kw: ["Real Campaign"])
+    monkeypatch.setattr(sc.refunnel_export, "has_no_results_for_filter", lambda page: False)
+    monkeypatch.setattr(sc.refunnel_export, "export_media_csv", lambda *a, **kw: "/tmp/fake.csv")
+    monkeypatch.setattr(sc, "_ids_from_csv", lambda path: {"tk_1"})
+
+    sc.sync_campaigns_for_brand(gc, _brand_config(), "x@example.com", ["Duderobe"])
+
+    header = master_ws.rows[0]
+    idx = header.index("campaigns")
+    assert master_ws.rows[1][idx] == "Real Campaign"
+
+
+def test_sabotage_empty_campaign_wrongly_logged_as_failure_would_be_caught(monkeypatch, capsys):
+    monkeypatch.setenv("SPREADSHEET_ID_DUDEROBE", "sheet1")
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1")])
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+
+    monkeypatch.setattr(sc.refunnel_export, "list_available_campaigns", lambda page, **kw: ["Empty Campaign"])
+    monkeypatch.setattr(sc.refunnel_export, "has_no_results_for_filter", lambda page: True)
+
+    sc.sync_campaigns_for_brand(gc, _brand_config(), "x@example.com", ["Duderobe"])
+
+    out = capsys.readouterr().out
+    with pytest.raises(AssertionError):
+        assert "couldn't process" in out  # wrong -- a real 0-result answer is not a failure
+    assert "0 post(s)" in out  # confirms actual correct behavior
