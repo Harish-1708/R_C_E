@@ -1,0 +1,80 @@
+name: Drive Video Backfill
+
+# Deliberately separate from Refunnel Sync -- downloading and uploading
+# real video files is genuinely slow, so this runs on its own schedule
+# and never blocks or slows down the main daily export. Runs a couple
+# of hours after the main sync so Master Data reflects the day's
+# Approved-status changes first.
+#
+# Loops over every brand internally in one job (no per-workspace
+# matrix, unlike Refunnel Sync) -- there's no per-video race like the
+# OTP one that motivated serializing that workflow, since this only
+# ever runs as a single job.
+
+on:
+  schedule:
+    - cron: "0 7 * * *"  # 07:00 UTC daily
+  workflow_dispatch: {}
+
+jobs:
+  drive-backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright's browser
+        run: python -m playwright install --with-deps chromium
+
+      # Same session-cache pattern as Refunnel Sync -- one Refunnel
+      # login shared across brands.
+      - name: Restore saved Refunnel session
+        id: restore_session
+        uses: actions/cache/restore@v4
+        with:
+          path: refunnel_session.json
+          key: refunnel-session-${{ github.run_id }}
+          restore-keys: |
+            refunnel-session-
+
+      - name: Run the Drive backfill
+        env:
+          REFUNNEL_EMAIL: ${{ secrets.REFUNNEL_EMAIL }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: service_account.json
+          GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          # One Refunnel-export secret per brand, same as Refunnel Sync.
+          SPREADSHEET_ID_DUDEROBE: ${{ secrets.SPREADSHEET_ID_DUDEROBE }}
+          SPREADSHEET_ID_SWOVERALLS: ${{ secrets.SPREADSHEET_ID_SWOVERALLS }}
+          SPREADSHEET_ID_DEFI_SNACKS: ${{ secrets.SPREADSHEET_ID_DEFI_SNACKS }}
+          SPREADSHEET_ID_KELSON: ${{ secrets.SPREADSHEET_ID_KELSON }}
+          # One Drive folder secret per brand that has this feature
+          # configured (see config/workspaces.yaml's
+          # drive_folder_id_secret) -- currently only Swoveralls.
+          DRIVE_FOLDER_ID_SWOVERALLS: ${{ secrets.DRIVE_FOLDER_ID_SWOVERALLS }}
+        run: |
+          echo "$GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT" > service_account.json
+          python -u download_approved_to_drive.py
+
+      - name: Save Refunnel session for next run
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: refunnel_session.json
+          key: refunnel-session-${{ github.run_id }}
+
+      - name: Upload debug artifacts (7-day retention)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: drive-backfill-debug
+          path: downloads/drive_backfill/
+          retention-days: 7
+          if-no-files-found: ignore
