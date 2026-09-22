@@ -282,6 +282,30 @@ def build_drive_filename(brand: str, username: str, media_id: str, extension: st
     return f"{brand} | {handle} | {media_id}.{extension}"
 
 
+CAMPAIGN_SEPARATOR = ", "
+
+
+def build_campaign_membership(campaign_to_ids: Dict[str, Iterable[str]]) -> Dict[str, str]:
+    """Inverts {campaign_name: [media_ids in it]} into
+    {media_id: "Campaign A, Campaign B"} -- confirmed real requirement:
+    a post can belong to zero, one, or several campaigns at once, so
+    this is a genuine many-to-many relationship, not a single lookup.
+    A post appearing in NO campaign's export simply never appears as a
+    key here -- the caller writes a blank for it, which is correct
+    (most of the ~6000+ posts have no campaign at all).
+
+    Campaign names are joined in the order they were discovered
+    (list_available_campaigns' own order), not sorted -- deterministic
+    for a given run, but not something to rely on for a stable order
+    across runs if campaigns are ever reordered on Refunnel's side.
+    """
+    membership: Dict[str, list] = {}
+    for campaign_name, media_ids in campaign_to_ids.items():
+        for media_id in media_ids:
+            membership.setdefault(media_id, []).append(campaign_name)
+    return {media_id: CAMPAIGN_SEPARATOR.join(names) for media_id, names in membership.items()}
+
+
 def rows_needing_drive_upload(
     master_rows: Dict[str, dict], existing_upload_dates: Dict[str, str]
 ) -> Dict[str, dict]:
