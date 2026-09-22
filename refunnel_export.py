@@ -515,6 +515,32 @@ def list_available_campaigns(page: Page, debug_dir: Optional[str] = None, timeou
     return names
 
 
+def filter_is_genuinely_active(page: Page, campaign_name: str) -> bool:
+    """True if the applied campaign filter is ACTUALLY showing on the
+    page for this exact campaign -- confirmed real, serious bug this
+    guards against: a live run reported 2795 posts for "SheRobe
+    Content Campaign" (the FULL, unfiltered library size) while a
+    manual check of the same campaign showed genuinely zero results.
+    The filter silently failed to take effect that one time, and
+    nothing caught it -- scroll_to_load_all() and export_media_csv()
+    happily proceeded against the UNFILTERED view, which would have
+    mistagged all 2795 posts as belonging to a campaign they were
+    never in.
+
+    Checks that campaign_name appears in the active-filter chip text
+    (confirmed real from a screenshot: "Campaign | is | <name> | X"),
+    by checking the page's own visible text rather than guessing at
+    the chip's exact CSS structure -- a real caption mentioning a
+    marketing campaign's exact name by coincidence is a low enough
+    risk to accept, especially against the alternative of trusting an
+    unverified filter and silently exporting the wrong data.
+    """
+    try:
+        return campaign_name in page.inner_text("body")
+    except Exception:
+        return False
+
+
 def filter_by_campaign(page: Page, campaign_name: str, debug_dir: Optional[str] = None, timeout_ms: int = 15000) -> None:
     """Clears any currently active filters, then applies ONLY
     campaign_name. Clearing first (rather than just unchecking the
