@@ -1171,3 +1171,51 @@ def test_sabotage_no_debug_capture_would_be_caught(tmp_path):
     with pytest.raises(AssertionError):
         assert page.screenshot_calls == []  # wrong -- a capture should have happened
     assert len(page.screenshot_calls) == 1  # confirms actual correct behavior
+
+
+# ---------- has_no_results_for_filter: confirmed real empty state ----------
+
+class _TextPage:
+    def __init__(self, body_text):
+        self._body_text = body_text
+
+    def inner_text(self, _selector):
+        return self._body_text
+
+
+def test_detects_the_real_no_results_message():
+    from refunnel_export import has_no_results_for_filter
+    # confirmed real, exact text from a live run's debug screenshots
+    page = _TextPage("...\nNo results for these filters(s)\nTry adjusting your filters...")
+    assert has_no_results_for_filter(page) is True
+
+
+def test_detects_the_alternate_spelling_too():
+    from refunnel_export import has_no_results_for_filter
+    page = _TextPage("No results for these filter(s)")
+    assert has_no_results_for_filter(page) is True
+
+
+def test_does_not_flag_a_normal_content_page():
+    from refunnel_export import has_no_results_for_filter
+    page = _TextPage("20 of 2795 media\n@someuser 9.1K followers")
+    assert has_no_results_for_filter(page) is False
+
+
+def test_survives_a_page_that_raises_on_inner_text():
+    from refunnel_export import has_no_results_for_filter
+
+    class _Exploding:
+        def inner_text(self, _selector):
+            raise RuntimeError("target crashed")
+
+    assert has_no_results_for_filter(_Exploding()) is False
+
+
+def test_sabotage_missed_empty_state_would_be_caught():
+    from refunnel_export import has_no_results_for_filter
+    page = _TextPage("No results for these filters(s)")
+    result = has_no_results_for_filter(page)
+    with pytest.raises(AssertionError):
+        assert result is False  # wrong -- this IS the real empty-state message
+    assert result is True
