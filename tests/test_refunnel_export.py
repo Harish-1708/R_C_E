@@ -8,6 +8,7 @@ untested here; see README).
 """
 
 import re
+from pathlib import Path
 
 import pytest
 
@@ -815,6 +816,9 @@ class _FakeCampaignOptionRow:
     def click(self, timeout=None):
         self.checkbox_clicked = True
 
+    def check(self, timeout=None):
+        self.checkbox_clicked = True
+
     def wait_for(self, state=None, timeout=None):
         pass
 
@@ -1113,3 +1117,57 @@ def test_debug_snapshot_captured_before_escape_not_after(tmp_path):
     list_available_campaigns(page, debug_dir=str(tmp_path))
 
     assert call_order == ["screenshot", "escape"]  # screenshot must come first
+
+
+# ---------- filter_by_campaign: post-Apply debug capture ----------
+
+class _DebugCapturingPage(_RealCampaignPage):
+    def __init__(self, campaign_names, real_rows=None):
+        super().__init__(campaign_names, real_rows=real_rows)
+        self.screenshot_calls = []
+        self.wait_timeouts = []
+
+    def screenshot(self, path, full_page=True):
+        self.screenshot_calls.append(path)
+        Path(path).write_bytes(b"fake png bytes")
+
+    def content(self):
+        return "<html>post-apply state</html>"
+
+    def wait_for_timeout(self, ms):
+        self.wait_timeouts.append(ms)
+
+
+def test_filter_by_campaign_saves_debug_snapshot_when_debug_dir_given(tmp_path):
+    from refunnel_export import filter_by_campaign
+    page = _DebugCapturingPage([], real_rows=["Evergreen Campaign"])
+    filter_by_campaign(page, "Evergreen Campaign", debug_dir=str(tmp_path))
+    assert len(page.screenshot_calls) == 1
+    saved_html = list(tmp_path.glob("after_apply_*.html"))
+    assert len(saved_html) == 1
+    assert saved_html[0].read_text() == "<html>post-apply state</html>"
+
+
+def test_filter_by_campaign_no_snapshot_without_debug_dir(tmp_path):
+    from refunnel_export import filter_by_campaign
+    page = _DebugCapturingPage([], real_rows=["Evergreen Campaign"])
+    filter_by_campaign(page, "Evergreen Campaign", debug_dir=None)
+    assert page.screenshot_calls == []
+
+
+def test_filter_by_campaign_sanitizes_the_campaign_name_for_a_filename(tmp_path):
+    from refunnel_export import filter_by_campaign
+    page = _DebugCapturingPage([], real_rows=["[SCC] Partner with Swoveralls"])
+    filter_by_campaign(page, "[SCC] Partner with Swoveralls", debug_dir=str(tmp_path))
+    saved = list(tmp_path.glob("after_apply_*.png"))
+    assert len(saved) == 1
+    assert "[" not in saved[0].name and "]" not in saved[0].name
+
+
+def test_sabotage_no_debug_capture_would_be_caught(tmp_path):
+    from refunnel_export import filter_by_campaign
+    page = _DebugCapturingPage([], real_rows=["Evergreen Campaign"])
+    filter_by_campaign(page, "Evergreen Campaign", debug_dir=str(tmp_path))
+    with pytest.raises(AssertionError):
+        assert page.screenshot_calls == []  # wrong -- a capture should have happened
+    assert len(page.screenshot_calls) == 1  # confirms actual correct behavior
