@@ -134,6 +134,24 @@ def _clean(value: Optional[str]) -> str:
     return (value or "").strip()
 
 
+def _get_post_link(row: dict) -> str:
+    """Reads the post's real URL from the raw CSV row.
+
+    CONFIRMED REAL, URGENT finding: a fresh export shows Refunnel
+    renamed this column from "original_post_link" to "permalink" --
+    the old name is completely absent from the current export. Left
+    unhandled, every row's link would go silently blank across Master
+    Data, Human Review, and Content Tracker's "Refunnel Link" column --
+    no error, just missing data, exactly the kind of regression that's
+    easy to miss until someone notices links are gone. Tries the new
+    name first (what a fresh export actually has today), falls back to
+    the old one in case an older CSV or a different export variant
+    still uses it, so this survives either direction of a future
+    rename too.
+    """
+    return _clean(row.get("permalink") or row.get("original_post_link"))
+
+
 def parse_media_csv(path: str, creator_emails: Optional[Dict[str, str]] = None) -> ParseResult:
     """Parse Refunnel's media/content bulk-export CSV.
 
@@ -167,7 +185,7 @@ def parse_media_csv(path: str, creator_emails: Optional[Dict[str, str]] = None) 
                 "platform": _clean(row.get("platform")),
                 "username": _clean(row.get("username")),
                 "followers": _clean(row.get("followers")),
-                "original_post_link": _clean(row.get("original_post_link")),
+                "original_post_link": _get_post_link(row),
                 "media_url": _clean(row.get("media_url")),
                 "media_type": _clean(row.get("media_type")),
                 "viewable_media_type": _clean(row.get("viewable_media_type")),
