@@ -1086,20 +1086,52 @@ def scrape_creator_emails(
             request_toggle = grid_item.locator(
                 ".usage-rights-request-card, .usage-rights-requested-card"
             ).first
-            try:
-                request_toggle.scroll_into_view_if_needed(timeout=4000)
-                request_toggle.wait_for(state="visible", timeout=4000)
-            except Exception as e:
+
+            # Re-finds the card fresh on each attempt (re-scrolling if
+            # needed) rather than retrying the SAME stale locator chain
+            # -- confirmed real, new failure pattern: a live run against
+            # Swoveralls' much larger backlog showed the card resolving
+            # successfully every single time, then getting "detached
+            # from the DOM" mid-click, for the full 30s, on nearly every
+            # item. react-virtuoso (the virtualized list library) reuses
+            # DOM nodes for different items as the list scrolls/settles
+            # -- Playwright's own built-in retry keeps re-querying the
+            # SAME locator chain, but if the underlying node keeps
+            # getting recycled faster than a click can land, that retry
+            # alone never wins. Re-running the full find-and-click
+            # sequence gives it a genuinely fresh DOM reference each
+            # time instead of hammering the same doomed one.
+            last_click_error = None
+            for click_attempt in range(3):
+                if click_attempt > 0:
+                    grid_item, _ = _scroll_until_card_found(page, media_id, scroll_container_selector)
+                    if grid_item is None:
+                        break  # genuinely gone now, not just detached -- let the outer handling deal with it
+                    request_toggle = grid_item.locator(
+                        ".usage-rights-request-card, .usage-rights-requested-card"
+                    ).first
+                try:
+                    request_toggle.scroll_into_view_if_needed(timeout=4000)
+                    request_toggle.wait_for(state="visible", timeout=4000)
+                    # A brief settle pause before clicking -- confirmed
+                    # real: the detachment happens mid-click, meaning the
+                    # card was visible a moment ago but the list churned
+                    # again right as the click landed. This doesn't
+                    # eliminate the race, just gives a re-render that's
+                    # already in flight a chance to finish first.
+                    page.wait_for_timeout(300)
+                    _safe_click(request_toggle)
+                    last_click_error = None
+                    break
+                except Exception as e:
+                    last_click_error = e
+            if last_click_error is not None:
                 raise ExportError(
-                    f"Card for media_id={media_id!r} was found in the DOM, but its "
-                    f"status toggle never became visible/clickable within 4s even "
-                    f"after scroll_into_view_if_needed() -- may be obscured by an "
-                    f"overlay, or this post's rights status uses yet another class "
-                    f"name not yet accounted for (Approved cards use a different, "
-                    f"non-clickable badge entirely -- confirmed separately). "
-                    f"Original error: {e}"
-                ) from e
-            _safe_click(request_toggle)
+                    f"Card for media_id={media_id!r} was found, but clicking its status "
+                    f"toggle kept failing (element detached / recycled by the virtualized "
+                    f"list) even after {click_attempt + 1} fresh attempts. "
+                    f"Original error: {last_click_error}"
+                ) from last_click_error
             _pace(page)
 
             # The popup's top item's TITLE differs by status ("Request
