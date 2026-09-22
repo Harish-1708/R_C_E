@@ -136,7 +136,7 @@ def test_campaign_list_is_discovered_not_hardcoded(monkeypatch):
     master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1")])
     gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
 
-    monkeypatch.setattr(sc.refunnel_export, "list_available_campaigns", lambda page: ["A New Campaign"])
+    monkeypatch.setattr(sc.refunnel_export, "list_available_campaigns", lambda page, **kw: ["A New Campaign"])
     monkeypatch.setattr(sc.refunnel_export, "export_media_csv", lambda *a, **kw: "/tmp/fake.csv")
     monkeypatch.setattr(sc, "_ids_from_csv", lambda path: {"tk_1"})
 
@@ -153,7 +153,7 @@ def test_a_post_in_two_campaigns_gets_both(monkeypatch):
     gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
 
     monkeypatch.setattr(sc.refunnel_export, "list_available_campaigns",
-                         lambda page: ["Campaign A", "Campaign B"])
+                         lambda page, **kw: ["Campaign A", "Campaign B"])
     monkeypatch.setattr(sc.refunnel_export, "export_media_csv", lambda *a, **kw: "/tmp/fake.csv")
     monkeypatch.setattr(sc, "_ids_from_csv", lambda path: {"tk_1"})  # in both
 
@@ -172,7 +172,7 @@ def test_a_stale_campaign_tag_is_cleared_when_no_longer_a_member(monkeypatch):
     gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
 
     # this run's fresh discovery finds tk_1 in NO campaign at all
-    monkeypatch.setattr(sc.refunnel_export, "list_available_campaigns", lambda page: ["Old Campaign"])
+    monkeypatch.setattr(sc.refunnel_export, "list_available_campaigns", lambda page, **kw: ["Old Campaign"])
     monkeypatch.setattr(sc.refunnel_export, "export_media_csv", lambda *a, **kw: "/tmp/fake.csv")
     monkeypatch.setattr(sc, "_ids_from_csv", lambda path: set())  # empty -- tk_1 removed from it
 
@@ -189,7 +189,7 @@ def test_unchanged_campaign_value_is_not_rewritten(monkeypatch):
     gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
 
     write_calls = []
-    monkeypatch.setattr(sc.refunnel_export, "list_available_campaigns", lambda page: ["Evergreen Campaign"])
+    monkeypatch.setattr(sc.refunnel_export, "list_available_campaigns", lambda page, **kw: ["Evergreen Campaign"])
     monkeypatch.setattr(sc.refunnel_export, "export_media_csv", lambda *a, **kw: "/tmp/fake.csv")
     monkeypatch.setattr(sc, "_ids_from_csv", lambda path: {"tk_1"})  # same as before
 
@@ -212,7 +212,7 @@ def test_a_failed_campaign_does_not_stop_the_rest(monkeypatch, capsys):
     gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
 
     monkeypatch.setattr(sc.refunnel_export, "list_available_campaigns",
-                         lambda page: ["Bad Campaign", "Good Campaign"])
+                         lambda page, **kw: ["Bad Campaign", "Good Campaign"])
 
     def fake_export(page, download_dir):
         return "/tmp/fake.csv"
@@ -244,7 +244,7 @@ def test_sabotage_stale_tag_left_in_place_would_be_caught(monkeypatch):
     master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1", campaigns="Old Campaign")])
     gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
 
-    monkeypatch.setattr(sc.refunnel_export, "list_available_campaigns", lambda page: ["Old Campaign"])
+    monkeypatch.setattr(sc.refunnel_export, "list_available_campaigns", lambda page, **kw: ["Old Campaign"])
     monkeypatch.setattr(sc.refunnel_export, "export_media_csv", lambda *a, **kw: "/tmp/fake.csv")
     monkeypatch.setattr(sc, "_ids_from_csv", lambda path: set())
 
