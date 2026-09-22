@@ -18,6 +18,12 @@
 # Tracker the same way an unset spreadsheet_id_secret already skips it
 # for the main export.
 
+# drive_folder_id_secret is the target Google Drive folder for that
+# brand's Approved-video backfill (download_approved_to_drive.py).
+# Confirmed real want: Duderobe doesn't need this right now, only
+# Swoveralls -- a brand missing this is skipped cleanly for the Drive
+# backfill only, same "not set up yet" pattern as everything else.
+
 workspaces:
   - name: Duderobe
     refunnel_workspace_name: Duderobe
@@ -29,6 +35,7 @@ workspaces:
     refunnel_workspace_name: Swoveralls
     spreadsheet_id_secret: SPREADSHEET_ID_SWOVERALLS
     tracker_spreadsheet_id_secret: CONTENT_TRACKER_SPREADSHEET_ID_SWOVERALLS
+    drive_folder_id_secret: DRIVE_FOLDER_ID_SWOVERALLS
     schedule_enabled: true
 
   - name: Defi Snacks
