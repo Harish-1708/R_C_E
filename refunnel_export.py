@@ -411,7 +411,7 @@ CAMPAIGN_APPLY_BUTTON_SELECTOR = "button:has-text('Apply Changes')"
 CLEAR_ALL_FILTERS_SELECTOR = "text=Clear"
 
 
-def list_available_campaigns(page: Page, timeout_ms: int = 15000) -> list:
+def list_available_campaigns(page: Page, debug_dir: Optional[str] = None, timeout_ms: int = 15000) -> list:
     """Reads the full, current list of campaign names straight from the
     Campaign filter's own checklist -- confirmed real requirement: with
     22 campaigns today and more added over time, a hardcoded list would
@@ -421,6 +421,17 @@ def list_available_campaigns(page: Page, timeout_ms: int = 15000) -> list:
     Each campaign name is read from its checkbox row's own text, not
     assumed from a fixed list -- so a campaign being renamed or removed
     on Refunnel's side is reflected automatically too.
+
+    If this finds ZERO campaigns and debug_dir is given, it saves a
+    screenshot + page HTML before returning -- confirmed real need:
+    the button selector was ALREADY once wrong in exactly this
+    "assumed a real HTML tag, Refunnel uses a styled div instead" way
+    (now fixed), and a real run then returned 0 campaigns despite 22
+    genuinely existing -- almost certainly CAMPAIGN_CHECKBOX_ROW_SELECTOR
+    hitting the SAME kind of mismatch. Rather than guess again blindly
+    a second time, this captures real evidence automatically so the
+    fix can be confirmed against actual markup instead of another
+    screenshot-and-report round trip.
     """
     campaign_button = page.locator(CAMPAIGN_FILTER_BUTTON_SELECTOR).first
     campaign_button.click()
@@ -432,7 +443,13 @@ def list_available_campaigns(page: Page, timeout_ms: int = 15000) -> list:
     # meaningful. The rows below are the thing that genuinely needs a
     # moment to appear after the click.
     rows = page.locator(CAMPAIGN_CHECKBOX_ROW_SELECTOR)
-    rows.first.wait_for(state="visible", timeout=timeout_ms)
+    try:
+        rows.first.wait_for(state="visible", timeout=timeout_ms)
+    except Exception:
+        pass  # fall through to the empty-result handling below, which
+        # captures the SAME diagnostic either way (timed out waiting,
+        # or found something that just yielded no usable text) -- both
+        # mean the selector doesn't match what's really on the page.
     count = rows.count()
     names = []
     for i in range(count):
@@ -443,6 +460,19 @@ def list_available_campaigns(page: Page, timeout_ms: int = 15000) -> list:
     # Closes the dropdown without applying anything -- this call is
     # read-only by design, it must never change the active filter.
     page.keyboard.press("Escape")
+
+    if not names and debug_dir:
+        try:
+            out_dir = Path(debug_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            page.screenshot(path=str(out_dir / "campaign_discovery_empty.png"), full_page=True)
+            (out_dir / "campaign_discovery_empty.html").write_text(page.content(), encoding="utf-8")
+            print(f"Found 0 campaigns -- saved a debug snapshot to {out_dir} for diagnosis "
+                  f"(CAMPAIGN_CHECKBOX_ROW_SELECTOR in refunnel_export.py likely needs updating, "
+                  f"same kind of fix as CAMPAIGN_FILTER_BUTTON_SELECTOR already needed).")
+        except Exception as e:
+            print(f"Found 0 campaigns, and couldn't save a debug snapshot either: {e}")
+
     return names
 
 
