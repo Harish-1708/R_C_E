@@ -47,15 +47,6 @@ from playwright.sync_api import Page
 
 import refunnel_auth
 
-# Best guess based on a screenshot showing three icons appear on an
-# Approved card's thumbnail on hover (a link icon, a "+", and a
-# download icon) -- confirmed NOT verified against real markup, unlike
-# the Request-usage-rights selectors elsewhere in this file, which
-# came from an actual HTML dump. Centralized here so a real run's
-# failure message (see download_approved_video) points straight at
-# what to fix, same pattern as refunnel_auth.py's SELECTORS dict.
-DOWNLOAD_BUTTON_SELECTOR = "button[aria-label*='download' i], [class*='download' i]"
-
 
 # Turn this on only after you've manually verified scrape_creator_email()
 # against the real site -- see module docstring and README.
@@ -857,48 +848,86 @@ def _format_progress_line(attempted: int, total: int, found: int, empty_fields: 
             f"{other_failed} other error(s)")
 
 
-def download_approved_video(
+DRIVE_CARD_MENU_BUTTON_SELECTOR = "[aria-label*='more' i], [aria-label*='options' i], button:has-text('⋯'), button:has-text('...')"
+DRIVE_UPLOAD_MENU_ITEM_SELECTOR = "text=Upload to Google Drive"
+DRIVE_MODAL_ALL_FOLDERS_TAB_SELECTOR = "button:has-text('All folders')"
+DRIVE_MODAL_SAVE_BUTTON_SELECTOR = "button:has-text('Save to Drive')"
+
+
+def trigger_native_drive_upload(
     page: Page,
     media_id: str,
-    download_dir: str,
+    drive_folder_name: str,
     scroll_container_selector: str = "#scrollableDiv",
-    download_button_selector: str = DOWNLOAD_BUTTON_SELECTOR,
-    timeout_ms: int = 30000,
-) -> Optional[Path]:
-    """Locates the card for media_id (reusing _scroll_until_card_found,
-    same as email scraping) and clicks its download button, saving the
-    resulting file under download_dir as "<media_id>.<real extension>".
+    debug_dir: Optional[str] = None,
+    timeout_ms: int = 15000,
+) -> bool:
+    """Uses Refunnel's OWN native "Upload to Google Drive" feature to
+    save a post's video directly into a connected Drive folder --
+    confirmed real, replacing an earlier custom download-then-upload
+    design entirely (that approach used a guessed download-button
+    selector never verified against real markup; this uses a feature
+    you confirmed is already connected and working from your own
+    account). Refunnel handles the actual file transfer server-side;
+    this only triggers it and selects the right folder.
 
-    This filename is a TEMPORARY, download-step-only name -- the final
-    Drive filename (brand/handle/id) is applied separately at upload
-    time by download_approved_to_drive.py, keeping this function's only
-    job "get the real file onto disk," not "know Drive's naming".
+    Confirmed real UI flow, from live screenshots: open the card's
+    "..." menu -> "Upload to Google Drive" -> a modal with three tabs
+    (New folder / In root folder / All folders) -> select "All
+    folders" -> pick the target folder by name -> "Save to Drive".
 
-    Returns None if the card can't be located (same meaning as
-    scrape_creator_emails' "couldn't locate" case -- not yet loaded in
-    this virtualized grid, or genuinely not on this page). Raises on
-    a real problem (download button not found/clickable, download
-    timed out) rather than returning None for those, since those
-    usually mean the DOWNLOAD_BUTTON_SELECTOR guess above needs fixing,
-    not "try again later".
+    The exact selectors below are still BEST-GUESS, not verified
+    against real markup -- same caveat as every other new UI element
+    in this project until a live run confirms or corrects them.
+    debug_dir captures a screenshot + HTML on any failure, so a wrong
+    guess can be fixed from real evidence on the next round rather
+    than another blind guess.
+
+    Refunnel's own upload does NOT preserve the agreed naming
+    convention -- it uses its own format (confirmed real example:
+    "INSTAGRAM_REEL_username_2026-09-21-UGC_<last 8 digits of the real
+    id>.mp4"). Finding that file afterward and renaming it is
+    drive_upload.py's job, not this function's -- this only triggers
+    the upload and confirms the modal flow completed.
+
+    Returns True once "Save to Drive" has been clicked. False if the
+    card itself couldn't be located (same meaning as everywhere else
+    in this file). Raises on any other failure in the flow.
     """
     grid_item, _ = _scroll_until_card_found(page, media_id, scroll_container_selector)
     if grid_item is None:
-        return None
+        return False
 
-    grid_item.hover()
-    download_button = grid_item.locator(download_button_selector).first
-    download_button.wait_for(state="visible", timeout=timeout_ms)
+    try:
+        grid_item.hover()
+        menu_button = grid_item.locator(DRIVE_CARD_MENU_BUTTON_SELECTOR).first
+        menu_button.click()
 
-    with page.expect_download(timeout=timeout_ms) as download_info:
-        download_button.click()
-    download = download_info.value
+        upload_item = page.locator(DRIVE_UPLOAD_MENU_ITEM_SELECTOR).first
+        upload_item.wait_for(state="visible", timeout=timeout_ms)
+        upload_item.click()
 
-    suggested = download.suggested_filename or f"{media_id}.mp4"
-    extension = Path(suggested).suffix or ".mp4"
-    dest = Path(download_dir) / f"{media_id}{extension}"
-    download.save_as(str(dest))
-    return dest
+        all_folders_tab = page.locator(DRIVE_MODAL_ALL_FOLDERS_TAB_SELECTOR).first
+        all_folders_tab.wait_for(state="visible", timeout=timeout_ms)
+        all_folders_tab.click()
+
+        folder_row = page.get_by_text(drive_folder_name, exact=False).first
+        folder_row.wait_for(state="visible", timeout=timeout_ms)
+        folder_row.click()
+
+        save_button = page.locator(DRIVE_MODAL_SAVE_BUTTON_SELECTOR).first
+        save_button.click()
+        return True
+    except Exception:
+        if debug_dir:
+            try:
+                out_dir = Path(debug_dir)
+                out_dir.mkdir(parents=True, exist_ok=True)
+                page.screenshot(path=str(out_dir / f"drive_upload_failure_{media_id}.png"), full_page=True)
+                (out_dir / f"drive_upload_failure_{media_id}.html").write_text(page.content(), encoding="utf-8")
+            except Exception:
+                pass
+        raise
 
 
 def scrape_creator_emails(
