@@ -414,7 +414,20 @@ CAMPAIGN_FILTER_BUTTON_SELECTOR = ".campaign-filter-label.clickable, button:has-
 # every page load, so it's read at runtime rather than ever hardcoded.
 CAMPAIGN_DISCLOSURE_TOGGLE_SELECTOR = ".campaign-filter-container [aria-controls]"
 CAMPAIGN_SEARCH_INPUT_SELECTOR = "input[placeholder*='search campaign' i]"
-CAMPAIGN_CHECKBOX_ROW_SELECTOR = "[role='checkbox'], input[type='checkbox']"
+# Confirmed real from the SAME dump, once actually captured with the
+# panel genuinely open: each campaign is
+# `<div class="campaign-option "><input class="campaign-checkbox"
+# type="checkbox"><span title="Exact Campaign Name">Exact Campaign
+# Name</span></div>`. The earlier [role='checkbox']/input[type=checkbox]
+# guess was wrong not because it was a bad guess about checkboxes in
+# general (these genuinely ARE <input type="checkbox">), but because
+# scoping it as "#panel_id " + that whole comma-separated string builds
+# invalid CSS: a leading #id scope only applies to the FIRST
+# comma-branch, leaving the second (input[type='checkbox']) searching
+# the entire page again -- the exact page-wide-leak risk this scoping
+# was meant to prevent in the first place.
+CAMPAIGN_CHECKBOX_ROW_SELECTOR = ".campaign-option"
+CAMPAIGN_CHECKBOX_INPUT_SELECTOR = "input.campaign-checkbox"
 CAMPAIGN_APPLY_BUTTON_SELECTOR = "button:has-text('Apply Changes')"
 CLEAR_ALL_FILTERS_SELECTOR = "text=Clear"
 
@@ -508,6 +521,17 @@ def filter_by_campaign(page: Page, campaign_name: str, timeout_ms: int = 15000) 
     previous campaign) also resets any OTHER stray filter that might
     be active, so each campaign's export genuinely reflects "only this
     campaign", not "this campaign plus whatever was left over".
+
+    Selects the EXACT campaign, not a substring match -- confirmed
+    real, genuine risk from actual campaign data: "Partner with
+    DudeRobe!" and "Partner with DudeRobe" both exist as real,
+    distinct campaigns, differing only by trailing punctuation.
+    Searching for one and taking the first checkbox that merely
+    CONTAINS matching text could silently check the wrong one. Uses
+    Playwright's own exact-text matching (get_by_text(..., exact=True))
+    rather than string-interpolating campaign_name into a raw CSS
+    selector, which also sidesteps any issue if a campaign name ever
+    contains a quote or other CSS-special character.
     """
     clear_all_filters(page)
 
@@ -518,9 +542,11 @@ def filter_by_campaign(page: Page, campaign_name: str, timeout_ms: int = 15000) 
     search_box.wait_for(state="visible", timeout=timeout_ms)
     search_box.fill(campaign_name)
 
-    checkbox = page.locator(CAMPAIGN_CHECKBOX_ROW_SELECTOR).first
-    checkbox.wait_for(state="visible", timeout=timeout_ms)
-    checkbox.click()
+    row = page.locator(CAMPAIGN_CHECKBOX_ROW_SELECTOR).filter(
+        has=page.get_by_text(campaign_name, exact=True)
+    ).first
+    row.wait_for(state="visible", timeout=timeout_ms)
+    row.locator(CAMPAIGN_CHECKBOX_INPUT_SELECTOR).click()
 
     apply_button = page.locator(CAMPAIGN_APPLY_BUTTON_SELECTOR).first
     apply_button.click()
