@@ -5,5 +5,10 @@ PyYAML>=6.0
 # Used by build_preview_workbook.py -- was missing entirely, so that
 # script would ImportError on a clean checkout.
 openpyxl>=3.1
+# Used by drive_upload.py, for download_approved_to_drive.py's Drive
+# backfill -- uploads under the SAME service account already used for
+# Sheets access, no new credential type.
+google-api-python-client>=2.100
+google-auth>=2.30
 pytest>=8.0
 pyflakes>=3.2
