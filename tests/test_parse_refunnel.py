@@ -26,6 +26,8 @@ from parse_refunnel import (
     HUMAN_REVIEW_COLUMNS,
     MASTER_COLUMNS,
     is_reviewed_value,
+    build_drive_filename,
+    rows_needing_drive_upload,
 )
 
 MEDIA_CSV = os.path.join(os.path.dirname(__file__), "fixtures", "sample_media.csv")
@@ -545,3 +547,67 @@ def test_sabotage_any_nonblank_treated_as_reviewed_would_be_caught():
     with pytest.raises(AssertionError):
         assert result is True  # wrong -- "No" must not mean reviewed
     assert result is False  # confirms actual correct behavior
+
+
+# ---------- build_drive_filename ----------
+
+def test_build_drive_filename_matches_the_agreed_convention():
+    name = build_drive_filename("Swoveralls", "ayorobynbanks", "tk_7660267483391151373")
+    assert name == "Swoveralls | @ayorobynbanks | tk_7660267483391151373.mp4"
+
+
+def test_build_drive_filename_does_not_double_up_the_at_sign():
+    name = build_drive_filename("Swoveralls", "@ayorobynbanks", "tk_1")
+    assert name == "Swoveralls | @ayorobynbanks | tk_1.mp4"
+
+
+def test_build_drive_filename_supports_a_different_extension():
+    name = build_drive_filename("Swoveralls", "alice", "ig_1", extension="mov")
+    assert name.endswith(".mov")
+
+
+def test_sabotage_two_approved_videos_same_creator_would_collide_without_the_id():
+    # proves the exact real risk this design avoids
+    plain_only = "Swoveralls | @alice"  # what a name-only scheme would produce for BOTH videos
+    name_1 = build_drive_filename("Swoveralls", "alice", "tk_1")
+    name_2 = build_drive_filename("Swoveralls", "alice", "tk_2")
+    with pytest.raises(AssertionError):
+        assert name_1 == plain_only and name_2 == plain_only  # wrong -- would collide
+    assert name_1 != name_2  # confirms actual correct behavior: always unique
+
+
+# ---------- rows_needing_drive_upload ----------
+
+def test_rows_needing_drive_upload_selects_only_approved_and_not_yet_uploaded():
+    master_rows = {
+        "tk_1": {"rights_status": "GRANTED"},         # approved, never uploaded -- selected
+        "tk_2": {"rights_status": "GRANTED"},         # approved, already uploaded -- excluded
+        "tk_3": {"rights_status": "REQUESTED"},       # not approved at all -- excluded
+        "tk_4": {"rights_status": "NONE"},
+    }
+    existing = {"tk_2": "2026-09-01T00:00:00+00:00"}
+    result = rows_needing_drive_upload(master_rows, existing)
+    assert set(result.keys()) == {"tk_1"}
+
+
+def test_rows_needing_drive_upload_never_reprocesses_an_uploaded_id():
+    # the explicit "add new ones, don't start from the beginning" requirement
+    master_rows = {"tk_1": {"rights_status": "GRANTED"}}
+    existing = {"tk_1": "2026-09-01T00:00:00+00:00"}
+    result = rows_needing_drive_upload(master_rows, existing)
+    assert result == {}
+
+
+def test_rows_needing_drive_upload_handles_no_existing_uploads_yet():
+    master_rows = {"tk_1": {"rights_status": "GRANTED"}, "tk_2": {"rights_status": "GRANTED"}}
+    result = rows_needing_drive_upload(master_rows, {})
+    assert set(result.keys()) == {"tk_1", "tk_2"}
+
+
+def test_sabotage_reprocessing_an_uploaded_id_would_be_caught():
+    master_rows = {"tk_1": {"rights_status": "GRANTED"}}
+    existing = {"tk_1": "2026-09-01T00:00:00+00:00"}
+    result = rows_needing_drive_upload(master_rows, existing)
+    with pytest.raises(AssertionError):
+        assert "tk_1" in result  # wrong -- already uploaded, must not repeat
+    assert result == {}  # confirms actual correct behavior
