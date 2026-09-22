@@ -48,8 +48,10 @@ the rest.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import traceback
+from pathlib import Path
 
 import gspread
 import gspread.exceptions
@@ -115,7 +117,7 @@ def sync_campaigns_for_brand(
         campaign_to_ids: dict = {}
         for campaign_name in campaigns:
             try:
-                refunnel_export.filter_by_campaign(page, campaign_name)
+                refunnel_export.filter_by_campaign(page, campaign_name, debug_dir=f"{download_dir}/debug")
                 refunnel_export.scroll_to_load_all(page)
                 csv_path = refunnel_export.export_media_csv(page, download_dir)
                 ids = _ids_from_csv(csv_path)
@@ -124,6 +126,22 @@ def sync_campaigns_for_brand(
             except Exception as e:
                 print(f"{brand}: couldn't process campaign {campaign_name!r}: "
                       f"{type(e).__name__}: {e}. Skipping it this run.")
+                # A snapshot per FAILING campaign, not just filter_by_campaign's
+                # own post-Apply capture -- confirmed real need: a live run had
+                # every campaign fail differently (one stuck on a disabled Apply
+                # button, others stalling scroll_to_load_all identically at
+                # "20 of 2795", the same as the full unfiltered library), and
+                # telling those apart needs to see the page at the MOMENT each
+                # one actually failed, not just after Apply was clicked.
+                try:
+                    safe_name = re.sub(r"[^A-Za-z0-9]+", "_", campaign_name)[:60]
+                    debug_dir_path = Path(f"{download_dir}/debug")
+                    debug_dir_path.mkdir(parents=True, exist_ok=True)
+                    page.screenshot(path=str(debug_dir_path / f"failure_{safe_name}.png"), full_page=True)
+                    (debug_dir_path / f"failure_{safe_name}.html").write_text(page.content(), encoding="utf-8")
+                except Exception as snapshot_error:
+                    print(f"{brand}: couldn't save a failure snapshot for {campaign_name!r} either: "
+                          f"{snapshot_error}")
 
         refunnel_export.clear_all_filters(page)
 
