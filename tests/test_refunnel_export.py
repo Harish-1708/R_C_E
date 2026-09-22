@@ -23,6 +23,7 @@ from refunnel_export import (
     _is_target_crashed,
     _scroll_until_card_found,
     _is_logged_out,
+    download_approved_video,
 )
 
 
@@ -603,3 +604,124 @@ def test_sabotage_missed_logout_would_be_caught():
     with pytest.raises(AssertionError):
         assert result is False  # wrong -- this IS the logged-out page
     assert result is True
+
+
+# ---------- download_approved_video ----------
+
+class _FakeDownload:
+    def __init__(self, suggested_filename, save_dest_recorder):
+        self.suggested_filename = suggested_filename
+        self._recorder = save_dest_recorder
+
+    def save_as(self, path):
+        self._recorder.append(path)
+        with open(path, "wb") as f:
+            f.write(b"fake video bytes")
+
+
+class _FakeDownloadInfo:
+    def __init__(self, download):
+        self.value = download
+
+
+class _FakeButton:
+    def __init__(self, owner):
+        self.owner = owner
+
+    def wait_for(self, state=None, timeout=None):
+        pass
+
+    def click(self):
+        self.owner.clicked = True
+
+
+class _FakeGridItem:
+    def __init__(self, owner):
+        self.owner = owner
+        self.hovered = False
+
+    def hover(self):
+        self.hovered = True
+
+    def locator(self, _selector):
+        class _L:
+            @property
+            def first(_self):
+                return _FakeButton(self.owner)
+        return _L()
+
+
+class _DownloadPage:
+    """Page fake wired so _scroll_until_card_found immediately finds
+    the card (isolating this test to download_approved_video's OWN
+    logic, not scroll-search, which already has its own tests)."""
+
+    def __init__(self, suggested_filename="tk_1_export.mp4", card_found=True):
+        self.clicked = False
+        self._card_found = card_found
+        self._saved_paths = []
+        self._suggested_filename = suggested_filename
+
+    def locator(self, _selector):
+        page = self
+
+        class _L:
+            def count(_self):
+                return 1 if page._card_found else 0
+
+            @property
+            def first(_self):
+                return _FakeGridItem(page)
+        return _L()
+
+    def evaluate(self, *_a, **_kw):
+        return {"scrollTop": 0, "scrollHeight": 100, "clientHeight": 100}
+
+    def wait_for_timeout(self, _ms):
+        pass
+
+    def expect_download(self, timeout=None):
+        page = self
+
+        class _Ctx:
+            def __enter__(_self):
+                return _FakeDownloadInfo(_FakeDownload(page._suggested_filename, page._saved_paths))
+
+            def __exit__(_self, *exc):
+                return False
+        return _Ctx()
+
+
+def test_downloads_and_saves_under_the_media_id(tmp_path):
+    page = _DownloadPage(suggested_filename="export_98213.mp4")
+    result = download_approved_video(page, "tk_1", str(tmp_path))
+    assert result == tmp_path / "tk_1.mp4"
+    assert result.exists()
+    assert page.clicked is True
+
+
+def test_preserves_the_real_downloaded_extension(tmp_path):
+    page = _DownloadPage(suggested_filename="clip.mov")
+    result = download_approved_video(page, "tk_2", str(tmp_path))
+    assert result.suffix == ".mov"
+
+
+def test_defaults_to_mp4_if_no_extension_suggested(tmp_path):
+    page = _DownloadPage(suggested_filename="")
+    result = download_approved_video(page, "tk_3", str(tmp_path))
+    assert result.suffix == ".mp4"
+
+
+def test_returns_none_if_the_card_cannot_be_located(tmp_path):
+    page = _DownloadPage(card_found=False)
+    result = download_approved_video(page, "tk_missing", str(tmp_path))
+    assert result is None
+    assert page.clicked is False
+
+
+def test_sabotage_wrong_temp_filename_would_be_caught(tmp_path):
+    page = _DownloadPage(suggested_filename="whatever_refunnel_calls_it.mp4")
+    result = download_approved_video(page, "tk_7660267483391151373", str(tmp_path))
+    with pytest.raises(AssertionError):
+        assert result.name == "whatever_refunnel_calls_it.mp4"  # wrong -- must use media_id
+    assert result.name == "tk_7660267483391151373.mp4"  # confirms actual correct behavior
