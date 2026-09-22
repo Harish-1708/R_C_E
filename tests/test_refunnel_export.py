@@ -14,6 +14,7 @@ import pytest
 
 from refunnel_export import (
     scroll_to_load_all,
+    scroll_to_top,
     ExportError,
     select_workspace,
     _safe_click,
@@ -1327,3 +1328,47 @@ def test_sabotage_wrong_folder_selected_would_be_caught(_stub_scroll_found):
     with pytest.raises(AssertionError):
         assert "folder:Refunnel - Swoveralls" in page.clicks  # wrong -- that row was never actually clicked
     assert "folder:Refunnel - Swoveralls" not in page.clicks  # confirms it correctly never matched
+
+
+# ---------- scroll_to_top: the "stuck at the bottom" bug ----------
+
+class _ScrollTopTrackingPage:
+    def __init__(self, initial_scroll_top=691285):
+        self.scroll_top = initial_scroll_top
+        self.evaluate_calls = []
+
+    def evaluate(self, js):
+        self.evaluate_calls.append(js)
+        self.scroll_top = 0  # simulates the real DOM assignment happening
+
+    def wait_for_timeout(self, ms):
+        pass
+
+
+def test_scroll_to_top_resets_scroll_position():
+    page = _ScrollTopTrackingPage(initial_scroll_top=691285)
+    scroll_to_top(page)
+    assert page.scroll_top == 0
+
+
+def test_scroll_to_top_targets_the_given_container_selector():
+    page = _ScrollTopTrackingPage()
+    scroll_to_top(page, scroll_container_selector="#customContainer")
+    assert "#customContainer" in page.evaluate_calls[0]
+
+
+def test_scroll_to_top_defaults_to_the_real_scrollable_div():
+    page = _ScrollTopTrackingPage()
+    scroll_to_top(page)
+    assert "#scrollableDiv" in page.evaluate_calls[0]
+
+
+def test_sabotage_scroll_never_reset_would_be_caught():
+    # confirmed real, exact bug: without this call, the page stayed
+    # stuck at the bottom (scrollTop == scrollHeight - clientHeight)
+    # for the entire remainder of a real run
+    page = _ScrollTopTrackingPage(initial_scroll_top=691285)
+    scroll_to_top(page)
+    with pytest.raises(AssertionError):
+        assert page.scroll_top == 691285  # wrong -- would mean the bug is still present
+    assert page.scroll_top == 0  # confirms actual correct behavior
