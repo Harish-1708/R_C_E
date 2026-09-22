@@ -29,6 +29,7 @@ from parse_refunnel import (
     build_drive_filename,
     rows_needing_drive_upload,
     _get_post_link,
+    build_campaign_membership,
 )
 
 MEDIA_CSV = os.path.join(os.path.dirname(__file__), "fixtures", "sample_media.csv")
@@ -648,3 +649,46 @@ def test_sabotage_the_silent_blank_link_regression_would_be_caught():
     with pytest.raises(AssertionError):
         assert result.master["ig_1001"]["original_post_link"] == ""  # wrong -- would mean the bug is back
     assert result.master["ig_1001"]["original_post_link"]  # confirms actual correct behavior: non-blank
+
+
+# ---------- build_campaign_membership: many-to-many, zero-or-more ----------
+
+def test_a_post_in_one_campaign():
+    result = build_campaign_membership({"Evergreen Campaign": {"tk_1"}})
+    assert result == {"tk_1": "Evergreen Campaign"}
+
+
+def test_a_post_in_multiple_campaigns_is_joined():
+    # confirmed real requirement: a post can belong to several campaigns
+    result = build_campaign_membership({
+        "Evergreen Campaign": {"tk_1"},
+        "Product Gifting - Cold Outbound": {"tk_1"},
+    })
+    assert result["tk_1"] == "Evergreen Campaign, Product Gifting - Cold Outbound"
+
+
+def test_a_post_in_no_campaign_is_simply_absent():
+    # confirmed real: most of the ~6000+ posts belong to no campaign at all
+    result = build_campaign_membership({"Evergreen Campaign": {"tk_1"}})
+    assert "tk_99" not in result
+
+
+def test_multiple_posts_multiple_campaigns_no_cross_contamination():
+    result = build_campaign_membership({
+        "Campaign A": {"tk_1", "tk_2"},
+        "Campaign B": {"tk_2", "tk_3"},
+    })
+    assert result["tk_1"] == "Campaign A"
+    assert result["tk_2"] in ("Campaign A, Campaign B", "Campaign B, Campaign A")
+    assert result["tk_3"] == "Campaign B"
+
+
+def test_empty_campaign_dict_produces_empty_result():
+    assert build_campaign_membership({}) == {}
+
+
+def test_sabotage_a_no_campaign_post_wrongly_tagged_would_be_caught():
+    result = build_campaign_membership({"Campaign A": {"tk_1"}})
+    with pytest.raises(AssertionError):
+        assert "tk_2" in result  # wrong -- tk_2 was never in any campaign export
+    assert "tk_2" not in result  # confirms actual correct behavior
