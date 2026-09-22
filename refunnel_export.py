@@ -1291,23 +1291,23 @@ def scrape_creator_emails(
                 _save_scrape_failure_snapshot(page, debug_dir, media_id)
                 debug_snapshot_saved = True
 
-            # Same cascading-failure protection as the "couldn't
-            # locate" case above -- confirmed real: this branch also
-            # catches the detached-click retry loop's own exhaustion,
-            # whose internal _scroll_until_card_found() re-searches
-            # (see above) can just as easily drag the scroll position
-            # down to the bottom while failing to re-find a recycled
-            # card. Reset defensively here too, for ANY exception that
-            # reaches this point, not just the ones already known to
-            # cause it -- cheap insurance against the next id
-            # inheriting a broken scroll position for an as-yet-unseen
-            # reason.
-            try:
-                scroll_to_top(page, scroll_container_selector)
-            except Exception:
-                pass  # the page itself may be in worse shape (crashed,
-                # logged out) -- the checks just below handle those; a
-                # failed reset attempt here shouldn't mask the real error
+            # REMOVED a scroll_to_top() reset that used to be here --
+            # confirmed real, harmful over-reach: a live run showed
+            # EVERY single item failing identically at the click step
+            # ("element detached") right after this branch started
+            # resetting unconditionally for ANY exception, including
+            # ones with nothing to do with scroll position at all (a
+            # menu never appearing, for instance). The reset itself
+            # was very likely destabilizing the virtualized list right
+            # before the NEXT item's click attempt, turning one
+            # unrelated failure into a self-perpetuating cascade of
+            # detached-click failures -- the opposite of what this was
+            # meant to prevent. Only the "couldn't locate" branch above
+            # has DIRECT, confirmed evidence (the diagnostics dict
+            # showing scrollTop genuinely at the real bottom) that a
+            # reset is actually needed; this general branch never did,
+            # it was defensive insurance that turned out to cause the
+            # exact class of problem it was guarding against.
 
             consecutive_failures += 1
             consecutive_empty_fields = 0
