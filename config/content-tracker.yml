@@ -1,0 +1,49 @@
+name: Content Tracker
+
+# Deliberately entirely separate from the Refunnel Sync workflow -- no
+# Playwright/browser involved at all (pure Google Sheets read + write),
+# so no session caching, no per-workspace matrix, no chromium install.
+# Runs 2 hours after Refunnel Sync's 03:00 UTC schedule, so each
+# brand's Master Data has had a chance to finish updating first.
+
+on:
+  schedule:
+    - cron: "0 5 * * *"  # 05:00 UTC daily
+  workflow_dispatch: {}
+
+jobs:
+  build-tracker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements-sheets.txt
+
+      - name: Build the Content Tracker
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: service_account.json
+          GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          # One Refunnel-export secret per brand, matching
+          # config/workspaces.yaml's spreadsheet_id_secret values --
+          # brands without a secret set here are just skipped, not a
+          # failure (see build_content_tracker.py's docstring).
+          SPREADSHEET_ID_DUDEROBE: ${{ secrets.SPREADSHEET_ID_DUDEROBE }}
+          SPREADSHEET_ID_SWOVERALLS: ${{ secrets.SPREADSHEET_ID_SWOVERALLS }}
+          SPREADSHEET_ID_DEFI_SNACKS: ${{ secrets.SPREADSHEET_ID_DEFI_SNACKS }}
+          SPREADSHEET_ID_KELSON: ${{ secrets.SPREADSHEET_ID_KELSON }}
+          # One Content Tracker secret per brand, matching
+          # config/workspaces.yaml's tracker_spreadsheet_id_secret
+          # values -- each brand now gets its own dedicated tracker
+          # spreadsheet, not a shared one with a tab per brand.
+          CONTENT_TRACKER_SPREADSHEET_ID_DUDEROBE: ${{ secrets.CONTENT_TRACKER_SPREADSHEET_ID_DUDEROBE }}
+          CONTENT_TRACKER_SPREADSHEET_ID_SWOVERALLS: ${{ secrets.CONTENT_TRACKER_SPREADSHEET_ID_SWOVERALLS }}
+          CONTENT_TRACKER_SPREADSHEET_ID_DEFI_SNACKS: ${{ secrets.CONTENT_TRACKER_SPREADSHEET_ID_DEFI_SNACKS }}
+          CONTENT_TRACKER_SPREADSHEET_ID_KELSON: ${{ secrets.CONTENT_TRACKER_SPREADSHEET_ID_KELSON }}
+        run: |
+          echo "$GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT" > service_account.json
+          python -u build_content_tracker.py
