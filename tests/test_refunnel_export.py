@@ -1563,3 +1563,108 @@ def test_sabotage_clicking_the_inner_card_would_be_caught():
     with pytest.raises(AssertionError):
         assert '".usage-rights-request-card, .usage-rights-requested-card"' in source
     assert "[aria-controls]" in source  # confirms the real, correct target
+
+
+# ---------- Pending review posts: structurally unscrapeable (confirmed from real markup) ----------
+
+def test_real_markup_confirms_pending_review_shares_the_requested_card_class():
+    # confirmed real, genuine trap this guards against: a "Pending
+    # review" card uses .usage-rights-requested-card -- the SAME class
+    # as a real "Usage rights requested" card -- so the class alone
+    # cannot distinguish them. Only the .urq-title text can.
+    from refunnel_export import PENDING_REVIEW_TITLE_TEXT
+    assert PENDING_REVIEW_TITLE_TEXT == "Pending review"
+
+
+class _PendingReviewPage(_MinimalScrapePage):
+    """A card that IS found, and IS a Pending review card -- confirmed
+    real: its menu has no usage-rights option at all, so opening it
+    could only ever time out."""
+
+    def __init__(self):
+        super().__init__()
+        self.toggle_clicked = False
+
+    def locator(self, selector):
+        page = self
+
+        class _Found:
+            def count(_self):
+                return 1
+
+            @property
+            def first(_self):
+                class _Row:
+                    def hover(_s):
+                        pass
+
+                    def locator(_s, sel):
+                        class _Inner:
+                            def count(__s):
+                                # the Pending-review title IS present
+                                return 1 if "urq-title" in sel else 1
+
+                            @property
+                            def first(__s):
+                                return __s
+
+                            def wait_for(__s, state=None, timeout=None):
+                                pass
+
+                            def scroll_into_view_if_needed(__s, timeout=None):
+                                pass
+
+                            def check(__s):
+                                page.toggle_clicked = True
+
+                            def click(__s):
+                                page.toggle_clicked = True
+                        return _Inner()
+                return _Row()
+        return _Found()
+
+
+def test_pending_review_post_is_skipped_without_opening_its_menu(monkeypatch, capsys):
+    import refunnel_export as re_module
+    monkeypatch.setattr(re_module, "_is_logged_out", lambda page: False)
+    monkeypatch.setattr(re_module, "_pace", lambda *a, **kw: None)
+
+    page = _PendingReviewPage()
+    from refunnel_export import scrape_creator_emails
+
+    scrape_creator_emails(page, media_rows={"ig_1": {}}, media_ids=["ig_1"])
+
+    out = capsys.readouterr().out
+    assert "Pending review" in out
+    assert "Not a failure" in out
+    assert page.toggle_clicked is False  # never even opened the menu
+
+
+def test_pending_review_skip_is_reported_in_the_summary(monkeypatch, capsys):
+    import refunnel_export as re_module
+    monkeypatch.setattr(re_module, "_is_logged_out", lambda page: False)
+    monkeypatch.setattr(re_module, "_pace", lambda *a, **kw: None)
+
+    page = _PendingReviewPage()
+    from refunnel_export import scrape_creator_emails
+
+    scrape_creator_emails(page, media_rows={"ig_1": {}, "ig_2": {}}, media_ids=["ig_1", "ig_2"])
+
+    out = capsys.readouterr().out
+    assert "skipped 2 post(s)" in out
+    assert "Approving or declining them" in out
+
+
+def test_sabotage_opening_a_pending_review_menu_would_be_caught(monkeypatch):
+    import refunnel_export as re_module
+    monkeypatch.setattr(re_module, "_is_logged_out", lambda page: False)
+    monkeypatch.setattr(re_module, "_pace", lambda *a, **kw: None)
+
+    page = _PendingReviewPage()
+    from refunnel_export import scrape_creator_emails
+
+    scrape_creator_emails(page, media_rows={"ig_1": {}}, media_ids=["ig_1"])
+
+    with pytest.raises(AssertionError):
+        assert page.toggle_clicked is True  # wrong -- that's the old, doomed behavior
+    assert page.toggle_clicked is False  # confirms it correctly skipped before clicking
