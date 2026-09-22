@@ -585,6 +585,28 @@ def filter_by_campaign(page: Page, campaign_name: str, debug_dir: Optional[str] 
             print(f"Couldn't save post-Apply debug snapshot for {campaign_name!r}: {e}")
 
 
+NO_RESULTS_TEXT_PATTERN = "No results for these filter"
+
+
+def has_no_results_for_filter(page: Page) -> bool:
+    """True if Refunnel is showing its own "no matching content" empty
+    state -- confirmed real, exact text from a live run's debug
+    screenshots: "No results for these filters(s)" (Refunnel's own
+    typo -- matched on the stable leading substring so either spelling
+    of the trailing "(s)" still counts). Checked BEFORE attempting to
+    scroll/export a campaign-filtered view, since a genuinely empty
+    result has no "<n> of <total> media" counter at all -- confirmed
+    real: without this check, scroll_to_load_all() raised ExportError
+    trying to find a counter that will never exist, treating a
+    perfectly legitimate "this campaign has 0 posts" answer as a
+    failure to retry rather than a real, valid result to record.
+    """
+    try:
+        return NO_RESULTS_TEXT_PATTERN in page.inner_text("body")
+    except Exception:
+        return False
+
+
 def clear_all_filters(page: Page) -> None:
     """Resets every active filter on the Content view -- used between
     campaigns so one campaign's export can never accidentally include
