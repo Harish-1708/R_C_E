@@ -282,6 +282,25 @@ def build_drive_filename(brand: str, username: str, media_id: str, extension: st
     return f"{brand} | {handle} | {media_id}.{extension}"
 
 
+def drive_match_fragment(media_id: str) -> str:
+    """The substring that identifies media_id inside a filename
+    Refunnel's OWN native "Upload to Google Drive" feature produces.
+
+    CONFIRMED REAL, exact evidence: media_id "ig_18018159830937735"
+    was uploaded by Refunnel's native feature as
+    "INSTAGRAM_REEL_tayloredforthekingdom_2026-09-21-UGC_30937735.mp4"
+    -- the trailing number is the LAST 8 DIGITS of the real id's
+    numeric part (confirmed: "18018159830937735"[-8:] == "30937735",
+    an exact match, not a guess). Used to find that file afterward (by
+    searching the target Drive folder for this fragment) so it can be
+    renamed to the actual convention -- Refunnel's own upload doesn't
+    offer any naming control, so getting OUR naming means finding the
+    file it created and renaming it after the fact.
+    """
+    numeric = media_id.split("_", 1)[-1]
+    return numeric[-8:] if len(numeric) >= 8 else numeric
+
+
 CAMPAIGN_SEPARATOR = ", "
 
 
