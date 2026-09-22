@@ -192,14 +192,11 @@ def main() -> int:
             print("Writing Master Data once before scraping starts, so progress can be saved incrementally...")
             sheets_sync.sync_tab(master_client, parse_refunnel.MASTER_COLUMNS, result.master, never_delete=True)
 
-            # Confirmed real, serious bug: the page is still scrolled
-            # to the BOTTOM from scroll_to_load_all()'s export pass
-            # above -- scrape_creator_emails() searches forward-only,
-            # starting from wherever the page currently is, so without
-            # this it can never reach the newest posts (searched for
-            # first). See scroll_to_top()'s own docstring for the full
-            # confirmed evidence from a real failed run.
-            refunnel_export.scroll_to_top(page)
+            # scrape_creator_emails() now owns its own scroll reset
+            # entirely (both at its own start and after every failed
+            # search) -- see its docstring and scroll_to_top()'s for
+            # the full confirmed evidence. No separate call needed
+            # here anymore.
 
             def _save_email_incrementally(media_id: str, email: str) -> None:
                 found = master_client.update_single_cell(media_id, "creator_email", email)
