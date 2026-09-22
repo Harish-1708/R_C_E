@@ -859,3 +859,54 @@ def test_sabotage_reverting_to_button_only_selector_would_be_caught():
     with pytest.raises(AssertionError):
         assert CAMPAIGN_FILTER_BUTTON_SELECTOR == "button:has-text('Campaign')"  # wrong -- the old, broken guess
     assert ".campaign-filter-label" in CAMPAIGN_FILTER_BUTTON_SELECTOR  # confirms the real fix is in place
+
+
+# ---------- list_available_campaigns: auto-diagnostic on 0 results ----------
+
+class _EmptyCampaignPage(_CampaignPage):
+    """Simulates the exact real symptom: the button click works, but
+    the checkbox-row selector matches nothing at all, same kind of
+    "assumed a real tag, Refunnel uses a styled element" mismatch the
+    button selector already had."""
+
+    def screenshot(self, path, full_page=True):
+        self.screenshot_path = path
+
+    def content(self):
+        return "<html>fake page content</html>"
+
+
+def test_saves_a_debug_snapshot_when_zero_campaigns_found(tmp_path):
+    from refunnel_export import list_available_campaigns
+    page = _EmptyCampaignPage([])  # no names -- the real symptom
+    names = list_available_campaigns(page, debug_dir=str(tmp_path))
+    assert names == []
+    assert (tmp_path / "campaign_discovery_empty.png").exists() or hasattr(page, "screenshot_path")
+    assert (tmp_path / "campaign_discovery_empty.html").exists()
+
+
+def test_does_not_save_a_snapshot_when_campaigns_are_found(tmp_path):
+    from refunnel_export import list_available_campaigns
+    page = _EmptyCampaignPage(["Evergreen Campaign"])
+    list_available_campaigns(page, debug_dir=str(tmp_path))
+    assert not (tmp_path / "campaign_discovery_empty.png").exists()
+    assert not (tmp_path / "campaign_discovery_empty.html").exists()
+
+
+def test_no_debug_dir_means_no_crash_on_empty_result():
+    from refunnel_export import list_available_campaigns
+    page = _EmptyCampaignPage([])
+    names = list_available_campaigns(page, debug_dir=None)  # must not raise
+    assert names == []
+
+
+def test_sabotage_silent_empty_result_would_be_caught(tmp_path):
+    # the exact real problem: 0 campaigns found with NO diagnostic
+    # evidence at all would mean guessing blindly a second time
+    from refunnel_export import list_available_campaigns
+    page = _EmptyCampaignPage([])
+    list_available_campaigns(page, debug_dir=str(tmp_path))
+    snapshot_saved = (tmp_path / "campaign_discovery_empty.html").exists()
+    with pytest.raises(AssertionError):
+        assert snapshot_saved is False  # wrong -- would mean no evidence was captured
+    assert snapshot_saved is True  # confirms actual correct behavior
