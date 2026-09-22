@@ -83,33 +83,69 @@ def _master_row(media_id, username="alice", email="", products="The DudeRobe", s
 def test_skips_brand_with_no_spreadsheet_id_secret_set(monkeypatch, capsys):
     monkeypatch.delenv("SPREADSHEET_ID_SWOVERALLS", raising=False)
     gc = FakeClient({})
-    tracker_sh = FakeSpreadsheet()
-    sync_one_brand(gc, tracker_sh, {"name": "Swoveralls", "spreadsheet_id_secret": "SPREADSHEET_ID_SWOVERALLS"})
+    sync_one_brand(gc, {
+        "name": "Swoveralls",
+        "spreadsheet_id_secret": "SPREADSHEET_ID_SWOVERALLS",
+        "tracker_spreadsheet_id_secret": "CONTENT_TRACKER_SPREADSHEET_ID_SWOVERALLS",
+    })
     assert "skipping" in capsys.readouterr().out
-    assert tracker_sh._worksheets == {}  # nothing written
+
+
+def test_skips_brand_with_no_tracker_secret_configured(monkeypatch, capsys):
+    # confirmed real need: a brand can have its Refunnel export set up
+    # without its Content Tracker being configured yet -- skip cleanly,
+    # not a crash, same as every other "not set up yet" case
+    monkeypatch.setenv("SPREADSHEET_ID_DUDEROBE", "sheet123")
+    gc = FakeClient({})
+    sync_one_brand(gc, {"name": "Duderobe", "spreadsheet_id_secret": "SPREADSHEET_ID_DUDEROBE"})
+    assert "skipping" in capsys.readouterr().out
+
+
+def test_skips_brand_with_tracker_secret_set_but_env_var_missing(monkeypatch, capsys):
+    monkeypatch.setenv("SPREADSHEET_ID_DUDEROBE", "sheet123")
+    monkeypatch.delenv("CONTENT_TRACKER_SPREADSHEET_ID_DUDEROBE", raising=False)
+    gc = FakeClient({})
+    sync_one_brand(gc, {
+        "name": "Duderobe",
+        "spreadsheet_id_secret": "SPREADSHEET_ID_DUDEROBE",
+        "tracker_spreadsheet_id_secret": "CONTENT_TRACKER_SPREADSHEET_ID_DUDEROBE",
+    })
+    assert "skipping" in capsys.readouterr().out
 
 
 def test_skips_brand_with_no_master_data_tab_yet(monkeypatch, capsys):
     monkeypatch.setenv("SPREADSHEET_ID_DUDEROBE", "sheet123")
+    monkeypatch.setenv("CONTENT_TRACKER_SPREADSHEET_ID_DUDEROBE", "tracker123")
     source_sh = FakeSpreadsheet(worksheets={})  # no "Master Data" tab
-    gc = FakeClient({"sheet123": source_sh})
     tracker_sh = FakeSpreadsheet()
-    sync_one_brand(gc, tracker_sh, {"name": "Duderobe", "spreadsheet_id_secret": "SPREADSHEET_ID_DUDEROBE"})
+    gc = FakeClient({"sheet123": source_sh, "tracker123": tracker_sh})
+    sync_one_brand(gc, {
+        "name": "Duderobe",
+        "spreadsheet_id_secret": "SPREADSHEET_ID_DUDEROBE",
+        "tracker_spreadsheet_id_secret": "CONTENT_TRACKER_SPREADSHEET_ID_DUDEROBE",
+    })
     assert "skipping" in capsys.readouterr().out
     assert tracker_sh._worksheets == {}
 
 
-def test_happy_path_creates_and_populates_the_brand_tab(monkeypatch, capsys):
+def test_happy_path_creates_and_populates_the_dedicated_tracker_sheet(monkeypatch, capsys):
     monkeypatch.setenv("SPREADSHEET_ID_DUDEROBE", "sheet123")
+    monkeypatch.setenv("CONTENT_TRACKER_SPREADSHEET_ID_DUDEROBE", "tracker123")
     master_ws = FakeWorksheet(rows=[MASTER_HEADER, _master_row("tk_1"), _master_row("tk_2", username="bob")])
     source_sh = FakeSpreadsheet(worksheets={"Master Data": master_ws})
-    gc = FakeClient({"sheet123": source_sh})
-    tracker_sh = FakeSpreadsheet()
+    tracker_sh = FakeSpreadsheet()  # a SEPARATE spreadsheet, not a tab in source_sh
+    gc = FakeClient({"sheet123": source_sh, "tracker123": tracker_sh})
 
-    sync_one_brand(gc, tracker_sh, {"name": "Duderobe", "spreadsheet_id_secret": "SPREADSHEET_ID_DUDEROBE"})
+    sync_one_brand(gc, {
+        "name": "Duderobe",
+        "spreadsheet_id_secret": "SPREADSHEET_ID_DUDEROBE",
+        "tracker_spreadsheet_id_secret": "CONTENT_TRACKER_SPREADSHEET_ID_DUDEROBE",
+    })
 
-    assert "Duderobe" in tracker_sh._worksheets
-    tracker_ws = tracker_sh._worksheets["Duderobe"]
+    # written to the FIXED tab name inside the brand's OWN spreadsheet,
+    # not a tab named after the brand inside some shared spreadsheet
+    assert "Content Tracker" in tracker_sh._worksheets
+    tracker_ws = tracker_sh._worksheets["Content Tracker"]
     header = tracker_ws.rows[0]
     id_idx = header.index("id")
     creator_idx = header.index("Creator")
@@ -122,12 +158,12 @@ def test_happy_path_creates_and_populates_the_brand_tab(monkeypatch, capsys):
 
 def test_existing_tracker_row_is_frozen_and_refreshed_correctly(monkeypatch):
     monkeypatch.setenv("SPREADSHEET_ID_DUDEROBE", "sheet123")
+    monkeypatch.setenv("CONTENT_TRACKER_SPREADSHEET_ID_DUDEROBE", "tracker123")
     # Master Data now shows GRANTED and a found email -- both should refresh
     master_ws = FakeWorksheet(rows=[MASTER_HEADER, _master_row(
         "tk_1", email="found@example.com", products="The SheRobe now", status="GRANTED"
     )])
     source_sh = FakeSpreadsheet(worksheets={"Master Data": master_ws})
-    gc = FakeClient({"sheet123": source_sh})
 
     import content_tracker
     existing_row = content_tracker.build_fresh_tracker_row(
@@ -142,9 +178,14 @@ def test_existing_tracker_row_is_frozen_and_refreshed_correctly(monkeypatch):
     tracker_header = content_tracker.TRACKER_COLUMNS
     tracker_row_list = [existing_row.get(c, "") for c in tracker_header]
     tracker_ws = FakeWorksheet(rows=[tracker_header, tracker_row_list])
-    tracker_sh = FakeSpreadsheet(worksheets={"Duderobe": tracker_ws})
+    tracker_sh = FakeSpreadsheet(worksheets={"Content Tracker": tracker_ws})
+    gc = FakeClient({"sheet123": source_sh, "tracker123": tracker_sh})
 
-    sync_one_brand(gc, tracker_sh, {"name": "Duderobe", "spreadsheet_id_secret": "SPREADSHEET_ID_DUDEROBE"})
+    sync_one_brand(gc, {
+        "name": "Duderobe",
+        "spreadsheet_id_secret": "SPREADSHEET_ID_DUDEROBE",
+        "tracker_spreadsheet_id_secret": "CONTENT_TRACKER_SPREADSHEET_ID_DUDEROBE",
+    })
 
     header = tracker_ws.rows[0]
     row = tracker_ws.rows[1]
@@ -157,9 +198,9 @@ def test_existing_tracker_row_is_frozen_and_refreshed_correctly(monkeypatch):
 
 def test_sabotage_frozen_column_overwritten_would_be_caught(monkeypatch):
     monkeypatch.setenv("SPREADSHEET_ID_DUDEROBE", "sheet123")
+    monkeypatch.setenv("CONTENT_TRACKER_SPREADSHEET_ID_DUDEROBE", "tracker123")
     master_ws = FakeWorksheet(rows=[MASTER_HEADER, _master_row("tk_1", products="The SheRobe now", status="GRANTED")])
     source_sh = FakeSpreadsheet(worksheets={"Master Data": master_ws})
-    gc = FakeClient({"sheet123": source_sh})
 
     import content_tracker
     existing_row = content_tracker.build_fresh_tracker_row(
@@ -171,9 +212,14 @@ def test_sabotage_frozen_column_overwritten_would_be_caught(monkeypatch):
     existing_row["Product"] = "DudeRobe"
     tracker_header = content_tracker.TRACKER_COLUMNS
     tracker_ws = FakeWorksheet(rows=[tracker_header, [existing_row.get(c, "") for c in tracker_header]])
-    tracker_sh = FakeSpreadsheet(worksheets={"Duderobe": tracker_ws})
+    tracker_sh = FakeSpreadsheet(worksheets={"Content Tracker": tracker_ws})
+    gc = FakeClient({"sheet123": source_sh, "tracker123": tracker_sh})
 
-    sync_one_brand(gc, tracker_sh, {"name": "Duderobe", "spreadsheet_id_secret": "SPREADSHEET_ID_DUDEROBE"})
+    sync_one_brand(gc, {
+        "name": "Duderobe",
+        "spreadsheet_id_secret": "SPREADSHEET_ID_DUDEROBE",
+        "tracker_spreadsheet_id_secret": "CONTENT_TRACKER_SPREADSHEET_ID_DUDEROBE",
+    })
 
     header = tracker_ws.rows[0]
     row = tracker_ws.rows[1]
@@ -181,6 +227,38 @@ def test_sabotage_frozen_column_overwritten_would_be_caught(monkeypatch):
     with pytest.raises(AssertionError):
         assert as_dict["Product"] == "SheRobe"  # wrong -- Product must stay frozen
     assert as_dict["Product"] == "DudeRobe"  # confirms actual correct behavior
+
+
+def test_sabotage_each_brand_gets_its_own_spreadsheet_not_a_shared_tab(monkeypatch):
+    # the actual point of this whole change: Swoveralls writing to its
+    # own tracker sheet must never touch Duderobe's
+    monkeypatch.setenv("SPREADSHEET_ID_DUDEROBE", "sheet_d")
+    monkeypatch.setenv("CONTENT_TRACKER_SPREADSHEET_ID_DUDEROBE", "tracker_d")
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet_s")
+    monkeypatch.setenv("CONTENT_TRACKER_SPREADSHEET_ID_SWOVERALLS", "tracker_s")
+
+    duderobe_master = FakeWorksheet(rows=[MASTER_HEADER, _master_row("tk_1", products="The DudeRobe")])
+    swoveralls_master = FakeWorksheet(rows=[MASTER_HEADER, _master_row("tk_2", products="Swoveralls")])
+    duderobe_source = FakeSpreadsheet(worksheets={"Master Data": duderobe_master})
+    swoveralls_source = FakeSpreadsheet(worksheets={"Master Data": swoveralls_master})
+    duderobe_tracker = FakeSpreadsheet()
+    swoveralls_tracker = FakeSpreadsheet()
+    gc = FakeClient({
+        "sheet_d": duderobe_source, "tracker_d": duderobe_tracker,
+        "sheet_s": swoveralls_source, "tracker_s": swoveralls_tracker,
+    })
+
+    sync_one_brand(gc, {"name": "Duderobe", "spreadsheet_id_secret": "SPREADSHEET_ID_DUDEROBE",
+                         "tracker_spreadsheet_id_secret": "CONTENT_TRACKER_SPREADSHEET_ID_DUDEROBE"})
+    sync_one_brand(gc, {"name": "Swoveralls", "spreadsheet_id_secret": "SPREADSHEET_ID_SWOVERALLS",
+                         "tracker_spreadsheet_id_secret": "CONTENT_TRACKER_SPREADSHEET_ID_SWOVERALLS"})
+
+    d_ids = {row[0] for row in duderobe_tracker._worksheets["Content Tracker"].rows[1:]}
+    s_ids = {row[0] for row in swoveralls_tracker._worksheets["Content Tracker"].rows[1:]}
+    with pytest.raises(AssertionError):
+        assert "tk_2" in d_ids  # wrong -- Swoveralls' row leaking into Duderobe's sheet
+    assert d_ids == {"tk_1"}
+    assert s_ids == {"tk_2"}
 
 
 # ---------- propagate_reviewed_to_master ----------
