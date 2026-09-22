@@ -7,25 +7,38 @@
 # workspace), matching "off by default, manual anytime."
 #
 # spreadsheet_id_secret must match a real GitHub Actions secret name
-# holding that workspace's target Google Sheet ID.
+# holding that workspace's target Refunnel-export Google Sheet ID.
+#
+# tracker_spreadsheet_id_secret is the SAME idea for that workspace's
+# Content Tracker -- a completely separate spreadsheet per brand, not a
+# shared tracker sheet with one tab per brand. Confirmed real want:
+# each brand gets its own dedicated Content Tracker sheet. Duderobe's
+# value points at the tracker sheet already in use today (nothing
+# changes for it); a brand with this left unset is skipped for Content
+# Tracker the same way an unset spreadsheet_id_secret already skips it
+# for the main export.
 
 workspaces:
   - name: Duderobe
     refunnel_workspace_name: Duderobe
     spreadsheet_id_secret: SPREADSHEET_ID_DUDEROBE
+    tracker_spreadsheet_id_secret: CONTENT_TRACKER_SPREADSHEET_ID_DUDEROBE
     schedule_enabled: true
 
   - name: Swoveralls
     refunnel_workspace_name: Swoveralls
     spreadsheet_id_secret: SPREADSHEET_ID_SWOVERALLS
-    schedule_enabled: false
+    tracker_spreadsheet_id_secret: CONTENT_TRACKER_SPREADSHEET_ID_SWOVERALLS
+    schedule_enabled: true
 
   - name: Defi Snacks
     refunnel_workspace_name: Defi Snacks
     spreadsheet_id_secret: SPREADSHEET_ID_DEFI_SNACKS
+    tracker_spreadsheet_id_secret: CONTENT_TRACKER_SPREADSHEET_ID_DEFI_SNACKS
     schedule_enabled: false
 
   - name: Kelson
     refunnel_workspace_name: Kelson
     spreadsheet_id_secret: SPREADSHEET_ID_KELSON
+    tracker_spreadsheet_id_secret: CONTENT_TRACKER_SPREADSHEET_ID_KELSON
     schedule_enabled: false
