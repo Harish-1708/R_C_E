@@ -821,3 +821,41 @@ def test_clear_all_filters_does_not_raise_if_nothing_to_clear():
             return _Raising()
 
     clear_all_filters(_NoFilterPage())  # must not raise
+
+
+# ---------- campaign filter button: confirmed real markup fix ----------
+
+def test_campaign_filter_selector_includes_the_confirmed_real_div_class():
+    # confirmed real from a live TimeoutError and the actual failing
+    # page's markup: it's a styled <div class="campaign-filter-label
+    # clickable">, not a native <button> -- the old button-only guess
+    # never matched anything on the real page at all
+    from refunnel_export import CAMPAIGN_FILTER_BUTTON_SELECTOR
+    assert ".campaign-filter-label.clickable" in CAMPAIGN_FILTER_BUTTON_SELECTOR
+
+
+def test_old_button_only_guess_would_not_have_matched_the_real_element():
+    class _StrictSelectorPage(_CampaignPage):
+        """Only responds to the exact real div class -- simulates the
+        real page, where a pure button:has-text('Campaign') selector
+        matches nothing at all, which is what produced the real
+        30-second timeout."""
+
+        def locator(self, selector):
+            if selector.strip() == "button:has-text('Campaign')":
+                return _FakeCampaignLocator()  # 0 matches -- the real symptom
+            return super().locator(selector)
+
+    from refunnel_export import list_available_campaigns
+    page = _StrictSelectorPage(["Evergreen Campaign"])
+    # the CURRENT combined selector still works, because the div-class
+    # half of it matches even though the old button half wouldn't have
+    names = list_available_campaigns(page)
+    assert names == ["Evergreen Campaign"]
+
+
+def test_sabotage_reverting_to_button_only_selector_would_be_caught():
+    from refunnel_export import CAMPAIGN_FILTER_BUTTON_SELECTOR
+    with pytest.raises(AssertionError):
+        assert CAMPAIGN_FILTER_BUTTON_SELECTOR == "button:has-text('Campaign')"  # wrong -- the old, broken guess
+    assert ".campaign-filter-label" in CAMPAIGN_FILTER_BUTTON_SELECTOR  # confirms the real fix is in place
