@@ -24,7 +24,7 @@ from refunnel_export import (
     _is_target_crashed,
     _scroll_until_card_found,
     _is_logged_out,
-    download_approved_video,
+    trigger_native_drive_upload,
 )
 
 
@@ -611,127 +611,6 @@ def test_sabotage_missed_logout_would_be_caught():
     assert result is True
 
 
-# ---------- download_approved_video ----------
-
-class _FakeDownload:
-    def __init__(self, suggested_filename, save_dest_recorder):
-        self.suggested_filename = suggested_filename
-        self._recorder = save_dest_recorder
-
-    def save_as(self, path):
-        self._recorder.append(path)
-        with open(path, "wb") as f:
-            f.write(b"fake video bytes")
-
-
-class _FakeDownloadInfo:
-    def __init__(self, download):
-        self.value = download
-
-
-class _FakeButton:
-    def __init__(self, owner):
-        self.owner = owner
-
-    def wait_for(self, state=None, timeout=None):
-        pass
-
-    def click(self):
-        self.owner.clicked = True
-
-
-class _FakeGridItem:
-    def __init__(self, owner):
-        self.owner = owner
-        self.hovered = False
-
-    def hover(self):
-        self.hovered = True
-
-    def locator(self, _selector):
-        class _L:
-            @property
-            def first(_self):
-                return _FakeButton(self.owner)
-        return _L()
-
-
-class _DownloadPage:
-    """Page fake wired so _scroll_until_card_found immediately finds
-    the card (isolating this test to download_approved_video's OWN
-    logic, not scroll-search, which already has its own tests)."""
-
-    def __init__(self, suggested_filename="tk_1_export.mp4", card_found=True):
-        self.clicked = False
-        self._card_found = card_found
-        self._saved_paths = []
-        self._suggested_filename = suggested_filename
-
-    def locator(self, _selector):
-        page = self
-
-        class _L:
-            def count(_self):
-                return 1 if page._card_found else 0
-
-            @property
-            def first(_self):
-                return _FakeGridItem(page)
-        return _L()
-
-    def evaluate(self, *_a, **_kw):
-        return {"scrollTop": 0, "scrollHeight": 100, "clientHeight": 100}
-
-    def wait_for_timeout(self, _ms):
-        pass
-
-    def expect_download(self, timeout=None):
-        page = self
-
-        class _Ctx:
-            def __enter__(_self):
-                return _FakeDownloadInfo(_FakeDownload(page._suggested_filename, page._saved_paths))
-
-            def __exit__(_self, *exc):
-                return False
-        return _Ctx()
-
-
-def test_downloads_and_saves_under_the_media_id(tmp_path):
-    page = _DownloadPage(suggested_filename="export_98213.mp4")
-    result = download_approved_video(page, "tk_1", str(tmp_path))
-    assert result == tmp_path / "tk_1.mp4"
-    assert result.exists()
-    assert page.clicked is True
-
-
-def test_preserves_the_real_downloaded_extension(tmp_path):
-    page = _DownloadPage(suggested_filename="clip.mov")
-    result = download_approved_video(page, "tk_2", str(tmp_path))
-    assert result.suffix == ".mov"
-
-
-def test_defaults_to_mp4_if_no_extension_suggested(tmp_path):
-    page = _DownloadPage(suggested_filename="")
-    result = download_approved_video(page, "tk_3", str(tmp_path))
-    assert result.suffix == ".mp4"
-
-
-def test_returns_none_if_the_card_cannot_be_located(tmp_path):
-    page = _DownloadPage(card_found=False)
-    result = download_approved_video(page, "tk_missing", str(tmp_path))
-    assert result is None
-    assert page.clicked is False
-
-
-def test_sabotage_wrong_temp_filename_would_be_caught(tmp_path):
-    page = _DownloadPage(suggested_filename="whatever_refunnel_calls_it.mp4")
-    result = download_approved_video(page, "tk_7660267483391151373", str(tmp_path))
-    with pytest.raises(AssertionError):
-        assert result.name == "whatever_refunnel_calls_it.mp4"  # wrong -- must use media_id
-    assert result.name == "tk_7660267483391151373.mp4"  # confirms actual correct behavior
-
-
 # ---------- campaign filter functions (best-guess selectors, logic tested) ----------
 
 class _FakeCampaignLocator:
@@ -1302,3 +1181,149 @@ def test_sabotage_single_navigation_would_be_caught():
     with pytest.raises(AssertionError):
         assert len(page.goto_calls) == 1  # wrong -- that's the old, buggy behavior
     assert len(page.goto_calls) == 2  # confirms actual correct behavior
+
+
+# ---------- trigger_native_drive_upload: confirmed real UI flow ----------
+
+class _FakeMenuButton:
+    def __init__(self, owner):
+        self.owner = owner
+
+    def click(self):
+        self.owner.menu_clicked = True
+
+
+class _FakeGridItemForDrive:
+    def __init__(self, owner):
+        self.owner = owner
+        self.hovered = False
+
+    def hover(self):
+        self.hovered = True
+
+    def locator(self, _selector):
+        class _L:
+            @property
+            def first(_self):
+                return _FakeMenuButton(self.owner)
+        return _L()
+
+
+class _ClickTrackingLocator:
+    def __init__(self, owner, name):
+        self.owner = owner
+        self.name = name
+
+    def wait_for(self, state=None, timeout=None):
+        pass
+
+    def click(self):
+        self.owner.clicks.append(self.name)
+
+    @property
+    def first(self):
+        return self
+
+
+class _DriveUploadPage:
+    """Page fake wired so _scroll_until_card_found (monkeypatched)
+    immediately returns a usable card -- isolates testing to
+    trigger_native_drive_upload's OWN flow (menu -> upload item -> All
+    folders tab -> folder row -> Save to Drive), not the scroll-search
+    logic, which already has its own tests."""
+
+    def __init__(self, folder_name_to_select="Refunnel - Swoveralls"):
+        self.menu_clicked = False
+        self.clicks = []
+        self._folder_name = folder_name_to_select
+
+    def locator(self, selector):
+        from refunnel_export import (
+            DRIVE_UPLOAD_MENU_ITEM_SELECTOR,
+            DRIVE_MODAL_ALL_FOLDERS_TAB_SELECTOR,
+            DRIVE_MODAL_SAVE_BUTTON_SELECTOR,
+        )
+        if selector == DRIVE_UPLOAD_MENU_ITEM_SELECTOR:
+            return _ClickTrackingLocator(self, "upload_item")
+        if selector == DRIVE_MODAL_ALL_FOLDERS_TAB_SELECTOR:
+            return _ClickTrackingLocator(self, "all_folders_tab")
+        if selector == DRIVE_MODAL_SAVE_BUTTON_SELECTOR:
+            return _ClickTrackingLocator(self, "save_button")
+        return _ClickTrackingLocator(self, selector)
+
+    def get_by_text(self, text, exact=False):
+        class _L:
+            def __init__(_self, owner, matched):
+                _self.owner = owner
+                _self.matched = matched
+
+            def wait_for(_self, state=None, timeout=None):
+                pass
+
+            def click(_self):
+                if _self.matched:
+                    _self.owner.clicks.append(f"folder:{text}")
+
+            @property
+            def first(_self):
+                return _self
+        return _L(self, text == self._folder_name)
+
+    @property
+    def first(self):
+        return self
+
+
+@pytest.fixture
+def _stub_scroll_found(monkeypatch):
+    import refunnel_export as re_module
+    grid_item_holder = {}
+
+    def fake_scroll_found(page, media_id, scroll_container_selector):
+        item = _FakeGridItemForDrive(page)
+        grid_item_holder["item"] = item
+        return item, {}
+
+    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
+    return grid_item_holder
+
+
+def test_trigger_native_drive_upload_completes_the_full_flow(_stub_scroll_found):
+    page = _DriveUploadPage(folder_name_to_select="Refunnel - Swoveralls")
+    result = trigger_native_drive_upload(page, "tk_1", "Refunnel - Swoveralls")
+    assert result is True
+    assert page.clicks == ["upload_item", "all_folders_tab", "folder:Refunnel - Swoveralls", "save_button"]
+
+
+def test_trigger_native_drive_upload_returns_false_if_card_not_found(monkeypatch):
+    import refunnel_export as re_module
+    monkeypatch.setattr(re_module, "_scroll_until_card_found", lambda *a, **kw: (None, {}))
+    page = _DriveUploadPage()
+    result = trigger_native_drive_upload(page, "tk_missing", "Refunnel - Swoveralls")
+    assert result is False
+
+
+def test_trigger_native_drive_upload_saves_debug_snapshot_on_failure(_stub_scroll_found, tmp_path):
+    class _FailingPage(_DriveUploadPage):
+        def locator(self, selector):
+            raise RuntimeError("simulated UI failure")
+
+        def screenshot(self, path, full_page=True):
+            Path(path).write_bytes(b"fake")
+
+        def content(self):
+            return "<html>failure state</html>"
+
+    page = _FailingPage()
+    with pytest.raises(RuntimeError):
+        trigger_native_drive_upload(page, "tk_1", "Refunnel - Swoveralls", debug_dir=str(tmp_path))
+    saved = list(tmp_path.glob("drive_upload_failure_*.html"))
+    assert len(saved) == 1
+
+
+def test_sabotage_wrong_folder_selected_would_be_caught(_stub_scroll_found):
+    page = _DriveUploadPage(folder_name_to_select="Refunnel - Duderobe")  # only Duderobe row is "real"
+    trigger_native_drive_upload(page, "tk_1", "Refunnel - Swoveralls")  # but we asked for Swoveralls
+    with pytest.raises(AssertionError):
+        assert "folder:Refunnel - Swoveralls" in page.clicks  # wrong -- that row was never actually clicked
+    assert "folder:Refunnel - Swoveralls" not in page.clicks  # confirms it correctly never matched
