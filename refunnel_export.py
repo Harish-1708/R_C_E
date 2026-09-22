@@ -189,6 +189,45 @@ def goto_social_listening_for_workspace(page: Page, workspace_name: str, known_w
     page.goto(refunnel_auth.refunnel_social_listening_url())
 
 
+def scroll_to_top(page: Page, scroll_container_selector: str = "#scrollableDiv") -> None:
+    """Resets the scrollable grid back to scrollTop=0.
+
+    CONFIRMED REAL, serious bug this fixes: run_daily_sync.py calls
+    scroll_to_load_all() (which scrolls the container all the way to
+    its real bottom, to load everything for the CSV export) BEFORE
+    scrape_creator_emails() ever runs, on the SAME page instance, with
+    nothing in between resetting the scroll position. But
+    _scroll_until_card_found() -- what scrape_creator_emails() uses to
+    locate each card -- only ever scrolls FORWARD, matching
+    _order_ids_for_scraping()'s own documented assumption that ids are
+    processed in feed order (newest first) starting from the top.
+
+    Starting from the bottom instead means the newest posts (searched
+    for first) can never be reached going forward -- confirmed real
+    from an actual failed run against Swoveralls' much larger backlog:
+    every single "couldn't locate" failure reported the EXACT SAME
+    scrollTop, matching the container's real bottom exactly, for
+    nearly 2000 consecutive different ids in a row. The underlying CSV
+    export itself was complete (confirmed: 5873 rows, a full year) --
+    only the scraper's own separate, forward-only search was affected.
+    Duderobe's much smaller backlog never surfaced this, since its
+    virtualized list likely still kept early cards close enough to
+    stay reachable even scrolled to the bottom; Swoveralls' far larger
+    one does not.
+
+    Called once, right before scraping starts on the SAME page
+    instance the export just used -- a restart's fresh page.goto()
+    naturally resets scroll position on its own and doesn't need this.
+    """
+    page.evaluate(
+        f"""() => {{
+            const el = document.querySelector({scroll_container_selector!r});
+            if (el) el.scrollTop = 0;
+        }}"""
+    )
+    page.wait_for_timeout(500)  # let the virtualized list settle back to the top
+
+
 def scroll_to_load_all(
     page: Page,
     count_text_pattern: str = r"(\d+)\s+of\s+(\d+)\s+media",
