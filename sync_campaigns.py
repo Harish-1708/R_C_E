@@ -108,8 +108,7 @@ def sync_campaigns_for_brand(
     p, browser, context = refunnel_auth.load_or_refresh_session(email=email)
     try:
         page = context.new_page()
-        page.goto(refunnel_auth.refunnel_social_listening_url())
-        refunnel_export.select_workspace(page, refunnel_workspace_name, known_workspace_names)
+        refunnel_export.goto_social_listening_for_workspace(page, refunnel_workspace_name, known_workspace_names)
 
         campaigns = refunnel_export.list_available_campaigns(page, debug_dir=f"{download_dir}/debug")
         print(f"{brand}: found {len(campaigns)} campaign(s) -- {', '.join(campaigns) if campaigns else '(none)'}")
