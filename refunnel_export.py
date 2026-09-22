@@ -405,6 +405,14 @@ def export_media_csv(page: Page, download_dir: str, scroll_container_selector: s
 # comma-separated fallback in case a future redesign goes back to a
 # real button, rather than silently losing that possibility.
 CAMPAIGN_FILTER_BUTTON_SELECTOR = ".campaign-filter-label.clickable, button:has-text('Campaign')"
+# Confirmed real from an actual HTML dump: the visible "Campaign" label
+# above has a SIBLING element carrying the ARIA disclosure state --
+# `<div tabindex="-1" aria-controls="_r_k_" aria-owns="_r_k_"
+# aria-expanded="false"><div></div></div>` -- immediately after
+# .campaign-filter-label inside .campaign-filter-container. Its
+# aria-controls value is the dropdown panel's real id, regenerated on
+# every page load, so it's read at runtime rather than ever hardcoded.
+CAMPAIGN_DISCLOSURE_TOGGLE_SELECTOR = ".campaign-filter-container [aria-controls]"
 CAMPAIGN_SEARCH_INPUT_SELECTOR = "input[placeholder*='search campaign' i]"
 CAMPAIGN_CHECKBOX_ROW_SELECTOR = "[role='checkbox'], input[type='checkbox']"
 CAMPAIGN_APPLY_BUTTON_SELECTOR = "button:has-text('Apply Changes')"
@@ -422,34 +430,47 @@ def list_available_campaigns(page: Page, debug_dir: Optional[str] = None, timeou
     assumed from a fixed list -- so a campaign being renamed or removed
     on Refunnel's side is reflected automatically too.
 
-    If this finds ZERO campaigns and debug_dir is given, it saves a
-    screenshot + page HTML before returning -- confirmed real need:
-    the button selector was ALREADY once wrong in exactly this
-    "assumed a real HTML tag, Refunnel uses a styled div instead" way
-    (now fixed), and a real run then returned 0 campaigns despite 22
-    genuinely existing -- almost certainly CAMPAIGN_CHECKBOX_ROW_SELECTOR
-    hitting the SAME kind of mismatch. Rather than guess again blindly
-    a second time, this captures real evidence automatically so the
-    fix can be confirmed against actual markup instead of another
-    screenshot-and-report round trip.
-    """
-    campaign_button = page.locator(CAMPAIGN_FILTER_BUTTON_SELECTOR).first
-    campaign_button.click()
+    Scoped to the ACTUAL open panel, not a page-wide search -- confirmed
+    real from an actual HTML dump: the panel is a React disclosure with
+    a DYNAMICALLY GENERATED id (e.g. "_r_k_", different on every page
+    load), referenced by aria-controls on a sibling of the visible
+    "Campaign" label, and the panel isn't even mounted in the DOM while
+    closed. Reading that id at runtime and scoping the search to it
+    means this can't accidentally match some OTHER filter's checkboxes
+    elsewhere on the page -- confirmed real risk with the previous,
+    page-wide CAMPAIGN_CHECKBOX_ROW_SELECTOR search.
 
-    # Waits for the dropdown's actual CONTENT (the checkbox rows) to
-    # render, not the button itself -- confirmed real cleanup: the
-    # button is already visible (that's how it was just clicked), so
-    # re-checking its own visibility here never waited for anything
-    # meaningful. The rows below are the thing that genuinely needs a
-    # moment to appear after the click.
-    rows = page.locator(CAMPAIGN_CHECKBOX_ROW_SELECTOR)
+    If this finds ZERO campaigns and debug_dir is given, it saves a
+    screenshot + page HTML BEFORE closing the dropdown -- confirmed
+    real bug in an earlier version of this function: the diagnostic was
+    captured AFTER the Escape key had already closed the panel, so the
+    very evidence meant to show what's actually there showed nothing
+    useful at all (aria-expanded="false", panel not even in the DOM).
+    Capturing before closing is what makes this diagnostic worth having.
+    """
+    filter_container = page.locator(CAMPAIGN_FILTER_BUTTON_SELECTOR).first
+    filter_container.click()
+
+    # The panel's real id is read at RUNTIME from the toggle sibling's
+    # aria-controls -- never hardcoded, since it's regenerated on every
+    # page load and a stale id from a previous run would silently match
+    # nothing.
+    toggle = page.locator(CAMPAIGN_DISCLOSURE_TOGGLE_SELECTOR).first
+    panel_id = None
+    try:
+        toggle.wait_for(state="attached", timeout=timeout_ms)
+        panel_id = toggle.get_attribute("aria-controls")
+    except Exception:
+        pass
+
+    rows = page.locator(f"#{panel_id} {CAMPAIGN_CHECKBOX_ROW_SELECTOR}") if panel_id else page.locator(CAMPAIGN_CHECKBOX_ROW_SELECTOR)
     try:
         rows.first.wait_for(state="visible", timeout=timeout_ms)
     except Exception:
         pass  # fall through to the empty-result handling below, which
-        # captures the SAME diagnostic either way (timed out waiting,
-        # or found something that just yielded no usable text) -- both
-        # mean the selector doesn't match what's really on the page.
+        # captures a diagnostic either way (timed out waiting, or found
+        # something that just yielded no usable text) -- both mean the
+        # selector doesn't match what's really on the page.
     count = rows.count()
     names = []
     for i in range(count):
@@ -457,21 +478,26 @@ def list_available_campaigns(page: Page, debug_dir: Optional[str] = None, timeou
         if text:
             names.append(text)
 
-    # Closes the dropdown without applying anything -- this call is
-    # read-only by design, it must never change the active filter.
-    page.keyboard.press("Escape")
-
     if not names and debug_dir:
+        # Captured BEFORE the Escape below, while the panel (if it
+        # opened at all) is still actually in the DOM -- see the
+        # docstring above for why the previous ordering made this
+        # diagnostic useless.
         try:
             out_dir = Path(debug_dir)
             out_dir.mkdir(parents=True, exist_ok=True)
             page.screenshot(path=str(out_dir / "campaign_discovery_empty.png"), full_page=True)
             (out_dir / "campaign_discovery_empty.html").write_text(page.content(), encoding="utf-8")
             print(f"Found 0 campaigns -- saved a debug snapshot to {out_dir} for diagnosis "
-                  f"(CAMPAIGN_CHECKBOX_ROW_SELECTOR in refunnel_export.py likely needs updating, "
-                  f"same kind of fix as CAMPAIGN_FILTER_BUTTON_SELECTOR already needed).")
+                  f"(panel_id read as {panel_id!r}; CAMPAIGN_CHECKBOX_ROW_SELECTOR in "
+                  f"refunnel_export.py likely still needs updating).")
         except Exception as e:
             print(f"Found 0 campaigns, and couldn't save a debug snapshot either: {e}")
+
+    # Closes the dropdown without applying anything -- this call is
+    # read-only by design, it must never change the active filter.
+    # Deliberately LAST, after any diagnostic capture above.
+    page.keyboard.press("Escape")
 
     return names
 
