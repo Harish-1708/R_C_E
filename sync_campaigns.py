@@ -109,7 +109,7 @@ def sync_campaigns_for_brand(
         page.goto(refunnel_auth.refunnel_social_listening_url())
         refunnel_export.select_workspace(page, refunnel_workspace_name, known_workspace_names)
 
-        campaigns = refunnel_export.list_available_campaigns(page)
+        campaigns = refunnel_export.list_available_campaigns(page, debug_dir=f"{download_dir}/debug")
         print(f"{brand}: found {len(campaigns)} campaign(s) -- {', '.join(campaigns) if campaigns else '(none)'}")
 
         campaign_to_ids: dict = {}
