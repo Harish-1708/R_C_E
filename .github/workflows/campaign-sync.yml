@@ -1,0 +1,74 @@
+name: Campaign Sync
+
+# Deliberately its own separate, slower schedule -- discovering N
+# campaigns (22 today, growing) and running a full filter-scroll-export
+# cycle for each one is real, sequential browser time with nothing to
+# do with the daily export or Content Tracker, so this never competes
+# with them for time or session access. Weekly rather than daily on
+# purpose: campaign membership doesn't need same-day freshness the way
+# new posts or usage-rights changes do, and re-running 22+ full cycles
+# every single day would be a real, avoidable time cost as the
+# campaign count keeps growing.
+
+on:
+  schedule:
+    - cron: "0 9 * * 0"  # 09:00 UTC every Sunday
+  workflow_dispatch: {}
+
+jobs:
+  campaign-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright's browser
+        run: python -m playwright install --with-deps chromium
+
+      # Same session-cache pattern as Refunnel Sync and Drive Backfill.
+      - name: Restore saved Refunnel session
+        id: restore_session
+        uses: actions/cache/restore@v4
+        with:
+          path: refunnel_session.json
+          key: refunnel-session-${{ github.run_id }}
+          restore-keys: |
+            refunnel-session-
+
+      - name: Run the Campaign Sync
+        env:
+          REFUNNEL_EMAIL: ${{ secrets.REFUNNEL_EMAIL }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: service_account.json
+          GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          # One Refunnel-export secret per brand, same as everywhere else.
+          SPREADSHEET_ID_DUDEROBE: ${{ secrets.SPREADSHEET_ID_DUDEROBE }}
+          SPREADSHEET_ID_SWOVERALLS: ${{ secrets.SPREADSHEET_ID_SWOVERALLS }}
+          SPREADSHEET_ID_DEFI_SNACKS: ${{ secrets.SPREADSHEET_ID_DEFI_SNACKS }}
+          SPREADSHEET_ID_KELSON: ${{ secrets.SPREADSHEET_ID_KELSON }}
+        run: |
+          echo "$GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT" > service_account.json
+          python -u sync_campaigns.py
+
+      - name: Save Refunnel session for next run
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: refunnel_session.json
+          key: refunnel-session-${{ github.run_id }}
+
+      - name: Upload debug artifacts (7-day retention)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: campaign-sync-debug
+          path: downloads/campaign_sync/
+          retention-days: 7
+          if-no-files-found: ignore
