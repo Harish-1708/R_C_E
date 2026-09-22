@@ -515,7 +515,7 @@ def list_available_campaigns(page: Page, debug_dir: Optional[str] = None, timeou
     return names
 
 
-def filter_by_campaign(page: Page, campaign_name: str, timeout_ms: int = 15000) -> None:
+def filter_by_campaign(page: Page, campaign_name: str, debug_dir: Optional[str] = None, timeout_ms: int = 15000) -> None:
     """Clears any currently active filters, then applies ONLY
     campaign_name. Clearing first (rather than just unchecking the
     previous campaign) also resets any OTHER stray filter that might
@@ -532,6 +532,19 @@ def filter_by_campaign(page: Page, campaign_name: str, timeout_ms: int = 15000) 
     rather than string-interpolating campaign_name into a raw CSS
     selector, which also sidesteps any issue if a campaign name ever
     contains a quote or other CSS-special character.
+
+    If debug_dir is given, captures a screenshot + HTML right after
+    clicking Apply -- confirmed real need: a live run had every single
+    campaign stall scroll_to_load_all at exactly "20 of 2795", the same
+    number as the FULL unfiltered library. That's genuinely ambiguous
+    from the log alone -- it could mean the filter applied and 20 is a
+    real (tiny) match count, or it could mean the filter never actually
+    took effect and this is just Refunnel's normal unfiltered
+    first-batch view. Deliberately NOT guessed at or "fixed" by making
+    the scroll lenient here -- doing that without knowing which
+    explanation is true risks silently tagging random unrelated posts
+    as belonging to a campaign they're not actually in, which is worse
+    than just being missing. This capture is what settles it.
     """
     clear_all_filters(page)
 
@@ -546,10 +559,30 @@ def filter_by_campaign(page: Page, campaign_name: str, timeout_ms: int = 15000) 
         has=page.get_by_text(campaign_name, exact=True)
     ).first
     row.wait_for(state="visible", timeout=timeout_ms)
-    row.locator(CAMPAIGN_CHECKBOX_INPUT_SELECTOR).click()
+
+    # .check() rather than .click() -- confirmed real symptom this
+    # addresses: "DudeRobe Content Campaign" left Apply Changes
+    # permanently disabled (30s of retries, "element is not enabled"),
+    # the same shape of failure as the OTP multi-box issue -- a plain
+    # .click() can register visually without firing the change event a
+    # React form needs to consider a selection made. .check() is
+    # Playwright's own checkbox-specific method, built to verify the
+    # box ends up genuinely checked, not just clicked at.
+    row.locator(CAMPAIGN_CHECKBOX_INPUT_SELECTOR).check()
 
     apply_button = page.locator(CAMPAIGN_APPLY_BUTTON_SELECTOR).first
     apply_button.click()
+
+    if debug_dir:
+        try:
+            out_dir = Path(debug_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            safe_name = re.sub(r"[^A-Za-z0-9]+", "_", campaign_name)[:60]
+            page.wait_for_timeout(1000)  # let the filtered view settle before capturing
+            page.screenshot(path=str(out_dir / f"after_apply_{safe_name}.png"), full_page=True)
+            (out_dir / f"after_apply_{safe_name}.html").write_text(page.content(), encoding="utf-8")
+        except Exception as e:
+            print(f"Couldn't save post-Apply debug snapshot for {campaign_name!r}: {e}")
 
 
 def clear_all_filters(page: Page) -> None:
