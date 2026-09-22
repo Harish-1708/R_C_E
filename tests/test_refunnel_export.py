@@ -1219,3 +1219,38 @@ def test_sabotage_missed_empty_state_would_be_caught():
     with pytest.raises(AssertionError):
         assert result is False  # wrong -- this IS the real empty-state message
     assert result is True
+
+
+# ---------- filter_is_genuinely_active: confirmed real, serious bug ----------
+
+def test_detects_a_genuinely_applied_filter():
+    from refunnel_export import filter_is_genuinely_active
+    page = _TextPage("Campaign is SheRobe Content Campaign ×")
+    assert filter_is_genuinely_active(page, "SheRobe Content Campaign") is True
+
+
+def test_detects_a_filter_that_silently_failed_to_apply():
+    # confirmed real, exact bug: the campaign name is absent because
+    # the filter never actually took effect
+    from refunnel_export import filter_is_genuinely_active
+    page = _TextPage("20 of 2795 media\n@someuser 9.1K followers")
+    assert filter_is_genuinely_active(page, "SheRobe Content Campaign") is False
+
+
+def test_survives_a_page_that_raises():
+    from refunnel_export import filter_is_genuinely_active
+
+    class _Exploding:
+        def inner_text(self, _selector):
+            raise RuntimeError("target crashed")
+
+    assert filter_is_genuinely_active(_Exploding(), "Any Campaign") is False
+
+
+def test_sabotage_missed_silent_filter_failure_would_be_caught():
+    from refunnel_export import filter_is_genuinely_active
+    page = _TextPage("20 of 2795 media")
+    result = filter_is_genuinely_active(page, "SheRobe Content Campaign")
+    with pytest.raises(AssertionError):
+        assert result is True  # wrong -- the campaign name never appeared at all
+    assert result is False  # confirms actual correct behavior
