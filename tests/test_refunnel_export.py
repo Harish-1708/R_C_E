@@ -799,18 +799,116 @@ def test_list_available_campaigns_closes_the_dropdown_without_applying():
     assert "Escape" in page.keyboard.pressed  # read-only: never left applied
 
 
+class _FakeCampaignOptionRow:
+    """Models one real `.campaign-option` row: a checkbox input plus a
+    span whose text is the campaign's exact name."""
+
+    def __init__(self, name):
+        self.name = name
+        self.checkbox_clicked = False
+
+    def locator(self, selector):
+        from refunnel_export import CAMPAIGN_CHECKBOX_INPUT_SELECTOR
+        if selector == CAMPAIGN_CHECKBOX_INPUT_SELECTOR:
+            return self
+
+    def click(self, timeout=None):
+        self.checkbox_clicked = True
+
+    def wait_for(self, state=None, timeout=None):
+        pass
+
+
+class _FilterableRowSet:
+    """Models page.locator(ROW_SELECTOR).filter(has=...) against a real
+    set of rows -- exact-text matching only, same as
+    page.get_by_text(..., exact=True) really does, so a search for
+    "Partner with DudeRobe" can never accidentally match "Partner with
+    DudeRobe!" too."""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def filter(self, has):
+        matches = [r for r in self._rows if r.name == has.exact_text]
+        return _FilterableRowSet(matches)
+
+    @property
+    def first(self):
+        return self._rows[0]
+
+
+class _ExactTextLocator:
+    def __init__(self, exact_text):
+        self.exact_text = exact_text
+
+
+class _RealCampaignPage(_CampaignPage):
+    """Models the CONFIRMED real markup precisely: .campaign-option
+    rows, each with an input.campaign-checkbox and exact-text content,
+    including genuinely similar names that must not be confused."""
+
+    def __init__(self, campaign_names, real_rows=None):
+        super().__init__(campaign_names)
+        self._rows = [_FakeCampaignOptionRow(n) for n in (real_rows or campaign_names)]
+
+    def get_by_text(self, text, exact=False):
+        return _ExactTextLocator(text)
+
+    def locator(self, selector):
+        from refunnel_export import CAMPAIGN_CHECKBOX_ROW_SELECTOR
+        if selector == CAMPAIGN_CHECKBOX_ROW_SELECTOR:
+            return _FilterableRowSet(self._rows)
+        return super().locator(selector)
+
+
 def test_filter_by_campaign_searches_for_the_exact_name():
     from refunnel_export import filter_by_campaign, CAMPAIGN_SEARCH_INPUT_SELECTOR
-    page = _CampaignPage([])
+    page = _RealCampaignPage([], real_rows=["TTS VIP Creator Whitelisting - 6% Spend"])
     filter_by_campaign(page, "TTS VIP Creator Whitelisting - 6% Spend")
     assert page._locators[CAMPAIGN_SEARCH_INPUT_SELECTOR].filled == "TTS VIP Creator Whitelisting - 6% Spend"
 
 
 def test_filter_by_campaign_clears_first():
     from refunnel_export import filter_by_campaign, CLEAR_ALL_FILTERS_SELECTOR
-    page = _CampaignPage([])
+    page = _RealCampaignPage([], real_rows=["Campaign A"])
     filter_by_campaign(page, "Campaign A")
     assert page._locators[CLEAR_ALL_FILTERS_SELECTOR].clicked is True
+
+
+def test_filter_by_campaign_clicks_the_checkbox_within_the_matched_row():
+    from refunnel_export import filter_by_campaign
+    page = _RealCampaignPage([], real_rows=["Save a Dude"])
+    filter_by_campaign(page, "Save a Dude")
+    assert page._rows[0].checkbox_clicked is True
+
+
+def test_filter_by_campaign_picks_the_exact_match_not_a_similar_one():
+    # confirmed real, genuine risk from actual campaign data: "Partner
+    # with DudeRobe!" and "Partner with DudeRobe" both exist as real,
+    # distinct campaigns
+    from refunnel_export import filter_by_campaign
+    page = _RealCampaignPage([], real_rows=["Partner with DudeRobe!", "Partner with DudeRobe"])
+
+    filter_by_campaign(page, "Partner with DudeRobe")
+
+    exclamation_row = next(r for r in page._rows if r.name == "Partner with DudeRobe!")
+    plain_row = next(r for r in page._rows if r.name == "Partner with DudeRobe")
+    assert plain_row.checkbox_clicked is True
+    assert exclamation_row.checkbox_clicked is False  # the OTHER one must stay untouched
+
+
+def test_sabotage_similar_campaign_names_would_be_confused_by_substring_matching():
+    from refunnel_export import filter_by_campaign
+    page = _RealCampaignPage([], real_rows=["Partner with DudeRobe!", "Partner with DudeRobe"])
+
+    filter_by_campaign(page, "Partner with DudeRobe!")
+
+    exclamation_row = next(r for r in page._rows if r.name == "Partner with DudeRobe!")
+    plain_row = next(r for r in page._rows if r.name == "Partner with DudeRobe")
+    with pytest.raises(AssertionError):
+        assert plain_row.checkbox_clicked is True  # wrong -- that's the OTHER campaign
+    assert exclamation_row.checkbox_clicked is True  # confirms the exact one was picked
 
 
 def test_clear_all_filters_does_not_raise_if_nothing_to_clear():
