@@ -249,6 +249,41 @@ def parse_payments_csv(path: str, result: Optional[ParseResult] = None) -> Parse
 REVIEWED_TRUE_VALUES = ("yes", "y", "true", "1")
 
 
+def build_drive_filename(brand: str, username: str, media_id: str, extension: str = "mp4") -> str:
+    """"<Brand> | @<username> | <media_id>.<ext>" -- confirmed real
+    naming convention, with the media_id suffix added for a real
+    reason: at the scale involved (500+ approved videos for a single
+    brand), a creator having more than one approved post is a genuine
+    possibility, and "<Brand> | @<username>" alone would either
+    silently overwrite an earlier upload of the same name in Drive, or
+    Drive would auto-append "(1)", "(2)" -- not the clean, intentional
+    naming that was asked for. This keeps the requested format as the
+    primary, readable part and adds just enough for real uniqueness.
+    """
+    handle = username if username.startswith("@") else f"@{username}"
+    return f"{brand} | {handle} | {media_id}.{extension}"
+
+
+def rows_needing_drive_upload(
+    master_rows: Dict[str, dict], existing_upload_dates: Dict[str, str]
+) -> Dict[str, dict]:
+    """Approved (rights_status GRANTED) rows that haven't been uploaded
+    to Drive yet. existing_upload_dates is {media_id: timestamp-or-""},
+    read from Master Data's own "drive_uploaded_at" column (an extra
+    column, same pattern as "Reviewed" -- not part of MASTER_COLUMNS,
+    carried forward automatically by sync_tab's generic extra-column
+    preservation). An id already marked stays marked forever, so a
+    video is never re-downloaded or re-uploaded once done -- matching
+    the explicit "add new ones, don't start over from the beginning"
+    requirement.
+    """
+    return {
+        media_id: row for media_id, row in master_rows.items()
+        if row.get("rights_status") == "GRANTED"
+        and not (existing_upload_dates.get(media_id) or "").strip()
+    }
+
+
 def is_reviewed_value(value: Optional[str]) -> bool:
     """Single shared definition of "this row is marked reviewed".
 
