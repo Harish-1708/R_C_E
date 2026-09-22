@@ -68,7 +68,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: campaign-sync-debug
+          name: campaign-sync-debug-${{ github.run_id }}
           path: downloads/campaign_sync/
           retention-days: 7
           if-no-files-found: ignore
