@@ -390,11 +390,21 @@ def export_media_csv(page: Page, download_dir: str, scroll_container_selector: s
     return out_path
 
 
-# Best guess based on a single screenshot of the filter bar -- NOT
-# verified against real markup, unlike export_media_csv's selectors
-# above, which came from actual HTML dumps. Centralized here so a real
-# run's failure message points straight at what to fix.
-CAMPAIGN_FILTER_BUTTON_SELECTOR = "button:has-text('Campaign')"
+# Best guess based on a single screenshot of the filter bar (see below
+# for the one selector that was WRONG and has since been confirmed
+# fixed against real markup) -- the rest are still unverified.
+# Centralized here so a real run's failure message points straight at
+# what to fix.
+#
+# CAMPAIGN_FILTER_BUTTON_SELECTOR: CONFIRMED WRONG in a real run, now
+# fixed. The initial guess assumed a native <button>; the real element
+# is a styled <div class="campaign-filter-label clickable"> with a
+# <span class="campaign-text">Campaign</span> inside -- a real
+# TimeoutError and the actual failing markup confirmed this. Matches
+# the real class first; the old button-based guess stays as a
+# comma-separated fallback in case a future redesign goes back to a
+# real button, rather than silently losing that possibility.
+CAMPAIGN_FILTER_BUTTON_SELECTOR = ".campaign-filter-label.clickable, button:has-text('Campaign')"
 CAMPAIGN_SEARCH_INPUT_SELECTOR = "input[placeholder*='search campaign' i]"
 CAMPAIGN_CHECKBOX_ROW_SELECTOR = "[role='checkbox'], input[type='checkbox']"
 CAMPAIGN_APPLY_BUTTON_SELECTOR = "button:has-text('Apply Changes')"
@@ -414,8 +424,13 @@ def list_available_campaigns(page: Page, timeout_ms: int = 15000) -> list:
     """
     campaign_button = page.locator(CAMPAIGN_FILTER_BUTTON_SELECTOR).first
     campaign_button.click()
-    campaign_button.wait_for(state="visible", timeout=timeout_ms)
 
+    # Waits for the dropdown's actual CONTENT (the checkbox rows) to
+    # render, not the button itself -- confirmed real cleanup: the
+    # button is already visible (that's how it was just clicked), so
+    # re-checking its own visibility here never waited for anything
+    # meaningful. The rows below are the thing that genuinely needs a
+    # moment to appear after the click.
     rows = page.locator(CAMPAIGN_CHECKBOX_ROW_SELECTOR)
     rows.first.wait_for(state="visible", timeout=timeout_ms)
     count = rows.count()
