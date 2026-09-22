@@ -18,11 +18,20 @@
 # Tracker the same way an unset spreadsheet_id_secret already skips it
 # for the main export.
 
-# drive_folder_id_secret is the target Google Drive folder for that
-# brand's Approved-video backfill (download_approved_to_drive.py).
-# Confirmed real want: Duderobe doesn't need this right now, only
-# Swoveralls -- a brand missing this is skipped cleanly for the Drive
-# backfill only, same "not set up yet" pattern as everything else.
+# drive_folder_id_secret is the target Google Drive folder's real
+# Drive API id (used to search for and rename the file Refunnel's own
+# native upload creates) for that brand's Approved-video backfill
+# (download_approved_to_drive.py). Confirmed real want: Duderobe
+# doesn't need this right now, only Swoveralls -- a brand missing this
+# is skipped cleanly for the Drive backfill only, same "not set up
+# yet" pattern as everything else.
+#
+# drive_folder_name is the SAME folder's name as shown in Refunnel's
+# own "All folders" picker (confirmed real, exact name from a live
+# screenshot: "Refunnel - Swoveralls") -- not a secret, since a folder
+# name isn't sensitive. Defaults to "Refunnel - <brand name>" if left
+# unset, which already matches the confirmed real pattern; set
+# explicitly only if a brand's folder is named differently.
 
 workspaces:
   - name: Duderobe
@@ -36,6 +45,7 @@ workspaces:
     spreadsheet_id_secret: SPREADSHEET_ID_SWOVERALLS
     tracker_spreadsheet_id_secret: CONTENT_TRACKER_SPREADSHEET_ID_SWOVERALLS
     drive_folder_id_secret: DRIVE_FOLDER_ID_SWOVERALLS
+    drive_folder_name: "Refunnel - Swoveralls"
     schedule_enabled: true
 
   - name: Defi Snacks
