@@ -1438,3 +1438,77 @@ def test_sabotage_missing_reset_would_have_left_every_later_id_doomed(monkeypatc
     with pytest.raises(AssertionError):
         assert page.scroll_to_top_calls == 1  # wrong -- would mean only the initial reset ran, no per-failure ones
     assert page.scroll_to_top_calls == 1 + 2  # confirms actual correct behavior
+
+
+# ---------- the over-broad reset removal (confirmed real: caused a NEW cascade) ----------
+
+class _GenericFailurePage(_MinimalScrapePage):
+    """Simulates a card that's found successfully but then fails for a
+    reason unrelated to scrolling (e.g. a menu never appearing) --
+    confirmed real: resetting scroll here turned out to destabilize
+    the virtualized list right before the NEXT item's click, causing
+    every subsequent item to fail too -- the opposite of the
+    intended protection."""
+
+    def locator(self, selector):
+        class _Found:
+            def count(_self):
+                return 1
+
+            @property
+            def first(_self):
+                class _Row:
+                    def hover(_s):
+                        pass
+
+                    def locator(_s, _sel):
+                        class _Toggle:
+                            @property
+                            def first(__s):
+                                return __s
+
+                            def wait_for(__s, state=None, timeout=None):
+                                pass
+
+                            def scroll_into_view_if_needed(__s, timeout=None):
+                                pass
+
+                            def check(__s):
+                                raise RuntimeError("simulated menu-timeout-style failure, unrelated to scroll")
+                        return _Toggle()
+                return _Row()
+        return _Found()
+
+
+def test_generic_failure_unrelated_to_scroll_does_not_reset(monkeypatch):
+    import refunnel_export as re_module
+    monkeypatch.setattr(re_module, "_is_logged_out", lambda page: False)
+    monkeypatch.setattr(re_module, "_pace", lambda *a, **kw: None)
+    monkeypatch.setattr(re_module, "_is_target_crashed", lambda e: False)
+
+    page = _GenericFailurePage()
+    from refunnel_export import scrape_creator_emails
+
+    media_rows = {"tk_1": {}}
+    scrape_creator_emails(page, media_rows=media_rows, media_ids=["tk_1"])
+
+    # only the function's own unconditional start-of-run reset should
+    # have happened -- the generic-exception branch must NOT add one
+    assert page.scroll_to_top_calls == 1
+
+
+def test_sabotage_reset_on_every_exception_would_be_caught(monkeypatch):
+    import refunnel_export as re_module
+    monkeypatch.setattr(re_module, "_is_logged_out", lambda page: False)
+    monkeypatch.setattr(re_module, "_pace", lambda *a, **kw: None)
+    monkeypatch.setattr(re_module, "_is_target_crashed", lambda e: False)
+
+    page = _GenericFailurePage()
+    from refunnel_export import scrape_creator_emails
+
+    media_rows = {"tk_1": {}, "tk_2": {}}
+    scrape_creator_emails(page, media_rows=media_rows, media_ids=["tk_1", "tk_2"])
+
+    with pytest.raises(AssertionError):
+        assert page.scroll_to_top_calls == 3  # wrong -- would mean the harmful over-reset is back
+    assert page.scroll_to_top_calls == 1  # confirms actual correct behavior: only the initial reset
