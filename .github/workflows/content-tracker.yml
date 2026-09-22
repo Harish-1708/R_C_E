@@ -28,15 +28,22 @@ jobs:
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: service_account.json
           GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          CONTENT_TRACKER_SPREADSHEET_ID: ${{ secrets.CONTENT_TRACKER_SPREADSHEET_ID }}
-          # One secret per brand, matching config/workspaces.yaml's
-          # spreadsheet_id_secret values -- brands without a secret set
-          # here are just skipped, not a failure (see
-          # build_content_tracker.py's docstring).
+          # One Refunnel-export secret per brand, matching
+          # config/workspaces.yaml's spreadsheet_id_secret values --
+          # brands without a secret set here are just skipped, not a
+          # failure (see build_content_tracker.py's docstring).
           SPREADSHEET_ID_DUDEROBE: ${{ secrets.SPREADSHEET_ID_DUDEROBE }}
           SPREADSHEET_ID_SWOVERALLS: ${{ secrets.SPREADSHEET_ID_SWOVERALLS }}
           SPREADSHEET_ID_DEFI_SNACKS: ${{ secrets.SPREADSHEET_ID_DEFI_SNACKS }}
           SPREADSHEET_ID_KELSON: ${{ secrets.SPREADSHEET_ID_KELSON }}
+          # One Content Tracker secret per brand, matching
+          # config/workspaces.yaml's tracker_spreadsheet_id_secret
+          # values -- each brand now gets its own dedicated tracker
+          # spreadsheet, not a shared one with a tab per brand.
+          CONTENT_TRACKER_SPREADSHEET_ID_DUDEROBE: ${{ secrets.CONTENT_TRACKER_SPREADSHEET_ID_DUDEROBE }}
+          CONTENT_TRACKER_SPREADSHEET_ID_SWOVERALLS: ${{ secrets.CONTENT_TRACKER_SPREADSHEET_ID_SWOVERALLS }}
+          CONTENT_TRACKER_SPREADSHEET_ID_DEFI_SNACKS: ${{ secrets.CONTENT_TRACKER_SPREADSHEET_ID_DEFI_SNACKS }}
+          CONTENT_TRACKER_SPREADSHEET_ID_KELSON: ${{ secrets.CONTENT_TRACKER_SPREADSHEET_ID_KELSON }}
         run: |
           echo "$GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT" > service_account.json
           python -u build_content_tracker.py
