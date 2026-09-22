@@ -1096,10 +1096,15 @@ def scrape_creator_emails(
               "See refunnel_export.py module docstring.")
         return {}
 
-    page.evaluate(
-        "(sel) => { const el = document.querySelector(sel); if (el) { el.scrollTop = 0; } }",
-        scroll_container_selector,
-    )
+    # Consolidated onto the shared scroll_to_top() helper -- this used
+    # to be its own separate inline reset here, duplicated by a SEPARATE
+    # call the caller (run_daily_sync.py) also added, once the real
+    # cascading-failure bug below was found and fixed. Owning the whole
+    # reset responsibility (start of run AND after each failure) here,
+    # in the one function that actually needs the invariant, removes
+    # that duplication -- see scroll_to_top()'s own docstring for the
+    # full confirmed evidence.
+    scroll_to_top(page, scroll_container_selector)
     page.wait_for_timeout(500)
 
     results: dict = {}
@@ -1140,6 +1145,26 @@ def scrape_creator_emails(
                 if debug_dir and not debug_snapshot_saved:
                     _save_scrape_failure_snapshot(page, debug_dir, media_id)
                     debug_snapshot_saved = True
+
+                # CONFIRMED REAL, root cause of a run where every id
+                # after roughly the second one failed identically for
+                # the entire rest of a 5245-post run:
+                # _scroll_until_card_found() NEVER resets scroll
+                # position -- it always continues forward from
+                # wherever the container currently is (el.scrollTop +=
+                # step, every single call). One failed search that
+                # exhausts all the way to the real bottom therefore
+                # permanently strands every SUBSEQUENT search at that
+                # same bottom position too, since nothing else ever
+                # resets it -- a single failure cascades into
+                # destroying the rest of the entire run. Reset here,
+                # immediately after a failed search, so only THIS one
+                # id is affected and the next one gets a genuinely
+                # fresh, working search -- not on every successful
+                # search, which would make a 5000+ item run far slower
+                # for no reason.
+                scroll_to_top(page, scroll_container_selector)
+
                 consecutive_failures += 1
                 consecutive_empty_fields = 0
                 if max_consecutive_failures is not None and consecutive_failures >= max_consecutive_failures:
@@ -1265,6 +1290,25 @@ def scrape_creator_emails(
             if debug_dir and not debug_snapshot_saved:
                 _save_scrape_failure_snapshot(page, debug_dir, media_id)
                 debug_snapshot_saved = True
+
+            # Same cascading-failure protection as the "couldn't
+            # locate" case above -- confirmed real: this branch also
+            # catches the detached-click retry loop's own exhaustion,
+            # whose internal _scroll_until_card_found() re-searches
+            # (see above) can just as easily drag the scroll position
+            # down to the bottom while failing to re-find a recycled
+            # card. Reset defensively here too, for ANY exception that
+            # reaches this point, not just the ones already known to
+            # cause it -- cheap insurance against the next id
+            # inheriting a broken scroll position for an as-yet-unseen
+            # reason.
+            try:
+                scroll_to_top(page, scroll_container_selector)
+            except Exception:
+                pass  # the page itself may be in worse shape (crashed,
+                # logged out) -- the checks just below handle those; a
+                # failed reset attempt here shouldn't mask the real error
+
             consecutive_failures += 1
             consecutive_empty_fields = 0
             if _is_logged_out(page):
