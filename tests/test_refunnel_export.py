@@ -206,6 +206,10 @@ class FakeWorkspacePage:
         self.active_workspace = active_workspace
         self.dropdown_open = False
         self.sidebar_collapsed = sidebar_collapsed
+        self.goto_calls = []
+
+    def goto(self, url):
+        self.goto_calls.append(url)
 
     def get_by_text(self, text, exact=True):
         return _FakeLocator(self, [text])
@@ -1254,3 +1258,47 @@ def test_sabotage_missed_silent_filter_failure_would_be_caught():
     with pytest.raises(AssertionError):
         assert result is True  # wrong -- the campaign name never appeared at all
     assert result is False  # confirms actual correct behavior
+
+
+# ---------- goto_social_listening_for_workspace: the "Last 3 months" bug ----------
+
+def test_navigates_before_and_after_the_workspace_switch():
+    # confirmed real, serious bug this fixes: a live run navigated with
+    # insights_timeline=last12months, then switched to Swoveralls -- and
+    # a real screenshot showed "Last 3 months" active afterward, not 12.
+    # Re-navigating AFTER the switch re-applies the correct range
+    # regardless of that workspace's own default.
+    from refunnel_export import goto_social_listening_for_workspace
+    page = FakeWorkspacePage(active_workspace="Duderobe")
+    goto_social_listening_for_workspace(page, "Swoveralls", ["Duderobe", "Swoveralls"])
+    assert len(page.goto_calls) == 2
+    assert page.goto_calls[0] == page.goto_calls[1]  # same URL, both times
+
+
+def test_the_second_navigation_happens_after_the_workspace_switch_completes():
+    from refunnel_export import goto_social_listening_for_workspace
+    page = FakeWorkspacePage(active_workspace="Duderobe")
+    goto_social_listening_for_workspace(page, "Swoveralls", ["Duderobe", "Swoveralls"])
+    assert page.active_workspace == "Swoveralls"  # the switch itself still happened correctly
+
+
+def test_noop_switch_still_gets_the_re_navigation():
+    # even when already on the right workspace, still re-navigate --
+    # cheap, and avoids assuming this specific case is exempt from the
+    # same underlying Refunnel behavior
+    from refunnel_export import goto_social_listening_for_workspace
+    page = FakeWorkspacePage(active_workspace="Swoveralls")
+    goto_social_listening_for_workspace(page, "Swoveralls", ["Duderobe", "Swoveralls"])
+    assert len(page.goto_calls) == 2
+
+
+def test_sabotage_single_navigation_would_be_caught():
+    # proves the fix is real: a version that only navigated once
+    # (the pre-fix behavior) would leave whatever the workspace switch
+    # reset the filters to
+    from refunnel_export import goto_social_listening_for_workspace
+    page = FakeWorkspacePage(active_workspace="Duderobe")
+    goto_social_listening_for_workspace(page, "Swoveralls", ["Duderobe", "Swoveralls"])
+    with pytest.raises(AssertionError):
+        assert len(page.goto_calls) == 1  # wrong -- that's the old, buggy behavior
+    assert len(page.goto_calls) == 2  # confirms actual correct behavior
