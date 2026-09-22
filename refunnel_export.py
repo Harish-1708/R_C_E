@@ -390,6 +390,81 @@ def export_media_csv(page: Page, download_dir: str, scroll_container_selector: s
     return out_path
 
 
+# Best guess based on a single screenshot of the filter bar -- NOT
+# verified against real markup, unlike export_media_csv's selectors
+# above, which came from actual HTML dumps. Centralized here so a real
+# run's failure message points straight at what to fix.
+CAMPAIGN_FILTER_BUTTON_SELECTOR = "button:has-text('Campaign')"
+CAMPAIGN_SEARCH_INPUT_SELECTOR = "input[placeholder*='search campaign' i]"
+CAMPAIGN_CHECKBOX_ROW_SELECTOR = "[role='checkbox'], input[type='checkbox']"
+CAMPAIGN_APPLY_BUTTON_SELECTOR = "button:has-text('Apply Changes')"
+CLEAR_ALL_FILTERS_SELECTOR = "text=Clear"
+
+
+def list_available_campaigns(page: Page, timeout_ms: int = 15000) -> list:
+    """Reads the full, current list of campaign names straight from the
+    Campaign filter's own checklist -- confirmed real requirement: with
+    22 campaigns today and more added over time, a hardcoded list would
+    silently miss new ones. This is the single source of truth, read
+    fresh every run, never stored in our own code.
+
+    Each campaign name is read from its checkbox row's own text, not
+    assumed from a fixed list -- so a campaign being renamed or removed
+    on Refunnel's side is reflected automatically too.
+    """
+    campaign_button = page.locator(CAMPAIGN_FILTER_BUTTON_SELECTOR).first
+    campaign_button.click()
+    campaign_button.wait_for(state="visible", timeout=timeout_ms)
+
+    rows = page.locator(CAMPAIGN_CHECKBOX_ROW_SELECTOR)
+    rows.first.wait_for(state="visible", timeout=timeout_ms)
+    count = rows.count()
+    names = []
+    for i in range(count):
+        text = rows.nth(i).inner_text().strip()
+        if text:
+            names.append(text)
+
+    # Closes the dropdown without applying anything -- this call is
+    # read-only by design, it must never change the active filter.
+    page.keyboard.press("Escape")
+    return names
+
+
+def filter_by_campaign(page: Page, campaign_name: str, timeout_ms: int = 15000) -> None:
+    """Clears any currently active filters, then applies ONLY
+    campaign_name. Clearing first (rather than just unchecking the
+    previous campaign) also resets any OTHER stray filter that might
+    be active, so each campaign's export genuinely reflects "only this
+    campaign", not "this campaign plus whatever was left over".
+    """
+    clear_all_filters(page)
+
+    campaign_button = page.locator(CAMPAIGN_FILTER_BUTTON_SELECTOR).first
+    campaign_button.click()
+
+    search_box = page.locator(CAMPAIGN_SEARCH_INPUT_SELECTOR).first
+    search_box.wait_for(state="visible", timeout=timeout_ms)
+    search_box.fill(campaign_name)
+
+    checkbox = page.locator(CAMPAIGN_CHECKBOX_ROW_SELECTOR).first
+    checkbox.wait_for(state="visible", timeout=timeout_ms)
+    checkbox.click()
+
+    apply_button = page.locator(CAMPAIGN_APPLY_BUTTON_SELECTOR).first
+    apply_button.click()
+
+
+def clear_all_filters(page: Page) -> None:
+    """Resets every active filter on the Content view -- used between
+    campaigns so one campaign's export can never accidentally include
+    a stray filter left over from the previous one."""
+    try:
+        page.locator(CLEAR_ALL_FILTERS_SELECTOR).first.click(timeout=3000)
+    except Exception:
+        pass  # nothing was active to clear -- not an error
+
+
 def _safe_click(locator) -> None:
     """Click, but refuse if the element's own text matches
     _DANGEROUS_BUTTON_PATTERN (looks like 'Send request') -- a hard
