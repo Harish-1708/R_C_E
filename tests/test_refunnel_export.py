@@ -1512,3 +1512,54 @@ def test_sabotage_reset_on_every_exception_would_be_caught(monkeypatch):
     with pytest.raises(AssertionError):
         assert page.scroll_to_top_calls == 3  # wrong -- would mean the harmful over-reset is back
     assert page.scroll_to_top_calls == 1  # confirms actual correct behavior: only the initial reset
+
+
+# ---------- the usage-rights toggle selector, verified against REAL saved markup ----------
+
+CARD_STRUCTURE_FIXTURE = Path(__file__).parent / "fixtures" / "refunnel_card_structure.html"
+
+
+def test_real_markup_nests_the_card_inside_an_aria_disclosure_wrapper():
+    # confirmed real, from an actual saved page: the clickable element
+    # is the aria-controls wrapper, NOT the .usage-rights-*-card div
+    # nested two levels inside it
+    html = CARD_STRUCTURE_FIXTURE.read_text()
+    assert 'aria-controls=' in html
+    # the card appears AFTER its wrapper's aria-controls attribute --
+    # i.e. it's nested inside, not the wrapper itself
+    wrapper_pos = html.find('aria-controls="_r_c1_"')
+    card_pos = html.find('class="usage-rights-request-card"')
+    assert wrapper_pos != -1 and card_pos != -1
+    assert wrapper_pos < card_pos
+
+
+def test_real_markup_has_two_distinct_menus_per_card():
+    # confirmed real, genuine risk: each card has TWO sibling
+    # .pop-up-menu disclosures -- the usage-rights one AND the dotted
+    # "..." menu (Upload to Google Drive / Attach to a campaign).
+    # Targeting the wrong one opens the Drive-upload menu instead.
+    html = CARD_STRUCTURE_FIXTURE.read_text()
+    assert html.count('class="pop-up-menu"') == 2
+    assert 'disclosure="true"' in html          # the dotted "..." menu
+    assert 'usage-rights-request-card' in html  # the usage-rights one
+
+
+def test_selector_scopes_to_the_usage_rights_menu_not_the_dotted_one():
+    # the selector must require a usage-rights card INSIDE the wrapper,
+    # so the dotted-menu wrapper (which has none) can never match
+    import refunnel_export  # noqa: F401  -- selector is built inline in scrape_creator_emails
+    import inspect
+    source = inspect.getsource(refunnel_export.scrape_creator_emails)
+    assert ":has(.usage-rights-request-card)" in source
+    assert ":has(.usage-rights-requested-card)" in source
+
+
+def test_sabotage_clicking_the_inner_card_would_be_caught():
+    import refunnel_export
+    import inspect
+    source = inspect.getsource(refunnel_export.scrape_creator_emails)
+    # the OLD, broken approach targeted the inner card directly as the
+    # whole selector -- that exact bare form must not be what's used
+    with pytest.raises(AssertionError):
+        assert '".usage-rights-request-card, .usage-rights-requested-card"' in source
+    assert "[aria-controls]" in source  # confirms the real, correct target
