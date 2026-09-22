@@ -750,6 +750,9 @@ class _FakeCampaignLocator:
     def nth(self, i):
         return _FakeCampaignLocator(texts=[self._texts[i]]) if self._texts else self
 
+    def get_attribute(self, name):
+        return getattr(self, "_attrs", {}).get(name)
+
     @property
     def first(self):
         return self
@@ -910,3 +913,105 @@ def test_sabotage_silent_empty_result_would_be_caught(tmp_path):
     with pytest.raises(AssertionError):
         assert snapshot_saved is False  # wrong -- would mean no evidence was captured
     assert snapshot_saved is True  # confirms actual correct behavior
+
+
+# ---------- list_available_campaigns: dynamic panel-id scoping (confirmed real markup) ----------
+
+class _ScopedCampaignPage:
+    """Models the ACTUAL confirmed DOM: the toggle sibling exposes
+    aria-controls pointing at the panel's real, dynamically-generated
+    id, and checkbox rows only exist WITHIN that scoped id -- an
+    identical selector without the #<id> prefix must NOT match them,
+    proving the scoping is real and not accidentally matching
+    page-wide."""
+
+    def __init__(self, panel_id, campaign_names):
+        self.panel_id = panel_id
+        self._campaign_names = campaign_names
+        self.keyboard = _FakeKeyboard()
+        self.screenshot_called = False
+
+    def locator(self, selector):
+        from refunnel_export import (
+            CAMPAIGN_FILTER_BUTTON_SELECTOR,
+            CAMPAIGN_DISCLOSURE_TOGGLE_SELECTOR,
+            CAMPAIGN_CHECKBOX_ROW_SELECTOR,
+        )
+        if selector == CAMPAIGN_FILTER_BUTTON_SELECTOR:
+            return _FakeCampaignLocator()
+        if selector == CAMPAIGN_DISCLOSURE_TOGGLE_SELECTOR:
+            loc = _FakeCampaignLocator()
+            loc._attrs = {"aria-controls": self.panel_id}
+            return loc
+        # ONLY the properly scoped selector finds the rows -- the bare,
+        # unscoped selector (what a page-wide search would use) must
+        # return nothing, proving scoping actually matters here.
+        if selector == f"#{self.panel_id} {CAMPAIGN_CHECKBOX_ROW_SELECTOR}":
+            return _FakeCampaignLocator(texts=self._campaign_names)
+        return _FakeCampaignLocator()
+
+    def screenshot(self, path, full_page=True):
+        self.screenshot_called = True
+
+    def content(self):
+        return "<html></html>"
+
+
+def test_scopes_the_checkbox_search_to_the_real_dynamic_panel_id():
+    from refunnel_export import list_available_campaigns
+    page = _ScopedCampaignPage(panel_id="_r_k_", campaign_names=["Evergreen Campaign", "Product Gifting"])
+    names = list_available_campaigns(page)
+    assert names == ["Evergreen Campaign", "Product Gifting"]
+
+
+def test_sabotage_unscoped_search_would_have_found_nothing():
+    # proves the scoping is load-bearing: an identical page where the
+    # panel id comes back different (e.g. read at the wrong moment)
+    # correctly finds nothing, rather than accidentally matching
+    # page-wide
+    from refunnel_export import list_available_campaigns
+    page = _ScopedCampaignPage(panel_id="_r_k_", campaign_names=["Evergreen Campaign"])
+    page.panel_id_for_rows_only = "_r_wrong_"  # simulate a mismatched id
+    # re-point the toggle to report a DIFFERENT id than what the rows are scoped under
+    real_locator = page.locator
+    def mismatched_locator(selector):
+        from refunnel_export import CAMPAIGN_DISCLOSURE_TOGGLE_SELECTOR
+        if selector == CAMPAIGN_DISCLOSURE_TOGGLE_SELECTOR:
+            loc = _FakeCampaignLocator()
+            loc._attrs = {"aria-controls": "_r_wrong_"}
+            return loc
+        return real_locator(selector)
+    page.locator = mismatched_locator
+
+    names = list_available_campaigns(page)
+    with pytest.raises(AssertionError):
+        assert names == ["Evergreen Campaign"]  # wrong -- the ids don't match, nothing should be found
+    assert names == []  # confirms actual correct (if unhelpful) behavior: no silent cross-match
+
+
+def test_debug_snapshot_captured_before_escape_not_after(tmp_path):
+    # THE actual real bug this fixes: the diagnostic used to run AFTER
+    # Escape had already closed the panel, capturing nothing useful
+    from refunnel_export import list_available_campaigns
+
+    call_order = []
+
+    class _OrderTrackingPage(_ScopedCampaignPage):
+        def screenshot(self, path, full_page=True):
+            call_order.append("screenshot")
+
+        @property
+        def keyboard(self):
+            class _KB:
+                def press(_self, key):
+                    call_order.append("escape")
+            return _KB()
+
+        @keyboard.setter
+        def keyboard(self, value):
+            pass
+
+    page = _OrderTrackingPage(panel_id="_r_k_", campaign_names=[])  # empty -- triggers the diagnostic
+    list_available_campaigns(page, debug_dir=str(tmp_path))
+
+    assert call_order == ["screenshot", "escape"]  # screenshot must come first
