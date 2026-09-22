@@ -27,6 +27,7 @@ from parse_refunnel import (
     MASTER_COLUMNS,
     is_reviewed_value,
     build_drive_filename,
+    drive_match_fragment,
     rows_needing_drive_upload,
     _get_post_link,
     build_campaign_membership,
@@ -692,3 +693,26 @@ def test_sabotage_a_no_campaign_post_wrongly_tagged_would_be_caught():
     with pytest.raises(AssertionError):
         assert "tk_2" in result  # wrong -- tk_2 was never in any campaign export
     assert "tk_2" not in result  # confirms actual correct behavior
+
+
+# ---------- drive_match_fragment: confirmed real against Refunnel's actual upload ----------
+
+def test_drive_match_fragment_matches_the_real_confirmed_example():
+    # confirmed real, exact: this id was uploaded by Refunnel's native
+    # feature as "...UGC_30937735.mp4"
+    assert drive_match_fragment("ig_18018159830937735") == "30937735"
+
+
+def test_drive_match_fragment_works_for_tiktok_ids_too():
+    assert drive_match_fragment("tk_7681495537484369165") == "84369165"
+
+
+def test_drive_match_fragment_handles_a_short_numeric_id():
+    assert drive_match_fragment("ig_1234") == "1234"
+
+
+def test_sabotage_wrong_fragment_would_be_caught():
+    result = drive_match_fragment("ig_18018159830937735")
+    with pytest.raises(AssertionError):
+        assert result == "18018159"  # wrong -- that's the FIRST 8 digits, not the last
+    assert result == "30937735"  # confirms actual correct behavior, matching the real upload
