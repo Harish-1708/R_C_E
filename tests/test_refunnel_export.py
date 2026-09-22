@@ -725,3 +725,99 @@ def test_sabotage_wrong_temp_filename_would_be_caught(tmp_path):
     with pytest.raises(AssertionError):
         assert result.name == "whatever_refunnel_calls_it.mp4"  # wrong -- must use media_id
     assert result.name == "tk_7660267483391151373.mp4"  # confirms actual correct behavior
+
+
+# ---------- campaign filter functions (best-guess selectors, logic tested) ----------
+
+class _FakeCampaignLocator:
+    def __init__(self, texts=None):
+        self._texts = texts or []
+        self.clicked = False
+        self.filled = None
+
+    def click(self, timeout=None):
+        self.clicked = True
+
+    def wait_for(self, state=None, timeout=None):
+        pass
+
+    def fill(self, text):
+        self.filled = text
+
+    def count(self):
+        return len(self._texts)
+
+    def nth(self, i):
+        return _FakeCampaignLocator(texts=[self._texts[i]]) if self._texts else self
+
+    @property
+    def first(self):
+        return self
+
+    def inner_text(self):
+        return self._texts[0] if self._texts else ""
+
+
+class _FakeKeyboard:
+    def __init__(self):
+        self.pressed = []
+
+    def press(self, key):
+        self.pressed.append(key)
+
+
+class _CampaignPage:
+    def __init__(self, campaign_names):
+        self._campaign_names = campaign_names
+        self.keyboard = _FakeKeyboard()
+        self._locators = {}
+
+    def locator(self, selector):
+        from refunnel_export import CAMPAIGN_CHECKBOX_ROW_SELECTOR, CAMPAIGN_FILTER_BUTTON_SELECTOR
+        if selector == CAMPAIGN_CHECKBOX_ROW_SELECTOR:
+            return _FakeCampaignLocator(texts=self._campaign_names)
+        if selector == CAMPAIGN_FILTER_BUTTON_SELECTOR:
+            return _FakeCampaignLocator()
+        self._locators.setdefault(selector, _FakeCampaignLocator())
+        return self._locators[selector]
+
+
+def test_list_available_campaigns_reads_every_name():
+    from refunnel_export import list_available_campaigns
+    page = _CampaignPage(["Evergreen Campaign", "Product Gifting - Cold Outbound", "[SCC] Partner with Swoveralls"])
+    names = list_available_campaigns(page)
+    assert names == ["Evergreen Campaign", "Product Gifting - Cold Outbound", "[SCC] Partner with Swoveralls"]
+
+
+def test_list_available_campaigns_closes_the_dropdown_without_applying():
+    from refunnel_export import list_available_campaigns
+    page = _CampaignPage(["Campaign A"])
+    list_available_campaigns(page)
+    assert "Escape" in page.keyboard.pressed  # read-only: never left applied
+
+
+def test_filter_by_campaign_searches_for_the_exact_name():
+    from refunnel_export import filter_by_campaign, CAMPAIGN_SEARCH_INPUT_SELECTOR
+    page = _CampaignPage([])
+    filter_by_campaign(page, "TTS VIP Creator Whitelisting - 6% Spend")
+    assert page._locators[CAMPAIGN_SEARCH_INPUT_SELECTOR].filled == "TTS VIP Creator Whitelisting - 6% Spend"
+
+
+def test_filter_by_campaign_clears_first():
+    from refunnel_export import filter_by_campaign, CLEAR_ALL_FILTERS_SELECTOR
+    page = _CampaignPage([])
+    filter_by_campaign(page, "Campaign A")
+    assert page._locators[CLEAR_ALL_FILTERS_SELECTOR].clicked is True
+
+
+def test_clear_all_filters_does_not_raise_if_nothing_to_clear():
+    from refunnel_export import clear_all_filters
+
+    class _NoFilterPage:
+        def locator(self, _selector):
+            class _Raising:
+                def click(self, timeout=None):
+                    raise RuntimeError("nothing to click")
+            return _Raising()
+
+    clear_all_filters(_NoFilterPage())  # must not raise
