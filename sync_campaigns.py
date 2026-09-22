@@ -119,6 +119,25 @@ def sync_campaigns_for_brand(
             try:
                 refunnel_export.filter_by_campaign(page, campaign_name, debug_dir=f"{download_dir}/debug")
 
+                # HARD safety gate, checked FIRST -- confirmed real,
+                # serious bug this prevents: a live run reported 2795
+                # posts (the entire unfiltered library) for "SheRobe
+                # Content Campaign", while a manual check of the exact
+                # same campaign showed genuinely zero results. The
+                # filter silently failed to take effect that one time,
+                # and nothing caught it before this -- it would have
+                # mistagged all 2795 posts as belonging to a campaign
+                # they were never in. Never trust scroll/export output
+                # without first confirming the filter is genuinely
+                # showing THIS campaign, not "everything".
+                if not refunnel_export.filter_is_genuinely_active(page, campaign_name):
+                    raise refunnel_export.ExportError(
+                        f"the Campaign filter doesn't appear to be showing {campaign_name!r} "
+                        f"after applying it -- refusing to scroll/export, since that would risk "
+                        f"exporting the unfiltered library and mistagging everything in it as "
+                        f"belonging to this campaign."
+                    )
+
                 # Confirmed real, not a guess: live debug screenshots
                 # showed Refunnel's own "No results for these
                 # filters(s)" empty state for every one of Duderobe's
