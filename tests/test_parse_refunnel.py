@@ -28,6 +28,7 @@ from parse_refunnel import (
     is_reviewed_value,
     build_drive_filename,
     rows_needing_drive_upload,
+    _get_post_link,
 )
 
 MEDIA_CSV = os.path.join(os.path.dirname(__file__), "fixtures", "sample_media.csv")
@@ -611,3 +612,39 @@ def test_sabotage_reprocessing_an_uploaded_id_would_be_caught():
     with pytest.raises(AssertionError):
         assert "tk_1" in result  # wrong -- already uploaded, must not repeat
     assert result == {}  # confirms actual correct behavior
+
+
+# ---------- _get_post_link: Refunnel's column rename (real, confirmed) ----------
+
+PERMALINK_SCHEMA_CSV = os.path.join(os.path.dirname(__file__), "fixtures", "sample_media_permalink_schema.csv")
+
+
+def test_reads_link_from_the_new_permalink_column():
+    # confirmed real: a fresh export has "permalink", not
+    # "original_post_link" at all -- this is the exact schema Refunnel
+    # is using today
+    result = parse_media_csv(PERMALINK_SCHEMA_CSV)
+    assert result.master["ig_1001"]["original_post_link"] == "https://www.instagram.com/reel/AAAA111/"
+    assert result.master["tk_2002"]["original_post_link"] == "https://www.tiktok.com/@creator_two/video/2002"
+
+
+def test_falls_back_to_the_old_column_name_for_backward_compatibility():
+    assert _get_post_link({"original_post_link": "https://example.com/old"}) == "https://example.com/old"
+
+
+def test_prefers_permalink_when_both_columns_somehow_present():
+    row = {"permalink": "https://example.com/new", "original_post_link": "https://example.com/old"}
+    assert _get_post_link(row) == "https://example.com/new"
+
+
+def test_returns_blank_when_neither_column_present():
+    assert _get_post_link({"id": "tk_1"}) == ""
+
+
+def test_sabotage_the_silent_blank_link_regression_would_be_caught():
+    # this is the exact real risk: reading only the old column name
+    # against the new schema silently produces an empty link
+    result = parse_media_csv(PERMALINK_SCHEMA_CSV)
+    with pytest.raises(AssertionError):
+        assert result.master["ig_1001"]["original_post_link"] == ""  # wrong -- would mean the bug is back
+    assert result.master["ig_1001"]["original_post_link"]  # confirms actual correct behavior: non-blank
