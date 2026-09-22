@@ -97,6 +97,12 @@ class _FakePage:
     def close(self):
         pass
 
+    def screenshot(self, path, full_page=True):
+        pass
+
+    def content(self):
+        return "<html></html>"
+
 
 @pytest.fixture(autouse=True)
 def _stub_browser(monkeypatch):
@@ -222,7 +228,7 @@ def test_a_failed_campaign_does_not_stop_the_rest(monkeypatch, capsys):
 
     call_count = {"n": 0}
 
-    def fake_filter(page, campaign_name):
+    def fake_filter(page, campaign_name, **kw):
         call_count["n"] += 1
         if campaign_name == "Bad Campaign":
             raise RuntimeError("simulated filter failure")
