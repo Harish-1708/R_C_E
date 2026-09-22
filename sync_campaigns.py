@@ -118,6 +118,23 @@ def sync_campaigns_for_brand(
         for campaign_name in campaigns:
             try:
                 refunnel_export.filter_by_campaign(page, campaign_name, debug_dir=f"{download_dir}/debug")
+
+                # Confirmed real, not a guess: live debug screenshots
+                # showed Refunnel's own "No results for these
+                # filters(s)" empty state for every one of Duderobe's
+                # 5 campaigns, matching your own manual check exactly.
+                # That's a genuine, valid "0 posts in this campaign"
+                # answer -- there's no "<n> of <total> media" counter
+                # to find at all in that state, so scroll_to_load_all()
+                # would only ever fail trying to find one. Checked
+                # BEFORE attempting to scroll/export, so a real empty
+                # campaign is recorded correctly instead of logged as
+                # a failure and skipped.
+                if refunnel_export.has_no_results_for_filter(page):
+                    campaign_to_ids[campaign_name] = set()
+                    print(f"{brand} / {campaign_name!r}: 0 post(s) (Refunnel shows no matching content).")
+                    continue
+
                 refunnel_export.scroll_to_load_all(page)
                 csv_path = refunnel_export.export_media_csv(page, download_dir)
                 ids = _ids_from_csv(csv_path)
