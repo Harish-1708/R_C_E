@@ -169,6 +169,35 @@ def select_workspace(
     page.wait_for_timeout(2000)  # let the workspace switch (page reload/content refresh) settle
 
 
+def goto_social_listening_for_workspace(page: Page, workspace_name: str, known_workspace_names: Iterable[str]) -> None:
+    """Navigates to Social Listening for a SPECIFIC workspace, with the
+    intended 12-months time range GENUINELY applied afterward -- not
+    just requested in the URL before the switch.
+
+    CONFIRMED REAL, SERIOUS BUG this fixes: switching workspaces
+    silently RESETS the active time-range filter back to THAT
+    workspace's own default/last-used setting, overriding whatever was
+    in the URL beforehand. A live run navigated with
+    insights_timeline=last12months, then switched to Swoveralls -- and
+    a screenshot of the resulting page showed "Last 3 months" in the
+    dropdown, not 12. Every script that ever did "goto, then
+    select_workspace" was exposed to this for any workspace whose own
+    default differs from 12 months (which just Swoveralls being an
+    additional brand, not Duderobe specifically, was enough to prove).
+
+    Re-navigates to the SAME URL again, AFTER the workspace switch has
+    settled -- this is the one, single place that sequence lives now,
+    so every caller (the main sync, campaign sync, the Drive backfill)
+    gets the fix by using this instead of the two calls directly.
+    """
+    page.goto(refunnel_auth.refunnel_social_listening_url())
+    select_workspace(page, workspace_name, known_workspace_names)
+    # Re-navigate: the workspace switch above can silently reset the
+    # time-range filter to THIS workspace's own default -- see the
+    # docstring above for the confirmed real evidence.
+    page.goto(refunnel_auth.refunnel_social_listening_url())
+
+
 def scroll_to_load_all(
     page: Page,
     count_text_pattern: str = r"(\d+)\s+of\s+(\d+)\s+media",
