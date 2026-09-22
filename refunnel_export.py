@@ -1176,9 +1176,37 @@ def scrape_creator_emails(
                     break
                 continue
 
-            request_toggle = grid_item.locator(
-                ".usage-rights-request-card, .usage-rights-requested-card"
-            ).first
+            # CONFIRMED REAL from an actual saved HTML dump of the live
+            # page: the .usage-rights-request-card / -requested-card div
+            # is NOT the clickable element -- it's nested two levels
+            # INSIDE the element that actually carries the click
+            # handler, which is the ARIA disclosure wrapper:
+            #   <div class="pop-up-menu">
+            #     <div tabindex="-1" aria-controls="_r_c1_" aria-expanded="false">   <-- the real toggle
+            #       <div style="cursor: pointer;">
+            #         <div class="usage-rights-request-card">              <-- what we used to click
+            # Clicking the inner div could land on a child that React
+            # re-renders independently, which is very likely why clicks
+            # kept reporting "element detached" for the full 30s while
+            # the card itself resolved fine every time. The disclosure
+            # wrapper is the stable, interactive element -- same ARIA
+            # pattern already confirmed for the Campaign filter earlier
+            # in this project.
+            #
+            # Scoped to the wrapper CONTAINING a usage-rights card
+            # specifically -- confirmed real, genuine risk: each card
+            # has TWO sibling .pop-up-menu disclosures (the dump has 16
+            # across 8 cards, exactly 8 of each kind). The other one
+            # opens the dotted "..." menu -- the Upload to Google
+            # Drive / Attach to a campaign menu. Targeting the wrong
+            # one would open the Drive-upload menu instead of the
+            # usage-rights flow, which is exactly what the earlier
+            # stale debug screenshot appeared to show.
+            usage_rights_toggle_selector = (
+                ".pop-up-menu > [aria-controls]:has(.usage-rights-request-card), "
+                ".pop-up-menu > [aria-controls]:has(.usage-rights-requested-card)"
+            )
+            request_toggle = grid_item.locator(usage_rights_toggle_selector).first
 
             # Re-finds the card fresh on each attempt (re-scrolling if
             # needed) rather than retrying the SAME stale locator chain
@@ -1200,9 +1228,7 @@ def scrape_creator_emails(
                     grid_item, _ = _scroll_until_card_found(page, media_id, scroll_container_selector)
                     if grid_item is None:
                         break  # genuinely gone now, not just detached -- let the outer handling deal with it
-                    request_toggle = grid_item.locator(
-                        ".usage-rights-request-card, .usage-rights-requested-card"
-                    ).first
+                    request_toggle = grid_item.locator(usage_rights_toggle_selector).first
                 try:
                     request_toggle.scroll_into_view_if_needed(timeout=4000)
                     request_toggle.wait_for(state="visible", timeout=4000)
