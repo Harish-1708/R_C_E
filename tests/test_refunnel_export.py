@@ -1372,3 +1372,69 @@ def test_sabotage_scroll_never_reset_would_be_caught():
     with pytest.raises(AssertionError):
         assert page.scroll_top == 691285  # wrong -- would mean the bug is still present
     assert page.scroll_top == 0  # confirms actual correct behavior
+
+
+# ---------- scrape_creator_emails: cascading scroll-stuck failure (the real Swoveralls bug) ----------
+
+class _MinimalScrapePage:
+    """Just enough of a Page fake to drive scrape_creator_emails()
+    through its "card not found" path -- the simplest reproduction of
+    the real cascading bug, without needing the full click/menu/popup
+    flow a successful find would require."""
+
+    def __init__(self):
+        self.scroll_to_top_calls = 0
+
+    def evaluate(self, js, *a, **kw):
+        if "scrollTop = 0" in js:
+            self.scroll_to_top_calls += 1
+            return None
+        return {"scrollTop": 691285, "scrollHeight": 692005, "clientHeight": 720}
+
+    def wait_for_timeout(self, ms):
+        pass
+
+    def locator(self, selector):
+        class _Empty:
+            def count(_self):
+                return 0
+        return _Empty()
+
+    def url(self):
+        return "https://app.refunnel.com/dashboard/content/social-listening"
+
+
+def test_scrape_creator_emails_resets_scroll_after_each_failed_search(monkeypatch):
+    import refunnel_export as re_module
+    monkeypatch.setattr(re_module, "_is_logged_out", lambda page: False)
+    monkeypatch.setattr(re_module, "_pace", lambda *a, **kw: None)
+
+    page = _MinimalScrapePage()
+    from refunnel_export import scrape_creator_emails
+
+    media_rows = {"tk_1": {}, "tk_2": {}, "tk_3": {}}
+    scrape_creator_emails(
+        page, media_rows=media_rows, media_ids=["tk_1", "tk_2", "tk_3"],
+    )
+
+    # confirmed real bug this fixes: without a reset after EACH failed
+    # search, the scroll position never recovers, and every id after
+    # the first failure is doomed for the rest of the entire run.
+    # 1 unconditional reset at the function's own start + 1 per failure.
+    assert page.scroll_to_top_calls == 1 + 3
+
+
+def test_sabotage_missing_reset_would_have_left_every_later_id_doomed(monkeypatch):
+    import refunnel_export as re_module
+    monkeypatch.setattr(re_module, "_is_logged_out", lambda page: False)
+    monkeypatch.setattr(re_module, "_pace", lambda *a, **kw: None)
+
+    page = _MinimalScrapePage()
+    from refunnel_export import scrape_creator_emails
+
+    media_rows = {"tk_1": {}, "tk_2": {}}
+    scrape_creator_emails(page, media_rows=media_rows, media_ids=["tk_1", "tk_2"])
+
+    with pytest.raises(AssertionError):
+        assert page.scroll_to_top_calls == 1  # wrong -- would mean only the initial reset ran, no per-failure ones
+    assert page.scroll_to_top_calls == 1 + 2  # confirms actual correct behavior
