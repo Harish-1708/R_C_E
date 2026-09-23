@@ -278,25 +278,48 @@ def _submit_login_code(page: Page, enable_timeout_ms: int = 15000) -> None:
     )
 
 
-def _perform_login(page: Page, email: str, otp_wait_seconds: int = 90) -> None:
+def _perform_login(page: Page, email: str, otp_wait_seconds: int = 90, otp_request_attempts: int = 2) -> None:
     """Full automated login: enter email, request code, fetch it from
-    Gmail, submit it. Raises LoginError on any step failure."""
+    Gmail, submit it. Raises LoginError on any step failure.
+
+    CONFIRMED REAL gap this fixes: a live run clicked "Send code" ONCE,
+    waited 90s, and gave up outright when nothing arrived -- one late,
+    filtered, or lost email killed the entire pipeline run, even though
+    clicking Send again generates a genuinely NEW email and a fresh
+    delivery window. otp_request_attempts retries that whole
+    request-and-wait cycle (not just the Gmail poll) before raising.
+    """
     page.goto(REFUNNEL_LOGIN_URL, wait_until="domcontentloaded", timeout=20000)
 
     email_input = _find_first(page, SELECTORS["email_input"], "email input")
     email_input.fill(email)
 
-    request_ts = time.time()
-    send_button = _find_first(page, SELECTORS["send_code_button"], "send code button")
-    send_button.click()
+    last_error: Optional[Exception] = None
+    code = None
+    for attempt in range(otp_request_attempts):
+        if attempt > 0:
+            print(f"gmail_otp: no code arrived from the previous request -- "
+                  f"requesting a new one (attempt {attempt + 1} of {otp_request_attempts}).")
 
-    try:
-        code = gmail_otp.fetch_latest_code(
-            requested_after_ts=request_ts,
-            max_wait_seconds=otp_wait_seconds,
-        )
-    except gmail_otp.OtpNotFoundError as e:
-        raise LoginError(f"Automated login couldn't get a code from Gmail: {e}") from e
+        request_ts = time.time()
+        send_button = _find_first(page, SELECTORS["send_code_button"], "send code button")
+        send_button.click()
+
+        try:
+            code = gmail_otp.fetch_latest_code(
+                requested_after_ts=request_ts,
+                max_wait_seconds=otp_wait_seconds,
+            )
+            last_error = None
+            break
+        except gmail_otp.OtpNotFoundError as e:
+            last_error = e
+
+    if code is None:
+        raise LoginError(
+            f"Automated login couldn't get a code from Gmail after "
+            f"{otp_request_attempts} request(s): {last_error}"
+        ) from last_error
 
     _enter_login_code(page, code)
     _submit_login_code(page)
