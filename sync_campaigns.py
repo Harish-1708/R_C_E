@@ -221,7 +221,7 @@ def sync_campaigns_for_brand(
         for media_id, value in fresh.items()
         if not (existing_campaigns.get(media_id) or "").strip()
     }
-    written = master_client.update_cells_by_id(updates, "campaigns")
+    written = master_client.update_cells_by_id(updates, "campaigns", create_if_missing=True)
     print(f"{brand}: set campaign tags on {written} row(s) that didn't have one yet "
           f"(rows with an existing value are left untouched by design).")
 
