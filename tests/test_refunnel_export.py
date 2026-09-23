@@ -2411,7 +2411,7 @@ def test_a_click_only_event_is_never_used_to_open_the_menu():
     # live run B: el.click() reached the right, connected card and the menu
     # still never opened. It must not be the mechanism relied on.
     import refunnel_export
-    assert "el.click()" not in refunnel_export._CENTER_CARD_JS
+    assert "el.click()" not in refunnel_export._VERIFY_CARD_JS
     assert "el.click()" not in refunnel_export._POINTER_SEQUENCE_JS
 
 
@@ -2455,20 +2455,34 @@ def test_a_component_that_only_wakes_on_click_only_events_is_not_our_path(monkey
 def test_sabotage_relying_on_a_click_only_event_would_be_caught():
     import refunnel_export
     with pytest.raises(AssertionError):
-        assert "el.click()" in refunnel_export._CENTER_CARD_JS  # wrong -- disproven live
+        assert "el.click()" in refunnel_export._VERIFY_CARD_JS  # wrong -- disproven live
     assert '"pointerdown"' in refunnel_export._POINTER_SEQUENCE_JS
 
 
 # -- centering, target, safety --
 
-def test_card_is_centered_before_being_clicked(monkeypatch):
-    # 800px search steps vs a 720px viewport overshoot, parking cards at the
-    # top edge -- under the sticky header
+def test_no_scroll_happens_between_finding_the_card_and_clicking_it(monkeypatch):
+    # confirmed real reversal: this used to assert centering happened
+    # here. A user's own screenshot showed a failing card only 4th from
+    # the top of the whole feed -- almost no scrolling needed -- yet its
+    # failure snapshot showed cards from much further down the list.
+    # Centering a near-top card to the viewport's MIDDLE can require
+    # scrolling well past where it actually is, and that scroll is
+    # itself what was churning the virtualized list. Removed -- nothing
+    # should scroll here at all anymore.
     page = _MenuPage(email="a@b.com")
     _scrape(monkeypatch, page)
-    assert page.events.index("center") < page.events.index("forced_click")
+    assert "center" not in page.events
     import refunnel_export
-    assert 'block: "center"' in refunnel_export._CENTER_CARD_JS
+    assert 'scrollIntoView' not in refunnel_export._VERIFY_CARD_JS
+
+
+def test_sabotage_reintroducing_centering_would_be_caught(monkeypatch):
+    page = _MenuPage(email="a@b.com")
+    _scrape(monkeypatch, page)
+    with pytest.raises(AssertionError):
+        assert "center" in page.events  # wrong -- the exact behaviour that over-scrolled
+    assert "center" not in page.events
 
 
 def test_the_innermost_card_is_the_click_target_not_its_wrapper():
@@ -2483,7 +2497,7 @@ def test_the_innermost_card_is_the_click_target_not_its_wrapper():
 
 def test_the_send_button_safety_net_survives():
     import refunnel_export
-    assert "refusing to click" in refunnel_export._CENTER_CARD_JS
+    assert "refusing to click" in refunnel_export._VERIFY_CARD_JS
 
 
 # -- retries and time cost --
@@ -2619,7 +2633,7 @@ def test_sabotage_an_unbounded_evaluate_call_would_be_caught():
     source = inspect.getsource(refunnel_export._open_usage_rights_menu)
     with pytest.raises(AssertionError):
         # simulates the exact real regression: one call with no timeout
-        assert all("timeout=" in line for line in ["card.evaluate(_CENTER_CARD_JS)"])
+        assert all("timeout=" in line for line in ["card.evaluate(_VERIFY_CARD_JS)"])
     assert all("timeout=" in line for line in source.splitlines() if ".evaluate(" in line)
 
 
