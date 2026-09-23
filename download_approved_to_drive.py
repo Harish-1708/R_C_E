@@ -181,7 +181,7 @@ def process_one_brand(
                 # the end -- so a crash partway through a long run
                 # doesn't lose track of videos already confirmed in
                 # Drive.
-                master_client.update_single_cell(media_id, "drive_uploaded_at", _now_iso())
+                master_client.update_single_cell(media_id, "drive_uploaded_at", _now_iso(), create_if_missing=True)
                 uploaded += 1
             except Exception as e:
                 print(f"{brand}: couldn't process media_id={media_id!r}: {type(e).__name__}: {e}")
