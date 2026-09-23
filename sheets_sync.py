@@ -180,6 +180,7 @@ def sync_tab(
     sort_reverse: bool = False,
     max_shrink_fraction: Optional[float] = None,
     never_delete: bool = False,
+    preserve_columns: Optional[List[str]] = None,
 ) -> dict:
     """Rewrite one tab from `target_rows` (id -> row dict, using
     `known_columns` as keys), preserving any extra manual columns already
@@ -257,7 +258,19 @@ def sync_tab(
     # forward indefinitely as "extra columns". A real manual column
     # (like a "Notes" header you add yourself) always has a name.
     extra_columns = [c for c in existing_header if c not in known_columns and c.strip()]
-    existing_by_id = index_by_id(existing_header, existing_data, id_col) if extra_columns else {}
+    # preserve_columns: columns that sit in known_columns (so they get a
+    # PROPER, stable position in the header) but whose values are
+    # carried forward from the sheet rather than overwritten by
+    # target_rows. Confirmed real need: "campaigns" had to be a real
+    # Master column to be placed next to "collections" -- extra columns
+    # are always appended at the END (see final_header below), and any
+    # mid-sheet placement would be moved back there on the next sync.
+    # But as a plain known column, every daily sync would overwrite it
+    # with the CSV's blank value (the export has no campaign field),
+    # wiping the freeze-once-set campaign data. Preserving it gets both.
+    preserve = set(preserve_columns or [])
+    need_existing = bool(extra_columns) or bool(preserve)
+    existing_by_id = index_by_id(existing_header, existing_data, id_col) if need_existing else {}
 
     final_header = list(known_columns) + extra_columns
 
@@ -270,10 +283,17 @@ def sync_tab(
     out_rows = [final_header]
     for row_id in ids:
         row = target_rows[row_id]
-        line = [_flatten_cell(row.get(col, "")) for col in known_columns]
+        existing_row = existing_by_id.get(row_id, {})
+        line = []
+        for col in known_columns:
+            if col in preserve:
+                # the sheet's own value wins; target_rows only fills a blank
+                value = existing_row.get(col, "") or row.get(col, "")
+            else:
+                value = row.get(col, "")
+            line.append(_flatten_cell(value))
         if extra_columns:
-            preserved = existing_by_id.get(row_id, {})
-            line += [_flatten_cell(preserved.get(col, "")) for col in extra_columns]
+            line += [_flatten_cell(existing_row.get(col, "")) for col in extra_columns]
         out_rows.append(line)
 
     client.overwrite_all(out_rows)
@@ -335,7 +355,44 @@ class GspreadSheetsClient:
         except Exception:
             pass  # cosmetic only -- never worth failing the whole sync over
 
-    def update_single_cell(self, row_id: str, column_name: str, value: str, id_col: str = "id") -> bool:
+    def _ensure_column(self, header: List[str], column_name: str) -> List[str]:
+        """Appends column_name to the header if it isn't there yet, and
+        returns the (possibly extended) header.
+
+        CONFIRMED REAL, silent data-loss bug this replaces: both
+        update_single_cell and update_cells_by_id used to just return
+        "nothing written" when the target column didn't exist. A live
+        campaign run found 59 posts across 5 campaigns and wrote ZERO
+        of them -- the "campaigns" column had never been created, and
+        nothing said so. The same flaw meant "drive_uploaded_at" could
+        never be written on a sheet lacking it, so every Drive upload
+        would stay unmarked and be re-uploaded as a duplicate on every
+        single run.
+
+        Opt-in via create_if_missing=True, NOT the default -- confirmed
+        real, deliberate distinction: system-owned columns ("campaigns",
+        "drive_uploaded_at") must be created on demand, but "Reviewed"
+        is a MANUAL column you add yourself, and Content Tracker's
+        propagation must NOT invent it on your behalf. The default
+        no-create path now prints a loud warning instead of silently
+        returning, so this class of bug can't hide again.
+
+        Appended at the END, matching where sync_tab itself places extra
+        columns, so the next sync_tab keeps it there rather than moving
+        it. (A column meant to sit mid-sheet belongs in known_columns.)
+        """
+        if column_name in header:
+            return header
+        new_col = len(header) + 1
+        col_count = getattr(self._ws, "col_count", None)
+        if isinstance(col_count, int) and new_col > col_count:
+            retry_on_transient_error(self._ws.add_cols, new_col - col_count)
+        retry_on_transient_error(self._ws.update_cell, 1, new_col, column_name)
+        print(f"Created missing '{column_name}' column in the sheet (it didn't exist yet).")
+        return list(header) + [column_name]
+
+    def update_single_cell(self, row_id: str, column_name: str, value: str, id_col: str = "id",
+                           create_if_missing: bool = False) -> bool:
         """Update just one cell (column_name, for whichever row has
         row_id in id_col) WITHOUT rewriting the whole tab. Used for
         incremental updates during long-running steps like email
@@ -347,8 +404,15 @@ class GspreadSheetsClient:
         with that id exists in the sheet yet.
         """
         header = retry_on_transient_error(self._ws.row_values, 1)
-        if id_col not in header or column_name not in header:
+        if id_col not in header:
             return False
+        if column_name not in header:
+            if not create_if_missing:
+                # Never silent again -- see _ensure_column's docstring.
+                print(f"WARNING: '{column_name}' column doesn't exist in this sheet, so nothing "
+                      f"was written for {row_id!r}.")
+                return False
+            header = self._ensure_column(header, column_name)
         id_col_idx = header.index(id_col) + 1  # gspread is 1-indexed
         target_col_idx = header.index(column_name) + 1
 
@@ -359,7 +423,8 @@ class GspreadSheetsClient:
                 return True
         return False
 
-    def update_cells_by_id(self, updates: Dict[str, str], column_name: str, id_col: str = "id") -> int:
+    def update_cells_by_id(self, updates: Dict[str, str], column_name: str, id_col: str = "id",
+                           create_if_missing: bool = False) -> int:
         """Batch version of update_single_cell: writes ONE column across
         MANY rows, keyed by id, in a small, fixed number of API calls no
         matter how many rows are involved -- one read for the header,
@@ -382,8 +447,15 @@ class GspreadSheetsClient:
         if not updates:
             return 0
         header = retry_on_transient_error(self._ws.row_values, 1)
-        if id_col not in header or column_name not in header:
+        if id_col not in header:
             return 0
+        if column_name not in header:
+            if not create_if_missing:
+                if updates:
+                    print(f"WARNING: '{column_name}' column doesn't exist in this sheet, so "
+                          f"{len(updates)} value(s) were NOT written.")
+                return 0
+            header = self._ensure_column(header, column_name)
         id_col_idx = header.index(id_col) + 1  # gspread is 1-indexed
         target_col_idx = header.index(column_name) + 1
 
