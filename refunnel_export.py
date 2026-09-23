@@ -60,10 +60,25 @@ SCRAPE_EMAILS_ENABLED = True
 # alone can't be used to detect it.
 PENDING_REVIEW_TITLE_TEXT = "Pending review"
 
-# Usage-rights menu interaction is bounded by MENU_CLICK_TIMEOUT_MS and
-# MENU_OPEN_TIMEOUT_MS near the interaction helper below. Keeping those
-# limits local to the menu flow prevents a virtualized-card race from
-# inheriting Playwright's 30s default timeout.
+# Per-attempt click timeout inside the detached-card retry loop.
+#
+# CONFIRMED REAL overcorrection this replaces: the previous value (8000)
+# was set based on evidence gathered while a SEPARATE bug (the general
+# exception handler over-resetting scroll) was still present, which
+# meant retries could never succeed regardless of timeout length --
+# any value would have looked equally "doomed" at the time. Once that
+# bug was fixed (retries do get a genuinely fresh element now), a live
+# run showed 3-for-3 clicks still failing, every single one at exactly
+# 8s -- consistent with the element genuinely needing MORE time to
+# stabilize (virtualized-list re-render settling, image lazy-loading),
+# not with it being permanently un-clickable. 8s never gave it the
+# chance to find out.
+#
+# 15s is a middle ground, not a confirmed-correct number -- if clicks
+# still fail consistently at this value too, that would be real
+# evidence the problem isn't about time at all, and needs a fresh debug
+# snapshot from the moment of failure to diagnose properly.
+CLICK_ATTEMPT_TIMEOUT_MS = 15000
 
 # Refunnel's "Request usage rights" flow has a "Send request" button
 # (confirmed from your screenshot). We refuse to click anything whose
@@ -1189,144 +1204,181 @@ def modal_post_check(image_srcs: Iterable[str], media_id: str) -> str:
 
 
 USAGE_RIGHTS_CARD_SELECTOR = ".usage-rights-request-card, .usage-rights-requested-card"
-# This is the actual Refunnel disclosure control. The card is nested inside
-# this element; clicking the wrapper is what the original working scraper did
-# successfully on DudeRobe, and the saved Refunnel HTML shows that this wrapper
-# owns aria-expanded/aria-controls.
-USAGE_RIGHTS_TOGGLE_SELECTOR = (
-    ".pop-up-menu > [aria-controls]:has(.usage-rights-request-card), "
-    ".pop-up-menu > [aria-controls]:has(.usage-rights-requested-card)"
-)
 USAGE_RIGHTS_MENU_TEXT = "Request creator approval to use this content in your marketing"
 
-# Keep the interaction bounded. The previous implementation let Locator.evaluate()
-# inherit Playwright's 30s default, so three failed attempts could consume ~90s
-# for ONE post. That is the main reason the Swoveralls run looked frozen.
-MENU_CLICK_TIMEOUT_MS = 2000
+# Per-attempt timings for opening the usage-rights menu. CONFIRMED REAL
+# cost this cuts: every locator.evaluate() call here used to have NO
+# explicit timeout, silently falling back to Playwright's own 30s
+# default -- a live run's Call log showed exactly this, waiting to
+# resolve a locator for a card that was confirmed completely absent
+# from the page's own HTML at that moment. With every operation below
+# now explicitly bounded, a genuinely stuck post costs roughly 35s for
+# all 3 attempts combined (not 30s x however many unbounded calls it
+# happened to hit), and a working one returns in well under a second.
+MENU_CLICK_TIMEOUT_MS = 1500
 MENU_OPEN_TIMEOUT_MS = 2500
+# CONFIRMED REAL, root-cause bug this fixes -- and it explains why the
+# problem persisted across BOTH the wrapper-click AND the card-click
+# versions of this code: locator.evaluate() resolves its locator with
+# PLAYWRIGHT'S OWN 30-SECOND DEFAULT if no timeout is given, completely
+# separate from any timeout passed to .click(). A live run's Call log
+# showed it waiting on exactly that locator resolution, and the same
+# card was confirmed completely absent from the page's own HTML at the
+# moment it finally gave up -- the card genuinely was recycled away,
+# and every .evaluate() call was silently allowed to wait the full 30s
+# hoping it would reappear, instead of failing fast so the retry loop
+# could actually retry within a sane total budget.
+EVALUATE_TIMEOUT_MS = 2000
 
-# Used only for a short, synchronous safety/centering operation. It does NOT
-# dispatch a synthetic click; Refunnel's usage-rights disclosure needs a real
-# browser click sequence.
+# Runs INSIDE the page, in one synchronous turn, on the resolved card.
+# Every step happens before react-virtuoso can process a scroll event
+# and recycle the node -- so there is no gap for the card to vanish in.
+# Centers the card and runs the send-button safety net, in one turn.
+# It deliberately does NOT click: a live run proved a synthetic click
+# reaches the correct, connected card and still doesn't open the menu.
 _CENTER_CARD_JS = """(el, dangerous) => {
-    if (!el.isConnected) { throw new Error("usage-rights toggle detached before click"); }
+    if (!el.isConnected) { throw new Error("card detached before click"); }
     if (new RegExp(dangerous, "i").test(el.innerText || "")) {
         throw new Error("refusing to click a send/submit-like element");
     }
     el.scrollIntoView({block: "center", inline: "nearest"});
-    if (!el.isConnected) { throw new Error("usage-rights toggle detached after centering"); }
+    if (!el.isConnected) { throw new Error("card detached after centering"); }
+}"""
+
+# Second mechanism: the FULL pointer/mouse sequence dispatched straight to
+# the card element (no coordinates, so nothing can intercept it). Used only
+# if the real forced click didn't open the menu.
+_POINTER_SEQUENCE_JS = """(el) => {
+    if (!el.isConnected) { throw new Error("card detached before pointer sequence"); }
+    const r = el.getBoundingClientRect();
+    const opts = {bubbles: true, cancelable: true, view: window, button: 0,
+                  clientX: r.left + r.width / 2, clientY: r.top + r.height / 2};
+    el.dispatchEvent(new PointerEvent("pointerdown", {...opts, pointerId: 1, isPrimary: true}));
+    el.dispatchEvent(new MouseEvent("mousedown", opts));
+    el.dispatchEvent(new PointerEvent("pointerup", {...opts, pointerId: 1, isPrimary: true}));
+    el.dispatchEvent(new MouseEvent("mouseup", opts));
+    el.dispatchEvent(new MouseEvent("click", opts));
+}"""
+
+# Reads (never clicks) the disclosure wrapper's open state from the card's
+# CURRENT node, so a recycled node can't leave us polling a stale one.
+_MENU_EXPANDED_JS = """(el) => {
+    const w = el.closest('[aria-controls]');
+    return w ? w.getAttribute('aria-expanded') : null;
 }"""
 
 
+def _open_usage_rights_menu(page: Page, media_id: str, grid_item, scroll_container_selector: str,
+                            media_row: Optional[dict] = None, attempts: int = 3):
+    """Opens the usage-rights menu for media_id's card and clicks its
+    "Request creator approval..." item. Returns the (possibly re-found)
+    grid_item. Raises ExportError if it can't.
 
-def _open_usage_rights_menu(
-    page: Page,
-    media_id: str,
-    grid_item,
-    scroll_container_selector: str,
-    media_row: Optional[dict] = None,
-    attempts: int = 3,
-):
-    """Open Refunnel's usage-rights menu and click its request item.
+    Built from a live run's own Playwright call log plus debug HTML:
 
-    ``grid_item`` is only evidence that the target was found. The actual
-    disclosure toggle is resolved fresh on every attempt so a react-virtuoso
-    recycle cannot leave us operating on a stale child locator.
+    1. PHYSICAL CLICKS KEPT MISSING. The log showed "element is not
+       stable", then "<div class=new-tabs-switch> from <div class=
+       set-sticky> intercepts pointer events", then "element was
+       detached". Playwright's actionability wait gave the virtualized
+       list time to recycle the card, and the sticky header sat over it.
 
-    The disclosure wrapper is deliberately clicked instead of the inner
-    ``.usage-rights-request-card``. The saved Refunnel HTML shows the wrapper
-    owns ``aria-controls``/``aria-expanded``, and the original code's wrapper
-    interaction is the one that demonstrably works on DudeRobe.
+    1b. BUT A CLICK-ONLY DOM EVENT DOESN'T OPEN THE MENU. A later live
+       run clicked the correct, connected card with el.click() four times
+       per post; the menu never opened (the final error was the menu wait,
+       not "card detached", so the click genuinely landed). el.click() --
+       like dispatchEvent(new MouseEvent("click")) -- fires ONLY "click".
+       The proven-working original code used a real click, which fires
+       pointerdown, mousedown, pointerup, mouseup AND click; popover
+       triggers commonly listen on pointerdown/mousedown. So each attempt
+       now uses (a) Playwright's real click with force=True -- the full
+       trusted sequence, minus the actionability wait that caused the
+       recycling race -- and only if that didn't open it, (b) the full
+       pointer sequence dispatched directly to the element.
 
-    We use a real Playwright click with ``force=True`` and a short timeout.
-    That preserves the browser's pointer/mouse event sequence while skipping
-    the long actionability wait that was giving the virtualized list time to
-    recycle the target. The toggle is centered first so the sticky header does
-    not sit over it.
+    2. WHY THE CARD SAT UNDER THE STICKY HEADER. The card search scrolls
+       800px per step against a 720px viewport, so it overshoots: a card
+       is often detected while ABOVE the viewport, and Playwright then
+       scrolls it minimally to the nearest edge -- the top, under the
+       header. Centering it (block: "center") fixes that, and the middle
+       of the rendered window is also where virtuoso is least likely to
+       unmount it.
+
+    3. CLICK THE CARD ITSELF, NOT ITS WRAPPER. The real ancestor chain
+       is card -> div[cursor:pointer] -> div[aria-controls]. The
+       cursor:pointer div, sitting between them, most likely owns the
+       handler. A DOM click only bubbles UPWARD, so clicking the outer
+       aria-controls wrapper would never pass through it. Clicking the
+       innermost card bubbles through both -- matching what the
+       proven-working original code clicked.
+
+    4. RETRY IN PLACE. Retries re-query the card where it is (Playwright
+       locators are lazy). Only if it has genuinely left the page do we
+       reset to the top and search again -- resetting on every retry
+       meant re-scrolling thousands of cards per attempt, and that
+       scrolling is itself what churns the list.
     """
     last_error: Optional[Exception] = None
-
-    # Normally the media id appears in the thumbnail URL. For the small class
-    # of Instagram ids that do not, recover the same username+date selector
-    # used by _find_card_for_media().
-    item_selector = f"div.rf-virtuoso-item:has(img[src*='{media_id}'])"
-    try:
-        direct_present = page.locator(item_selector).count() > 0
-    except Exception:
-        direct_present = False
-    if not direct_present and media_row:
-        fallback = card_selector_for_username_date(
-            media_row.get("username", ""), media_row.get("created_at", "")
-        )
-        if fallback:
-            try:
-                if page.locator(fallback).count() == 1:
-                    item_selector = fallback
-            except Exception:
-                pass
-
-    toggle_selector = f"{item_selector} {USAGE_RIGHTS_TOGGLE_SELECTOR}"
-
     for attempt in range(attempts):
         try:
-            # Resolve a BRAND-NEW locator at the last possible moment.
-            toggle = page.locator(toggle_selector).first
-            if toggle.count() == 0:
-                # The virtualizer recycled the card between the search and this
-                # attempt. Re-run a small bounded search rather than waiting
-                # 30s on a locator that can never resolve.
-                fresh_item, diagnostics = _scroll_until_card_found(
-                    page,
-                    media_id,
-                    scroll_container_selector,
-                    card_selector=item_selector,
-                    max_rounds=80,
-                    scroll_step=500,
-                    pace_ms_range=(80, 180),
-                    bottom_rounds_before_giving_up=2,
-                )
-                if fresh_item is None:
-                    raise ExportError(
-                        f"usage-rights toggle for media_id={media_id!r} was not mounted "
-                        f"for retry {attempt + 1}/{attempts}; container={diagnostics}"
-                    )
-                toggle = page.locator(toggle_selector).first
+            card = grid_item.locator(USAGE_RIGHTS_CARD_SELECTOR).first
+            if card.count() == 0:
+                scroll_to_top(page, scroll_container_selector)
+                grid_item = _find_card_for_media(page, media_id, scroll_container_selector, media_row)
+                if grid_item is None:
+                    raise ExportError(f"card for media_id={media_id!r} left the page and couldn't be re-found")
+                card = grid_item.locator(USAGE_RIGHTS_CARD_SELECTOR).first
 
-            # Short, synchronous center operation. The click itself remains a
-            # real Playwright click below.
-            toggle.wait_for(state="visible", timeout=MENU_CLICK_TIMEOUT_MS)
-            toggle.evaluate(_CENTER_CARD_JS, _DANGEROUS_BUTTON_PATTERN.pattern)
+            card.evaluate(_CENTER_CARD_JS, _DANGEROUS_BUTTON_PATTERN.pattern, timeout=EVALUATE_TIMEOUT_MS)
 
-            # Real pointer/mouse click, but without Playwright's long
-            # stability/hit-target preflight that caused the original detached
-            # element race.
-            toggle.click(force=True, timeout=MENU_CLICK_TIMEOUT_MS)
+            # Mechanism 1: Playwright's REAL click -- trusted pointerdown,
+            # mousedown, pointerup, mouseup, click, exactly what the
+            # proven-working original code sent -- but force=True skips the
+            # actionability wait that gave virtuoso time to recycle the card.
+            # The card is centered, so the sticky header isn't over it.
+            try:
+                card.click(force=True, timeout=MENU_CLICK_TIMEOUT_MS)
+            except Exception:
+                pass  # mechanism 2 below still gets its chance
 
-            page.wait_for_timeout(120)
-            menu_item = page.get_by_role("menuitem").filter(
-                has_text=USAGE_RIGHTS_MENU_TEXT
-            ).first
+            page.wait_for_timeout(150)  # let React commit the open state
+            try:
+                expanded = card.evaluate(_MENU_EXPANDED_JS, timeout=EVALUATE_TIMEOUT_MS)
+            except Exception:
+                expanded = None
+
+            menu_item = page.get_by_role("menuitem").filter(has_text=USAGE_RIGHTS_MENU_TEXT).first
+            try:
+                already_open = menu_item.is_visible()
+            except Exception:
+                already_open = False
+
+            # Only fire mechanism 2 when the menu is confirmed NOT open. The
+            # menu-item check guards the case where the state read came back
+            # unknown (e.g. the node just re-rendered) -- firing a second
+            # click into an ALREADY-open menu would toggle it shut again.
+            if expanded != "true" and not already_open:
+                # Mechanism 2: the full pointer sequence dispatched straight
+                # to the element -- no coordinates, nothing can intercept.
+                card.evaluate(_POINTER_SEQUENCE_JS, timeout=EVALUATE_TIMEOUT_MS)
+
             menu_item.wait_for(state="visible", timeout=MENU_OPEN_TIMEOUT_MS)
             _safe_click(menu_item, timeout_ms=MENU_CLICK_TIMEOUT_MS)
-            return fresh_item if 'fresh_item' in locals() else grid_item
-
+            return grid_item
         except Exception as e:
             last_error = e
             try:
-                page.keyboard.press("Escape")
+                page.keyboard.press("Escape")  # never stack a new open on a half-open menu
             except Exception:
                 pass
             if attempt < attempts - 1:
-                # Re-resolve on the next loop; never reset to the top merely
-                # because one click lost a race with virtualization.
                 page.wait_for_timeout(150)
-
     raise ExportError(
-        f"Card for media_id={media_id!r} was found, but its usage-rights menu "
-        f"didn't open after {attempts} fresh disclosure-click attempts. "
-        f"Not marked as 'no email' -- it will be retried on a future run. "
+        f"Card for media_id={media_id!r} was found, but its usage-rights menu didn't open "
+        f"after {attempts} attempts (real forced click, then full pointer sequence, each "
+        f"attempt). Not marked as 'no email' -- it will be retried on a future run. "
         f"Original error: {last_error}"
     ) from last_error
+
 
 def _find_card_for_media(page: Page, media_id: str, scroll_container_selector: str,
                          media_row: Optional[dict] = None, skip_id_search: bool = False):
