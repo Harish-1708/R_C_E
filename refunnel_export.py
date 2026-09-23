@@ -1172,6 +1172,152 @@ def trigger_native_drive_upload(
                 pass
         raise
 
+_MEDIA_ID_IN_SRC = re.compile(r"(tk_\d+|ig_[0-9a-f]{32}|ig_\d+)")
+
+
+def modal_post_check(image_srcs: Iterable[str], media_id: str) -> str:
+    """Does the open "Request usage rights" modal belong to media_id?
+
+    CONFIRMED REAL: the modal shows the post's own preview image, whose
+    filename embeds the media id (a live snapshot's modal contained
+    "tk_7688237002000551181_0.jpg" for exactly that post). So the modal
+    can be checked against the post we MEANT to open.
+
+    Why it matters: on a virtualized grid that keeps re-rendering, a
+    click can land on a DIFFERENT card than the one resolved moments
+    earlier -- opening another creator's modal. Without this check that
+    creator's email would be silently recorded against the wrong post.
+
+    Returns "match", "mismatch" (another post's id is present -- refuse),
+    or "unknown" (no identifiable post image, e.g. some Instagram posts
+    -- nothing to contradict, so don't block on it).
+    """
+    found = set()
+    for src in image_srcs:
+        for mid in _MEDIA_ID_IN_SRC.findall(src or ""):
+            found.add(mid)
+    if media_id in found:
+        return "match"
+    if found:
+        return "mismatch"
+    return "unknown"
+
+
+USAGE_RIGHTS_CARD_SELECTOR = ".usage-rights-request-card, .usage-rights-requested-card"
+USAGE_RIGHTS_MENU_TEXT = "Request creator approval to use this content in your marketing"
+
+# Runs INSIDE the page, in one synchronous turn, on the resolved card.
+# Every step happens before react-virtuoso can process a scroll event
+# and recycle the node -- so there is no gap for the card to vanish in.
+_DOM_CLICK_CARD_JS = """(el, dangerous) => {
+    if (!el.isConnected) { throw new Error("card detached before click"); }
+    // Preserve _safe_click's hard safety net: never click anything that
+    // looks like a send/submit control, however we got here.
+    if (new RegExp(dangerous, "i").test(el.innerText || "")) {
+        throw new Error("refusing to click a send/submit-like element");
+    }
+    el.scrollIntoView({block: "center", inline: "nearest"});
+    if (!el.isConnected) { throw new Error("card detached after centering"); }
+    el.click();
+}"""
+
+
+def _open_usage_rights_menu(page: Page, media_id: str, grid_item, scroll_container_selector: str,
+                            media_row: Optional[dict] = None, attempts: int = 4):
+    """Opens the usage-rights menu for media_id's card and clicks its
+    "Request creator approval..." item. Returns the (possibly re-found)
+    grid_item. Raises ExportError if it can't.
+
+    Built from a live run's own Playwright call log plus debug HTML:
+
+    1. PHYSICAL CLICKS KEPT MISSING. The log showed "element is not
+       stable", then "<div class=new-tabs-switch> from <div class=
+       set-sticky> intercepts pointer events", then "element was
+       detached". Playwright's actionability wait gave the virtualized
+       list time to recycle the card, and the sticky header sat over it.
+       A DOM click is dispatched straight to the element -- no hit
+       testing, so the sticky header cannot intercept it.
+
+    2. WHY THE CARD SAT UNDER THE STICKY HEADER. The card search scrolls
+       800px per step against a 720px viewport, so it overshoots: a card
+       is often detected while ABOVE the viewport, and Playwright then
+       scrolls it minimally to the nearest edge -- the top, under the
+       header. Centering it (block: "center") fixes that, and the middle
+       of the rendered window is also where virtuoso is least likely to
+       unmount it.
+
+    3. CLICK THE CARD ITSELF, NOT ITS WRAPPER. The real ancestor chain
+       is card -> div[cursor:pointer] -> div[aria-controls]. The
+       cursor:pointer div, sitting between them, most likely owns the
+       handler. A DOM click only bubbles UPWARD, so clicking the outer
+       aria-controls wrapper would never pass through it. Clicking the
+       innermost card bubbles through both -- matching what the
+       proven-working original code clicked.
+
+    4. RETRY IN PLACE. Retries re-query the card where it is (Playwright
+       locators are lazy). Only if it has genuinely left the page do we
+       reset to the top and search again -- resetting on every retry
+       meant re-scrolling thousands of cards per attempt, and that
+       scrolling is itself what churns the list.
+    """
+    last_error: Optional[Exception] = None
+    for attempt in range(attempts):
+        try:
+            card = grid_item.locator(USAGE_RIGHTS_CARD_SELECTOR).first
+            if card.count() == 0:
+                scroll_to_top(page, scroll_container_selector)
+                grid_item = _find_card_for_media(page, media_id, scroll_container_selector, media_row)
+                if grid_item is None:
+                    raise ExportError(f"card for media_id={media_id!r} left the page and couldn't be re-found")
+                card = grid_item.locator(USAGE_RIGHTS_CARD_SELECTOR).first
+
+            card.evaluate(_DOM_CLICK_CARD_JS, _DANGEROUS_BUTTON_PATTERN.pattern)
+
+            menu_item = page.get_by_role("menuitem").filter(has_text=USAGE_RIGHTS_MENU_TEXT).first
+            menu_item.wait_for(state="visible", timeout=5000)
+            _safe_click(menu_item)
+            return grid_item
+        except Exception as e:
+            last_error = e
+            try:
+                page.keyboard.press("Escape")  # never stack a new open on a half-open menu
+            except Exception:
+                pass
+            if attempt < attempts - 1:
+                page.wait_for_timeout(150)
+    raise ExportError(
+        f"Card for media_id={media_id!r} was found, but its usage-rights menu didn't open "
+        f"after {attempts} DOM-click attempts. Original error: {last_error}"
+    ) from last_error
+
+
+def _find_card_for_media(page: Page, media_id: str, scroll_container_selector: str,
+                         media_row: Optional[dict] = None, skip_id_search: bool = False):
+    """Finds media_id's card: by id in the thumbnail URL first, then by
+    creator handle + displayed date for posts whose id never appears in
+    their thumbnail (some 32-char hex Instagram ids). The Drive upload
+    path already had this fallback; email scraping never did."""
+    grid_item = None
+    if not skip_id_search:
+        # skip_id_search: the caller already ran (and failed) this exact
+        # search -- repeating it would waste a full scroll pass per post.
+        grid_item, _ = _scroll_until_card_found(page, media_id, scroll_container_selector)
+    if grid_item is not None or not media_row:
+        return grid_item
+    fallback = card_selector_for_username_date(media_row.get("username", ""), media_row.get("created_at", ""))
+    if not fallback:
+        return None
+    scroll_to_top(page, scroll_container_selector)
+    grid_item, _ = _scroll_until_card_found(page, media_id, scroll_container_selector, card_selector=fallback)
+    if grid_item is not None:
+        try:
+            if page.locator(fallback).count() > 1:
+                return None  # same creator, same day -- ambiguous; never guess
+        except Exception:
+            pass
+    return grid_item
+
+
 def scrape_creator_emails(
     page: Page,
     media_rows: dict,
@@ -1343,6 +1489,18 @@ def scrape_creator_emails(
     for media_id in target_ids:
         try:
             grid_item, diagnostics = _scroll_until_card_found(page, media_id, scroll_container_selector)
+            if grid_item is None and media_rows.get(media_id):
+                # Creator + date fallback for posts whose id never appears
+                # in their thumbnail URL. The Drive upload path had this;
+                # email scraping never did, so those posts could only ever
+                # fail with "couldn't locate" even while on the page.
+                # (_find_card_for_media resets scroll itself before searching.)
+                fallback_item = _find_card_for_media(
+                    page, media_id, scroll_container_selector, media_rows.get(media_id),
+                    skip_id_search=True,
+                )
+                if fallback_item is not None:
+                    grid_item = fallback_item
             if grid_item is None:
                 if _is_logged_out(page):
                     print(
@@ -1389,34 +1547,6 @@ def scrape_creator_emails(
                     )
                     break
                 continue
-
-            # CONFIRMED REAL by a proven-working prior version of this
-            # exact code, shared as reference: it clicked
-            # .usage-rights-request-card / -requested-card DIRECTLY --
-            # not any ARIA wrapper -- and extracted emails successfully
-            # for an extended period on Duderobe.
-            #
-            # A later change here switched to clicking the ARIA
-            # disclosure wrapper instead, reasoning from an HTML dump's
-            # structure alone (the card sits nested inside a wrapper
-            # with aria-controls) that the wrapper must be the "real"
-            # clickable element. That reasoning was never actually
-            # confirmed against a working click -- and the proven-old
-            # code's success clicking the card directly is direct
-            # evidence it was unnecessary. Worse, the wrapper is a bare
-            # ARIA state container with no styling of its own (the
-            # visually-styled, clearly-clickable element is the card
-            # INSIDE it) -- plausibly a worse actionability target for
-            # Playwright, especially against a virtualized list that's
-            # still settling. Reverted back to the proven target.
-            #
-            # Scoped to a row containing a usage-rights card
-            # specifically is no longer needed either: the card class
-            # itself only exists in the usage-rights menu's own markup,
-            # never the dotted "..." (Upload to Drive / Attach to a
-            # campaign) menu, so there's no risk of the two colliding.
-            usage_rights_toggle_selector = ".usage-rights-request-card, .usage-rights-requested-card"
-            request_toggle = grid_item.locator(usage_rights_toggle_selector).first
 
             # CONFIRMED REAL, from live screenshots of BOTH menu types
             # plus the saved HTML: a post awaiting the brand's own
@@ -1473,97 +1603,14 @@ def scrape_creator_emails(
             # alone never wins. Re-running the full find-and-click
             # sequence gives it a genuinely fresh DOM reference each
             # time instead of hammering the same doomed one.
-            last_click_error = None
-            for click_attempt in range(3):
-                if click_attempt > 0:
-                    # Reset to the top BEFORE re-searching -- confirmed
-                    # real, and the reason these retries never once
-                    # succeeded: _scroll_until_card_found only ever
-                    # scrolls FORWARD, but by the time the first click
-                    # attempt has failed the container is typically at
-                    # or near its real bottom (a live run showed
-                    # scrollTop 692698 of scrollHeight 693418). Searching
-                    # forward from there can never re-find a card that
-                    # is above the current position, so every retry
-                    # returned None and the loop always ended in
-                    # "detached after 2 fresh attempts".
-                    #
-                    # It also explains the alternating pattern in that
-                    # run: a detached failure left the page pinned at
-                    # the bottom, so the NEXT post failed with
-                    # "couldn't locate" (whose own handler resets), and
-                    # so on. Scoped to retries only -- NOT to every
-                    # exception, which is what caused a harmful
-                    # cascade when tried before.
-                    scroll_to_top(page, scroll_container_selector)
-                    grid_item, _ = _scroll_until_card_found(page, media_id, scroll_container_selector)
-                    if grid_item is None:
-                        break  # genuinely gone now, not just detached -- let the outer handling deal with it
-                    request_toggle = grid_item.locator(usage_rights_toggle_selector).first
-                try:
-                    # CONFIRMED REAL from an actual debug snapshot: at
-                    # the moment a click finally gave up (after 3
-                    # attempts), the target media_id was completely
-                    # ABSENT from the page's own HTML -- 0 occurrences.
-                    # The card was genuinely found moments earlier (the
-                    # error message itself confirms that), then
-                    # recycled away before the click could land.
-                    #
-                    # This removes the manual scroll_into_view_if_needed
-                    # + wait_for(state="visible") + a 300ms settle pause
-                    # that used to sit between "found" and "click
-                    # attempted" -- each step was ADDING TO exactly the
-                    # window during which the virtualized list could
-                    # recycle the card away again. Playwright's own
-                    # .click() already performs this same actionability
-                    # waiting (scrolled into view, visible, stable,
-                    # receives events) internally as part of the click
-                    # itself, so the manual version was pure redundant
-                    # delay with no confirmed benefit, and real, evidenced
-                    # cost. Going straight from "found" to "click
-                    # attempted" minimizes that window instead.
-                    _safe_click(request_toggle, timeout_ms=CLICK_ATTEMPT_TIMEOUT_MS)
-
-                    # CONFIRMED REAL, same instability, one step later:
-                    # a debug snapshot taken right as this specific wait
-                    # timed out showed the toggle's own aria-expanded
-                    # still "false" -- the menu never opened at all, not
-                    # "opened with different text than expected" (a
-                    # SEPARATE, successful snapshot proved the existing
-                    # text below still matches correctly once the menu
-                    # does open). Previously this wait sat OUTSIDE the
-                    # retry loop entirely, so a card click that
-                    # "succeeded" but didn't actually open its menu
-                    # (the underlying node recycled again right after
-                    # the click landed, before React processed the
-                    # state change) went straight to the outer failure
-                    # handler with no retry at all. Folded into the same
-                    # retriable unit as the card click, so this failure
-                    # mode gets the same fresh-reference retry treatment.
-                    top_menu_item = page.get_by_role("menuitem").filter(
-                        has_text="Request creator approval to use this content in your marketing"
-                    ).first
-                    top_menu_item.wait_for(state="visible", timeout=5000)
-                    _safe_click(top_menu_item)
-
-                    last_click_error = None
-                    break
-                except Exception as e:
-                    last_click_error = e
-                    # The menu may have partially opened before failing --
-                    # close it so the NEXT attempt starts clean rather than
-                    # stacking a fresh open on top of a stale one.
-                    try:
-                        page.keyboard.press("Escape")
-                    except Exception:
-                        pass
-            if last_click_error is not None:
-                raise ExportError(
-                    f"Card for media_id={media_id!r} was found, but its usage-rights menu "
-                    f"kept failing to open/complete (element detached / recycled by the "
-                    f"virtualized list) even after {click_attempt + 1} fresh attempts. "
-                    f"Original error: {last_click_error}"
-                ) from last_click_error
+            # Opens the menu via a centered DOM click on the card itself,
+            # retrying in place -- see _open_usage_rights_menu for the full
+            # evidence (sticky-header interception, 800px-vs-720px overshoot,
+            # and why the innermost card, not its wrapper, is clicked).
+            grid_item = _open_usage_rights_menu(
+                page, media_id, grid_item, scroll_container_selector,
+                media_row=media_rows.get(media_id),
+            )
             _pace(page)
 
 
@@ -1573,6 +1620,23 @@ def scrape_creator_emails(
             email_tab.wait_for(state="visible", timeout=5000)
             _safe_click(email_tab)
             _pace(page)
+
+            # Confirm the open modal is THIS post's before reading anything
+            # -- a click that landed on a shifted card would otherwise
+            # record another creator's email against this post. See
+            # modal_post_check for the confirmed-real evidence.
+            try:
+                modal_srcs = page.locator("[role=dialog] img").evaluate_all(
+                    "els => els.map(e => e.getAttribute('src') || '')"
+                )
+            except Exception:
+                modal_srcs = []
+            if modal_post_check(modal_srcs, media_id) == "mismatch":
+                raise ExportError(
+                    f"The open usage-rights modal belongs to a DIFFERENT post than "
+                    f"media_id={media_id!r} -- refusing to record its email against "
+                    f"the wrong creator."
+                )
 
             email_input = page.get_by_label(re.compile(r"Creator email address", re.I))
             email_input.wait_for(state="visible", timeout=5000)
