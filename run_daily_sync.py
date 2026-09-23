@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 import traceback
 from pathlib import Path
 
@@ -240,7 +241,31 @@ def main() -> int:
             # actually finishing.
             already_confirmed_empty: set = set()
             max_scrape_restarts = 40
+
+            # CONFIRMED REAL need: a live run was killed outright by
+            # GitHub's 6-hour job cap ("Error: The operation was
+            # canceled") while still mid-scrape. Everything scraped up
+            # to that point WAS safe (emails are written to the sheet
+            # incrementally as they're found), but the run never got to
+            # export payments or write the Usage Rights / Human Review
+            # tabs at all -- those only happen after this loop.
+            #
+            # So scraping now stops itself at a budget comfortably
+            # inside the job cap, letting the rest of the run finish
+            # cleanly. This is NOT "giving up early" -- every unscraped
+            # id is still in the sheet with a blank email and is picked
+            # up by the next scheduled run, exactly like the restart
+            # logic already does. Tune with SCRAPE_TIME_BUDGET_MINUTES.
+            scrape_budget_minutes = float(os.environ.get("SCRAPE_TIME_BUDGET_MINUTES", "270"))
+            scrape_deadline = time.monotonic() + scrape_budget_minutes * 60
+
             for attempt in range(max_scrape_restarts + 1):
+                if time.monotonic() >= scrape_deadline:
+                    print(f"Scraping has used its {scrape_budget_minutes:.0f}-minute budget for this "
+                          f"run -- stopping here so payments and the remaining sheet tabs still get "
+                          f"written. Nothing is lost: every post still missing an email is picked up "
+                          f"automatically by the next scheduled run.")
+                    break
                 target_ids = [
                     mid for mid in parse_refunnel.rows_needing_email_scrape(result)
                     if mid not in already_confirmed_empty
@@ -347,19 +372,48 @@ def main() -> int:
                 # on the rest of the run -- confirmed real, explicit,
                 # repeated instruction: nothing should end scraping
                 # early except genuinely exhausting max_scrape_restarts.
-                # Continuing anyway means the next scrape attempt starts
-                # from whatever's currently loaded and falls back on its
-                # own per-item incremental scrolling (slower for
-                # far-down items, but it keeps trying rather than
-                # quitting) -- and the loop will attempt another full
-                # recovery (fresh session + re-scroll) again next time
-                # it detects a dead page regardless.
-                try:
-                    refunnel_export.scroll_to_load_all(page)
-                except Exception as e:
-                    print(f"WARNING: re-scroll after recovery didn't finish cleanly "
-                          f"({type(e).__name__}: {e}). Continuing anyway with whatever's "
-                          f"currently loaded -- NOT giving up on the rest of this run.")
+                #
+                # But "continue anyway with whatever's loaded" turned
+                # out to be actively harmful -- CONFIRMED REAL from a
+                # live run: after restart 6 the re-scroll stopped at
+                # 1760/5878, leaving the container at scrollHeight
+                # 207346 when the full grid is ~692005 (about 30%
+                # loaded). Every one of the remaining 2206 posts then
+                # failed with "couldn't locate", 25 per progress line,
+                # because they genuinely were not in the DOM to find --
+                # burning the rest of the job's wall-clock on posts
+                # that COULD NOT succeed, until GitHub's 6-hour cap
+                # cancelled the whole thing.
+                #
+                # So: retry the re-scroll a few times, and if it still
+                # can't load the full grid, DON'T grind -- treat it as
+                # another crash-style recovery (fresh browser + fresh
+                # re-scroll) on the next loop pass. That's still "never
+                # give up early"; it just doesn't waste the remaining
+                # budget on a page that's structurally incapable of
+                # answering.
+                rescroll_ok = False
+                for rescroll_attempt in range(3):
+                    try:
+                        refunnel_export.scroll_to_load_all(page)
+                        rescroll_ok = True
+                        break
+                    except Exception as e:
+                        print(f"WARNING: re-scroll after recovery didn't finish cleanly "
+                              f"(attempt {rescroll_attempt + 1} of 3) -- {type(e).__name__}: {e}")
+                        try:
+                            refunnel_export.goto_social_listening_for_workspace(
+                                page, refunnel_workspace_name, known_workspace_names
+                            )
+                        except Exception:
+                            break  # page is in worse shape; let the next loop pass recover it properly
+
+                if not rescroll_ok:
+                    print("Re-scroll couldn't load the full grid after 3 tries. Forcing another "
+                          "full recovery (fresh browser) rather than scraping against a "
+                          "partially-loaded page, which can only produce 'couldn't locate' "
+                          "failures for everything that isn't loaded.")
+                    continue
 
         # --- 4. NOW it's safe to navigate away and export payments ---
         # A failure here NO LONGER kills the entire run -- confirmed
