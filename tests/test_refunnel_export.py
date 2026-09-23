@@ -2713,7 +2713,7 @@ def test_failure_message_includes_toggle_geometry(monkeypatch, capsys):
     })
     _scrape(monkeypatch, page)
     out = capsys.readouterr().out
-    assert "Toggle geometry at time of failure" in out
+    assert "Toggle geometry when first found" in out
     assert "'width': 0" in out and "'left': 1250" in out
 
 
@@ -2724,10 +2724,17 @@ def test_geometry_read_happens_once_after_giving_up_not_during_retries(monkeypat
     assert page.events.count("geometry_read") == 1
 
 
-def test_a_successful_run_never_pays_for_the_geometry_read(monkeypatch):
+def test_a_successful_run_pays_only_one_cheap_geometry_read(monkeypatch):
+    # confirmed real correction: reading geometry only on FAILURE, at
+    # the very end, only ever showed the card already gone -- 3 full
+    # attempts' worth of churn had already happened by then. Reading it
+    # once, early, on the first attempt (before we know whether it will
+    # succeed or fail) is the only way to see the element while it's
+    # still genuinely there -- so it now runs once per post regardless
+    # of outcome, not only after every attempt has already failed.
     page = _MenuPage(opens_on="forced", email="a@b.com")
     _scrape(monkeypatch, page)
-    assert "geometry_read" not in page.events
+    assert page.events.count("geometry_read") == 1
 
 
 def test_geometry_read_failing_is_reported_plainly_not_silently_dropped(monkeypatch, capsys):
