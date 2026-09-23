@@ -60,11 +60,25 @@ SCRAPE_EMAILS_ENABLED = True
 # alone can't be used to detect it.
 PENDING_REVIEW_TITLE_TEXT = "Pending review"
 
-# Per-attempt click timeout inside the detached-card retry loop. 3
-# attempts x 8s = 24s worst case per un-clickable card, versus up to
-# 90s with Playwright's 30s default -- which a live run showed was the
-# main cause of long apparent stalls.
-CLICK_ATTEMPT_TIMEOUT_MS = 8000
+# Per-attempt click timeout inside the detached-card retry loop.
+#
+# CONFIRMED REAL overcorrection this replaces: the previous value (8000)
+# was set based on evidence gathered while a SEPARATE bug (the general
+# exception handler over-resetting scroll) was still present, which
+# meant retries could never succeed regardless of timeout length --
+# any value would have looked equally "doomed" at the time. Once that
+# bug was fixed (retries do get a genuinely fresh element now), a live
+# run showed 3-for-3 clicks still failing, every single one at exactly
+# 8s -- consistent with the element genuinely needing MORE time to
+# stabilize (virtualized-list re-render settling, image lazy-loading),
+# not with it being permanently un-clickable. 8s never gave it the
+# chance to find out.
+#
+# 15s is a middle ground, not a confirmed-correct number -- if clicks
+# still fail consistently at this value too, that would be real
+# evidence the problem isn't about time at all, and needs a fresh debug
+# snapshot from the moment of failure to diagnose properly.
+CLICK_ATTEMPT_TIMEOUT_MS = 15000
 
 # Refunnel's "Request usage rights" flow has a "Send request" button
 # (confirmed from your screenshot). We refuse to click anything whose
