@@ -108,7 +108,7 @@ def _stub_browser_and_workspace(monkeypatch):
         dad.refunnel_auth, "load_or_refresh_session",
         lambda **kw: (_FakePlaywright(), _FakeBrowser(), _FakeContext())
     )
-    monkeypatch.setattr(dad.refunnel_auth, "refunnel_social_listening_url", lambda: "https://x")
+    monkeypatch.setattr(dad.refunnel_auth, "refunnel_social_listening_url", lambda *a, **kw: "https://x")
     monkeypatch.setattr(dad.refunnel_export, "goto_social_listening_for_workspace", lambda *a, **kw: None)
     # Default: the native upload trigger succeeds and the file is
     # "found" immediately -- individual tests override either half to
