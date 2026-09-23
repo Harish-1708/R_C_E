@@ -8,11 +8,13 @@ untested here; see README).
 """
 
 import re
+from pathlib import Path
 
 import pytest
 
 from refunnel_export import (
     scroll_to_load_all,
+    scroll_to_top,
     ExportError,
     select_workspace,
     _safe_click,
@@ -21,6 +23,9 @@ from refunnel_export import (
     _should_print_progress,
     _format_progress_line,
     _is_target_crashed,
+    _scroll_until_card_found,
+    _is_logged_out,
+    trigger_native_drive_upload,
 )
 
 
@@ -202,6 +207,10 @@ class FakeWorkspacePage:
         self.active_workspace = active_workspace
         self.dropdown_open = False
         self.sidebar_collapsed = sidebar_collapsed
+        self.goto_calls = []
+
+    def goto(self, url):
+        self.goto_calls.append(url)
 
     def get_by_text(self, text, exact=True):
         return _FakeLocator(self, [text])
@@ -475,3 +484,1187 @@ def test_sabotage_crash_detection_missed_would_be_caught():
     with pytest.raises(AssertionError):
         assert result is False  # wrong -- this IS a real crash message
     assert result is True  # confirms actual correct behavior
+
+
+# ---------- _scroll_until_card_found: the 160,000px ceiling bug ----------
+
+class ScrollSearchPage:
+    """Simulates a react-virtuoso container: the card only becomes
+    findable once we've scrolled past appears_at_scroll_top."""
+
+    def __init__(self, scroll_height, client_height=720, appears_at_scroll_top=None):
+        self.scroll_top = 0
+        self.scroll_height = scroll_height
+        self.client_height = client_height
+        self.appears_at = appears_at_scroll_top
+        self.rounds = 0
+
+    def locator(self, _selector):
+        page = self
+
+        class _Loc:
+            def count(self):
+                if page.appears_at is None:
+                    return 0
+                return 1 if page.scroll_top >= page.appears_at else 0
+
+            @property
+            def first(self):
+                return "found-card"
+
+        return _Loc()
+
+    def evaluate(self, _script, args=None):
+        self.rounds += 1
+        if isinstance(args, dict) and "step" in args:
+            max_top = max(0, self.scroll_height - self.client_height)
+            self.scroll_top = min(self.scroll_top + args["step"], max_top)
+        return {
+            "scrollTop": self.scroll_top,
+            "scrollHeight": self.scroll_height,
+            "clientHeight": self.client_height,
+        }
+
+    def wait_for_timeout(self, _ms):
+        pass
+
+
+def test_finds_a_card_past_the_old_160000px_ceiling():
+    # the exact production scenario: real scrollHeight was 327,922 and
+    # the old fixed 200x800 cap stalled at ~159,951, making the bottom
+    # half of the grid permanently unreachable
+    page = ScrollSearchPage(scroll_height=327922, appears_at_scroll_top=250000)
+    card, diagnostics = _scroll_until_card_found(page, "tk_deep", "#scrollableDiv", scroll_step=800)
+    assert card == "found-card"
+    assert diagnostics is None  # None means "found it", not "gave up"
+    assert page.scroll_top >= 250000  # genuinely scrolled past the old ceiling
+
+
+def test_gives_up_at_the_real_bottom_not_an_arbitrary_round_count():
+    page = ScrollSearchPage(scroll_height=327922, appears_at_scroll_top=None)  # never appears
+    card, diagnostics = _scroll_until_card_found(page, "tk_missing", "#scrollableDiv", scroll_step=800)
+    assert card is None
+    # reached the genuine bottom before giving up
+    assert diagnostics["scrollTop"] + diagnostics["clientHeight"] >= diagnostics["scrollHeight"] - 2
+
+
+def test_stops_promptly_once_at_the_bottom_rather_than_spinning():
+    page = ScrollSearchPage(scroll_height=8000, appears_at_scroll_top=None)
+    _scroll_until_card_found(page, "tk_missing", "#scrollableDiv", scroll_step=800)
+    # ~10 rounds to reach bottom + a few confirming rounds, nowhere near max_rounds
+    assert page.rounds < 30
+
+
+def test_handles_a_missing_scroll_container_without_spinning():
+    class NoContainerPage(ScrollSearchPage):
+        def evaluate(self, _script, args=None):
+            self.rounds += 1
+            return None
+
+    page = NoContainerPage(scroll_height=1000)
+    card, diagnostics = _scroll_until_card_found(page, "tk_x", "#missing", scroll_step=800)
+    assert card is None
+    assert page.rounds < 5  # bailed immediately, didn't grind through max_rounds
+
+
+def test_sabotage_old_fixed_ceiling_would_be_caught():
+    # proves the test above genuinely exercises the bug: with the old
+    # 200-round cap, a card at 250,000px is unreachable
+    page = ScrollSearchPage(scroll_height=327922, appears_at_scroll_top=250000)
+    card, _ = _scroll_until_card_found(
+        page, "tk_deep", "#scrollableDiv", max_rounds=200, scroll_step=800
+    )
+    with pytest.raises(AssertionError):
+        assert card == "found-card"  # wrong -- 200*800 can't reach 250,000
+    assert card is None  # confirms the old limit really was the problem
+
+
+# ---------- _is_logged_out: mid-run session loss ----------
+
+class _UrlPage:
+    def __init__(self, url):
+        self.url = url
+
+
+def test_detects_the_real_capital_l_login_redirect():
+    # the exact URL from the production failure log
+    assert _is_logged_out(_UrlPage("https://app.refunnel.com/Login")) is True
+
+
+def test_does_not_flag_the_social_listening_page_as_logged_out():
+    page = _UrlPage("https://app.refunnel.com/dashboard/content/social-listening?snv=true")
+    assert _is_logged_out(page) is False
+
+
+def test_is_logged_out_survives_a_page_that_raises_on_url():
+    class _Exploding:
+        @property
+        def url(self):
+            raise RuntimeError("target crashed")
+
+    assert _is_logged_out(_Exploding()) is False  # never masks a crash as a logout
+
+
+def test_sabotage_missed_logout_would_be_caught():
+    result = _is_logged_out(_UrlPage("https://app.refunnel.com/Login"))
+    with pytest.raises(AssertionError):
+        assert result is False  # wrong -- this IS the logged-out page
+    assert result is True
+
+
+# ---------- campaign filter functions (best-guess selectors, logic tested) ----------
+
+class _FakeCampaignLocator:
+    def __init__(self, texts=None):
+        self._texts = texts or []
+        self.clicked = False
+        self.filled = None
+
+    def click(self, timeout=None):
+        self.clicked = True
+
+    def wait_for(self, state=None, timeout=None):
+        pass
+
+    def fill(self, text):
+        self.filled = text
+
+    def count(self):
+        return len(self._texts)
+
+    def nth(self, i):
+        return _FakeCampaignLocator(texts=[self._texts[i]]) if self._texts else self
+
+    def get_attribute(self, name):
+        return getattr(self, "_attrs", {}).get(name)
+
+    @property
+    def first(self):
+        return self
+
+    def inner_text(self):
+        return self._texts[0] if self._texts else ""
+
+
+class _FakeKeyboard:
+    def __init__(self):
+        self.pressed = []
+
+    def press(self, key):
+        self.pressed.append(key)
+
+
+class _CampaignPage:
+    def __init__(self, campaign_names):
+        self._campaign_names = campaign_names
+        self.keyboard = _FakeKeyboard()
+        self._locators = {}
+
+    def locator(self, selector):
+        from refunnel_export import CAMPAIGN_CHECKBOX_ROW_SELECTOR, CAMPAIGN_FILTER_BUTTON_SELECTOR
+        if selector == CAMPAIGN_CHECKBOX_ROW_SELECTOR:
+            return _FakeCampaignLocator(texts=self._campaign_names)
+        if selector == CAMPAIGN_FILTER_BUTTON_SELECTOR:
+            return _FakeCampaignLocator()
+        self._locators.setdefault(selector, _FakeCampaignLocator())
+        return self._locators[selector]
+
+
+def test_list_available_campaigns_reads_every_name():
+    from refunnel_export import list_available_campaigns
+    page = _CampaignPage(["Evergreen Campaign", "Product Gifting - Cold Outbound", "[SCC] Partner with Swoveralls"])
+    names = list_available_campaigns(page)
+    assert names == ["Evergreen Campaign", "Product Gifting - Cold Outbound", "[SCC] Partner with Swoveralls"]
+
+
+def test_list_available_campaigns_closes_the_dropdown_without_applying():
+    from refunnel_export import list_available_campaigns
+    page = _CampaignPage(["Campaign A"])
+    list_available_campaigns(page)
+    assert "Escape" in page.keyboard.pressed  # read-only: never left applied
+
+
+class _FakeCampaignOptionRow:
+    """Models one real `.campaign-option` row: a checkbox input plus a
+    span whose text is the campaign's exact name."""
+
+    def __init__(self, name):
+        self.name = name
+        self.checkbox_clicked = False
+
+    def locator(self, selector):
+        from refunnel_export import CAMPAIGN_CHECKBOX_INPUT_SELECTOR
+        if selector == CAMPAIGN_CHECKBOX_INPUT_SELECTOR:
+            return self
+
+    def click(self, timeout=None):
+        self.checkbox_clicked = True
+
+    def check(self, timeout=None):
+        self.checkbox_clicked = True
+
+    def wait_for(self, state=None, timeout=None):
+        pass
+
+
+class _FilterableRowSet:
+    """Models page.locator(ROW_SELECTOR).filter(has=...) against a real
+    set of rows -- exact-text matching only, same as
+    page.get_by_text(..., exact=True) really does, so a search for
+    "Partner with DudeRobe" can never accidentally match "Partner with
+    DudeRobe!" too."""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def filter(self, has):
+        matches = [r for r in self._rows if r.name == has.exact_text]
+        return _FilterableRowSet(matches)
+
+    @property
+    def first(self):
+        return self._rows[0]
+
+
+class _ExactTextLocator:
+    def __init__(self, exact_text):
+        self.exact_text = exact_text
+
+
+class _RealCampaignPage(_CampaignPage):
+    """Models the CONFIRMED real markup precisely: .campaign-option
+    rows, each with an input.campaign-checkbox and exact-text content,
+    including genuinely similar names that must not be confused."""
+
+    def __init__(self, campaign_names, real_rows=None):
+        super().__init__(campaign_names)
+        self._rows = [_FakeCampaignOptionRow(n) for n in (real_rows or campaign_names)]
+
+    def get_by_text(self, text, exact=False):
+        return _ExactTextLocator(text)
+
+    def locator(self, selector):
+        from refunnel_export import CAMPAIGN_CHECKBOX_ROW_SELECTOR
+        if selector == CAMPAIGN_CHECKBOX_ROW_SELECTOR:
+            return _FilterableRowSet(self._rows)
+        return super().locator(selector)
+
+
+def test_filter_by_campaign_searches_for_the_exact_name():
+    from refunnel_export import filter_by_campaign, CAMPAIGN_SEARCH_INPUT_SELECTOR
+    page = _RealCampaignPage([], real_rows=["TTS VIP Creator Whitelisting - 6% Spend"])
+    filter_by_campaign(page, "TTS VIP Creator Whitelisting - 6% Spend")
+    assert page._locators[CAMPAIGN_SEARCH_INPUT_SELECTOR].filled == "TTS VIP Creator Whitelisting - 6% Spend"
+
+
+def test_filter_by_campaign_clears_first():
+    from refunnel_export import filter_by_campaign, CLEAR_ALL_FILTERS_SELECTOR
+    page = _RealCampaignPage([], real_rows=["Campaign A"])
+    filter_by_campaign(page, "Campaign A")
+    assert page._locators[CLEAR_ALL_FILTERS_SELECTOR].clicked is True
+
+
+def test_filter_by_campaign_clicks_the_checkbox_within_the_matched_row():
+    from refunnel_export import filter_by_campaign
+    page = _RealCampaignPage([], real_rows=["Save a Dude"])
+    filter_by_campaign(page, "Save a Dude")
+    assert page._rows[0].checkbox_clicked is True
+
+
+def test_filter_by_campaign_picks_the_exact_match_not_a_similar_one():
+    # confirmed real, genuine risk from actual campaign data: "Partner
+    # with DudeRobe!" and "Partner with DudeRobe" both exist as real,
+    # distinct campaigns
+    from refunnel_export import filter_by_campaign
+    page = _RealCampaignPage([], real_rows=["Partner with DudeRobe!", "Partner with DudeRobe"])
+
+    filter_by_campaign(page, "Partner with DudeRobe")
+
+    exclamation_row = next(r for r in page._rows if r.name == "Partner with DudeRobe!")
+    plain_row = next(r for r in page._rows if r.name == "Partner with DudeRobe")
+    assert plain_row.checkbox_clicked is True
+    assert exclamation_row.checkbox_clicked is False  # the OTHER one must stay untouched
+
+
+def test_sabotage_similar_campaign_names_would_be_confused_by_substring_matching():
+    from refunnel_export import filter_by_campaign
+    page = _RealCampaignPage([], real_rows=["Partner with DudeRobe!", "Partner with DudeRobe"])
+
+    filter_by_campaign(page, "Partner with DudeRobe!")
+
+    exclamation_row = next(r for r in page._rows if r.name == "Partner with DudeRobe!")
+    plain_row = next(r for r in page._rows if r.name == "Partner with DudeRobe")
+    with pytest.raises(AssertionError):
+        assert plain_row.checkbox_clicked is True  # wrong -- that's the OTHER campaign
+    assert exclamation_row.checkbox_clicked is True  # confirms the exact one was picked
+
+
+def test_clear_all_filters_does_not_raise_if_nothing_to_clear():
+    from refunnel_export import clear_all_filters
+
+    class _NoFilterPage:
+        def locator(self, _selector):
+            class _Raising:
+                def click(self, timeout=None):
+                    raise RuntimeError("nothing to click")
+            return _Raising()
+
+    clear_all_filters(_NoFilterPage())  # must not raise
+
+
+# ---------- campaign filter button: confirmed real markup fix ----------
+
+def test_campaign_filter_selector_includes_the_confirmed_real_div_class():
+    # confirmed real from a live TimeoutError and the actual failing
+    # page's markup: it's a styled <div class="campaign-filter-label
+    # clickable">, not a native <button> -- the old button-only guess
+    # never matched anything on the real page at all
+    from refunnel_export import CAMPAIGN_FILTER_BUTTON_SELECTOR
+    assert ".campaign-filter-label.clickable" in CAMPAIGN_FILTER_BUTTON_SELECTOR
+
+
+def test_old_button_only_guess_would_not_have_matched_the_real_element():
+    class _StrictSelectorPage(_CampaignPage):
+        """Only responds to the exact real div class -- simulates the
+        real page, where a pure button:has-text('Campaign') selector
+        matches nothing at all, which is what produced the real
+        30-second timeout."""
+
+        def locator(self, selector):
+            if selector.strip() == "button:has-text('Campaign')":
+                return _FakeCampaignLocator()  # 0 matches -- the real symptom
+            return super().locator(selector)
+
+    from refunnel_export import list_available_campaigns
+    page = _StrictSelectorPage(["Evergreen Campaign"])
+    # the CURRENT combined selector still works, because the div-class
+    # half of it matches even though the old button half wouldn't have
+    names = list_available_campaigns(page)
+    assert names == ["Evergreen Campaign"]
+
+
+def test_sabotage_reverting_to_button_only_selector_would_be_caught():
+    from refunnel_export import CAMPAIGN_FILTER_BUTTON_SELECTOR
+    with pytest.raises(AssertionError):
+        assert CAMPAIGN_FILTER_BUTTON_SELECTOR == "button:has-text('Campaign')"  # wrong -- the old, broken guess
+    assert ".campaign-filter-label" in CAMPAIGN_FILTER_BUTTON_SELECTOR  # confirms the real fix is in place
+
+
+# ---------- list_available_campaigns: auto-diagnostic on 0 results ----------
+
+class _EmptyCampaignPage(_CampaignPage):
+    """Simulates the exact real symptom: the button click works, but
+    the checkbox-row selector matches nothing at all, same kind of
+    "assumed a real tag, Refunnel uses a styled element" mismatch the
+    button selector already had."""
+
+    def screenshot(self, path, full_page=True):
+        self.screenshot_path = path
+
+    def content(self):
+        return "<html>fake page content</html>"
+
+
+def test_saves_a_debug_snapshot_when_zero_campaigns_found(tmp_path):
+    from refunnel_export import list_available_campaigns
+    page = _EmptyCampaignPage([])  # no names -- the real symptom
+    names = list_available_campaigns(page, debug_dir=str(tmp_path))
+    assert names == []
+    assert (tmp_path / "campaign_discovery_empty.png").exists() or hasattr(page, "screenshot_path")
+    assert (tmp_path / "campaign_discovery_empty.html").exists()
+
+
+def test_does_not_save_a_snapshot_when_campaigns_are_found(tmp_path):
+    from refunnel_export import list_available_campaigns
+    page = _EmptyCampaignPage(["Evergreen Campaign"])
+    list_available_campaigns(page, debug_dir=str(tmp_path))
+    assert not (tmp_path / "campaign_discovery_empty.png").exists()
+    assert not (tmp_path / "campaign_discovery_empty.html").exists()
+
+
+def test_no_debug_dir_means_no_crash_on_empty_result():
+    from refunnel_export import list_available_campaigns
+    page = _EmptyCampaignPage([])
+    names = list_available_campaigns(page, debug_dir=None)  # must not raise
+    assert names == []
+
+
+def test_sabotage_silent_empty_result_would_be_caught(tmp_path):
+    # the exact real problem: 0 campaigns found with NO diagnostic
+    # evidence at all would mean guessing blindly a second time
+    from refunnel_export import list_available_campaigns
+    page = _EmptyCampaignPage([])
+    list_available_campaigns(page, debug_dir=str(tmp_path))
+    snapshot_saved = (tmp_path / "campaign_discovery_empty.html").exists()
+    with pytest.raises(AssertionError):
+        assert snapshot_saved is False  # wrong -- would mean no evidence was captured
+    assert snapshot_saved is True  # confirms actual correct behavior
+
+
+# ---------- list_available_campaigns: dynamic panel-id scoping (confirmed real markup) ----------
+
+class _ScopedCampaignPage:
+    """Models the ACTUAL confirmed DOM: the toggle sibling exposes
+    aria-controls pointing at the panel's real, dynamically-generated
+    id, and checkbox rows only exist WITHIN that scoped id -- an
+    identical selector without the #<id> prefix must NOT match them,
+    proving the scoping is real and not accidentally matching
+    page-wide."""
+
+    def __init__(self, panel_id, campaign_names):
+        self.panel_id = panel_id
+        self._campaign_names = campaign_names
+        self.keyboard = _FakeKeyboard()
+        self.screenshot_called = False
+
+    def locator(self, selector):
+        from refunnel_export import (
+            CAMPAIGN_FILTER_BUTTON_SELECTOR,
+            CAMPAIGN_DISCLOSURE_TOGGLE_SELECTOR,
+            CAMPAIGN_CHECKBOX_ROW_SELECTOR,
+        )
+        if selector == CAMPAIGN_FILTER_BUTTON_SELECTOR:
+            return _FakeCampaignLocator()
+        if selector == CAMPAIGN_DISCLOSURE_TOGGLE_SELECTOR:
+            loc = _FakeCampaignLocator()
+            loc._attrs = {"aria-controls": self.panel_id}
+            return loc
+        # ONLY the properly scoped selector finds the rows -- the bare,
+        # unscoped selector (what a page-wide search would use) must
+        # return nothing, proving scoping actually matters here.
+        if selector == f"#{self.panel_id} {CAMPAIGN_CHECKBOX_ROW_SELECTOR}":
+            return _FakeCampaignLocator(texts=self._campaign_names)
+        return _FakeCampaignLocator()
+
+    def screenshot(self, path, full_page=True):
+        self.screenshot_called = True
+
+    def content(self):
+        return "<html></html>"
+
+
+def test_scopes_the_checkbox_search_to_the_real_dynamic_panel_id():
+    from refunnel_export import list_available_campaigns
+    page = _ScopedCampaignPage(panel_id="_r_k_", campaign_names=["Evergreen Campaign", "Product Gifting"])
+    names = list_available_campaigns(page)
+    assert names == ["Evergreen Campaign", "Product Gifting"]
+
+
+def test_sabotage_unscoped_search_would_have_found_nothing():
+    # proves the scoping is load-bearing: an identical page where the
+    # panel id comes back different (e.g. read at the wrong moment)
+    # correctly finds nothing, rather than accidentally matching
+    # page-wide
+    from refunnel_export import list_available_campaigns
+    page = _ScopedCampaignPage(panel_id="_r_k_", campaign_names=["Evergreen Campaign"])
+    page.panel_id_for_rows_only = "_r_wrong_"  # simulate a mismatched id
+    # re-point the toggle to report a DIFFERENT id than what the rows are scoped under
+    real_locator = page.locator
+    def mismatched_locator(selector):
+        from refunnel_export import CAMPAIGN_DISCLOSURE_TOGGLE_SELECTOR
+        if selector == CAMPAIGN_DISCLOSURE_TOGGLE_SELECTOR:
+            loc = _FakeCampaignLocator()
+            loc._attrs = {"aria-controls": "_r_wrong_"}
+            return loc
+        return real_locator(selector)
+    page.locator = mismatched_locator
+
+    names = list_available_campaigns(page)
+    with pytest.raises(AssertionError):
+        assert names == ["Evergreen Campaign"]  # wrong -- the ids don't match, nothing should be found
+    assert names == []  # confirms actual correct (if unhelpful) behavior: no silent cross-match
+
+
+def test_debug_snapshot_captured_before_escape_not_after(tmp_path):
+    # THE actual real bug this fixes: the diagnostic used to run AFTER
+    # Escape had already closed the panel, capturing nothing useful
+    from refunnel_export import list_available_campaigns
+
+    call_order = []
+
+    class _OrderTrackingPage(_ScopedCampaignPage):
+        def screenshot(self, path, full_page=True):
+            call_order.append("screenshot")
+
+        @property
+        def keyboard(self):
+            class _KB:
+                def press(_self, key):
+                    call_order.append("escape")
+            return _KB()
+
+        @keyboard.setter
+        def keyboard(self, value):
+            pass
+
+    page = _OrderTrackingPage(panel_id="_r_k_", campaign_names=[])  # empty -- triggers the diagnostic
+    list_available_campaigns(page, debug_dir=str(tmp_path))
+
+    assert call_order == ["screenshot", "escape"]  # screenshot must come first
+
+
+# ---------- filter_by_campaign: post-Apply debug capture ----------
+
+class _DebugCapturingPage(_RealCampaignPage):
+    def __init__(self, campaign_names, real_rows=None):
+        super().__init__(campaign_names, real_rows=real_rows)
+        self.screenshot_calls = []
+        self.wait_timeouts = []
+
+    def screenshot(self, path, full_page=True):
+        self.screenshot_calls.append(path)
+        Path(path).write_bytes(b"fake png bytes")
+
+    def content(self):
+        return "<html>post-apply state</html>"
+
+    def wait_for_timeout(self, ms):
+        self.wait_timeouts.append(ms)
+
+
+def test_filter_by_campaign_saves_debug_snapshot_when_debug_dir_given(tmp_path):
+    from refunnel_export import filter_by_campaign
+    page = _DebugCapturingPage([], real_rows=["Evergreen Campaign"])
+    filter_by_campaign(page, "Evergreen Campaign", debug_dir=str(tmp_path))
+    assert len(page.screenshot_calls) == 1
+    saved_html = list(tmp_path.glob("after_apply_*.html"))
+    assert len(saved_html) == 1
+    assert saved_html[0].read_text() == "<html>post-apply state</html>"
+
+
+def test_filter_by_campaign_no_snapshot_without_debug_dir(tmp_path):
+    from refunnel_export import filter_by_campaign
+    page = _DebugCapturingPage([], real_rows=["Evergreen Campaign"])
+    filter_by_campaign(page, "Evergreen Campaign", debug_dir=None)
+    assert page.screenshot_calls == []
+
+
+def test_filter_by_campaign_sanitizes_the_campaign_name_for_a_filename(tmp_path):
+    from refunnel_export import filter_by_campaign
+    page = _DebugCapturingPage([], real_rows=["[SCC] Partner with Swoveralls"])
+    filter_by_campaign(page, "[SCC] Partner with Swoveralls", debug_dir=str(tmp_path))
+    saved = list(tmp_path.glob("after_apply_*.png"))
+    assert len(saved) == 1
+    assert "[" not in saved[0].name and "]" not in saved[0].name
+
+
+def test_sabotage_no_debug_capture_would_be_caught(tmp_path):
+    from refunnel_export import filter_by_campaign
+    page = _DebugCapturingPage([], real_rows=["Evergreen Campaign"])
+    filter_by_campaign(page, "Evergreen Campaign", debug_dir=str(tmp_path))
+    with pytest.raises(AssertionError):
+        assert page.screenshot_calls == []  # wrong -- a capture should have happened
+    assert len(page.screenshot_calls) == 1  # confirms actual correct behavior
+
+
+# ---------- has_no_results_for_filter: confirmed real empty state ----------
+
+class _TextPage:
+    def __init__(self, body_text):
+        self._body_text = body_text
+
+    def inner_text(self, _selector):
+        return self._body_text
+
+
+def test_detects_the_real_no_results_message():
+    from refunnel_export import has_no_results_for_filter
+    # confirmed real, exact text from a live run's debug screenshots
+    page = _TextPage("...\nNo results for these filters(s)\nTry adjusting your filters...")
+    assert has_no_results_for_filter(page) is True
+
+
+def test_detects_the_alternate_spelling_too():
+    from refunnel_export import has_no_results_for_filter
+    page = _TextPage("No results for these filter(s)")
+    assert has_no_results_for_filter(page) is True
+
+
+def test_does_not_flag_a_normal_content_page():
+    from refunnel_export import has_no_results_for_filter
+    page = _TextPage("20 of 2795 media\n@someuser 9.1K followers")
+    assert has_no_results_for_filter(page) is False
+
+
+def test_survives_a_page_that_raises_on_inner_text():
+    from refunnel_export import has_no_results_for_filter
+
+    class _Exploding:
+        def inner_text(self, _selector):
+            raise RuntimeError("target crashed")
+
+    assert has_no_results_for_filter(_Exploding()) is False
+
+
+def test_sabotage_missed_empty_state_would_be_caught():
+    from refunnel_export import has_no_results_for_filter
+    page = _TextPage("No results for these filters(s)")
+    result = has_no_results_for_filter(page)
+    with pytest.raises(AssertionError):
+        assert result is False  # wrong -- this IS the real empty-state message
+    assert result is True
+
+
+# ---------- filter_is_genuinely_active: confirmed real, serious bug ----------
+
+def test_detects_a_genuinely_applied_filter():
+    from refunnel_export import filter_is_genuinely_active
+    page = _TextPage("Campaign is SheRobe Content Campaign ×")
+    assert filter_is_genuinely_active(page, "SheRobe Content Campaign") is True
+
+
+def test_detects_a_filter_that_silently_failed_to_apply():
+    # confirmed real, exact bug: the campaign name is absent because
+    # the filter never actually took effect
+    from refunnel_export import filter_is_genuinely_active
+    page = _TextPage("20 of 2795 media\n@someuser 9.1K followers")
+    assert filter_is_genuinely_active(page, "SheRobe Content Campaign") is False
+
+
+def test_survives_a_page_that_raises():
+    from refunnel_export import filter_is_genuinely_active
+
+    class _Exploding:
+        def inner_text(self, _selector):
+            raise RuntimeError("target crashed")
+
+    assert filter_is_genuinely_active(_Exploding(), "Any Campaign") is False
+
+
+def test_sabotage_missed_silent_filter_failure_would_be_caught():
+    from refunnel_export import filter_is_genuinely_active
+    page = _TextPage("20 of 2795 media")
+    result = filter_is_genuinely_active(page, "SheRobe Content Campaign")
+    with pytest.raises(AssertionError):
+        assert result is True  # wrong -- the campaign name never appeared at all
+    assert result is False  # confirms actual correct behavior
+
+
+# ---------- goto_social_listening_for_workspace: the "Last 3 months" bug ----------
+
+def test_navigates_before_and_after_the_workspace_switch():
+    # confirmed real, serious bug this fixes: a live run navigated with
+    # insights_timeline=last12months, then switched to Swoveralls -- and
+    # a real screenshot showed "Last 3 months" active afterward, not 12.
+    # Re-navigating AFTER the switch re-applies the correct range
+    # regardless of that workspace's own default.
+    from refunnel_export import goto_social_listening_for_workspace
+    page = FakeWorkspacePage(active_workspace="Duderobe")
+    goto_social_listening_for_workspace(page, "Swoveralls", ["Duderobe", "Swoveralls"])
+    assert len(page.goto_calls) == 2
+    assert page.goto_calls[0] == page.goto_calls[1]  # same URL, both times
+
+
+def test_the_second_navigation_happens_after_the_workspace_switch_completes():
+    from refunnel_export import goto_social_listening_for_workspace
+    page = FakeWorkspacePage(active_workspace="Duderobe")
+    goto_social_listening_for_workspace(page, "Swoveralls", ["Duderobe", "Swoveralls"])
+    assert page.active_workspace == "Swoveralls"  # the switch itself still happened correctly
+
+
+def test_noop_switch_still_gets_the_re_navigation():
+    # even when already on the right workspace, still re-navigate --
+    # cheap, and avoids assuming this specific case is exempt from the
+    # same underlying Refunnel behavior
+    from refunnel_export import goto_social_listening_for_workspace
+    page = FakeWorkspacePage(active_workspace="Swoveralls")
+    goto_social_listening_for_workspace(page, "Swoveralls", ["Duderobe", "Swoveralls"])
+    assert len(page.goto_calls) == 2
+
+
+def test_sabotage_single_navigation_would_be_caught():
+    # proves the fix is real: a version that only navigated once
+    # (the pre-fix behavior) would leave whatever the workspace switch
+    # reset the filters to
+    from refunnel_export import goto_social_listening_for_workspace
+    page = FakeWorkspacePage(active_workspace="Duderobe")
+    goto_social_listening_for_workspace(page, "Swoveralls", ["Duderobe", "Swoveralls"])
+    with pytest.raises(AssertionError):
+        assert len(page.goto_calls) == 1  # wrong -- that's the old, buggy behavior
+    assert len(page.goto_calls) == 2  # confirms actual correct behavior
+
+
+# ---------- trigger_native_drive_upload: confirmed real UI flow ----------
+
+class _FakeMenuButton:
+    def __init__(self, owner):
+        self.owner = owner
+
+    def click(self):
+        self.owner.menu_clicked = True
+
+
+class _FakeGridItemForDrive:
+    def __init__(self, owner):
+        self.owner = owner
+        self.hovered = False
+
+    def hover(self):
+        self.hovered = True
+
+    def locator(self, _selector):
+        class _L:
+            @property
+            def first(_self):
+                return _FakeMenuButton(self.owner)
+        return _L()
+
+
+class _ClickTrackingLocator:
+    def __init__(self, owner, name):
+        self.owner = owner
+        self.name = name
+
+    def wait_for(self, state=None, timeout=None):
+        pass
+
+    def click(self):
+        self.owner.clicks.append(self.name)
+
+    @property
+    def first(self):
+        return self
+
+
+class _DriveUploadPage:
+    """Page fake wired so _scroll_until_card_found (monkeypatched)
+    immediately returns a usable card -- isolates testing to
+    trigger_native_drive_upload's OWN flow (menu -> upload item -> All
+    folders tab -> folder row -> Save to Drive), not the scroll-search
+    logic, which already has its own tests."""
+
+    def __init__(self, folder_name_to_select="Refunnel - Swoveralls"):
+        self.menu_clicked = False
+        self.clicks = []
+        self._folder_name = folder_name_to_select
+
+    def locator(self, selector):
+        from refunnel_export import (
+            DRIVE_UPLOAD_MENU_ITEM_SELECTOR,
+            DRIVE_MODAL_ALL_FOLDERS_TAB_SELECTOR,
+            DRIVE_MODAL_SAVE_BUTTON_SELECTOR,
+        )
+        if selector == DRIVE_UPLOAD_MENU_ITEM_SELECTOR:
+            return _ClickTrackingLocator(self, "upload_item")
+        if selector == DRIVE_MODAL_ALL_FOLDERS_TAB_SELECTOR:
+            return _ClickTrackingLocator(self, "all_folders_tab")
+        if selector == DRIVE_MODAL_SAVE_BUTTON_SELECTOR:
+            return _ClickTrackingLocator(self, "save_button")
+        return _ClickTrackingLocator(self, selector)
+
+    def get_by_text(self, text, exact=False):
+        class _L:
+            def __init__(_self, owner, matched):
+                _self.owner = owner
+                _self.matched = matched
+
+            def wait_for(_self, state=None, timeout=None):
+                pass
+
+            def click(_self):
+                if _self.matched:
+                    _self.owner.clicks.append(f"folder:{text}")
+
+            @property
+            def first(_self):
+                return _self
+        return _L(self, text == self._folder_name)
+
+    @property
+    def first(self):
+        return self
+
+
+@pytest.fixture
+def _stub_scroll_found(monkeypatch):
+    import refunnel_export as re_module
+    grid_item_holder = {}
+
+    def fake_scroll_found(page, media_id, scroll_container_selector):
+        item = _FakeGridItemForDrive(page)
+        grid_item_holder["item"] = item
+        return item, {}
+
+    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
+    return grid_item_holder
+
+
+def test_trigger_native_drive_upload_completes_the_full_flow(_stub_scroll_found):
+    page = _DriveUploadPage(folder_name_to_select="Refunnel - Swoveralls")
+    result = trigger_native_drive_upload(page, "tk_1", "Refunnel - Swoveralls")
+    assert result is True
+    assert page.clicks == ["upload_item", "all_folders_tab", "folder:Refunnel - Swoveralls", "save_button"]
+
+
+def test_trigger_native_drive_upload_returns_false_if_card_not_found(monkeypatch):
+    import refunnel_export as re_module
+    monkeypatch.setattr(re_module, "_scroll_until_card_found", lambda *a, **kw: (None, {}))
+    page = _DriveUploadPage()
+    result = trigger_native_drive_upload(page, "tk_missing", "Refunnel - Swoveralls")
+    assert result is False
+
+
+def test_trigger_native_drive_upload_saves_debug_snapshot_on_failure(_stub_scroll_found, tmp_path):
+    class _FailingPage(_DriveUploadPage):
+        def locator(self, selector):
+            raise RuntimeError("simulated UI failure")
+
+        def screenshot(self, path, full_page=True):
+            Path(path).write_bytes(b"fake")
+
+        def content(self):
+            return "<html>failure state</html>"
+
+    page = _FailingPage()
+    with pytest.raises(RuntimeError):
+        trigger_native_drive_upload(page, "tk_1", "Refunnel - Swoveralls", debug_dir=str(tmp_path))
+    saved = list(tmp_path.glob("drive_upload_failure_*.html"))
+    assert len(saved) == 1
+
+
+def test_sabotage_wrong_folder_selected_would_be_caught(_stub_scroll_found):
+    page = _DriveUploadPage(folder_name_to_select="Refunnel - Duderobe")  # only Duderobe row is "real"
+    trigger_native_drive_upload(page, "tk_1", "Refunnel - Swoveralls")  # but we asked for Swoveralls
+    with pytest.raises(AssertionError):
+        assert "folder:Refunnel - Swoveralls" in page.clicks  # wrong -- that row was never actually clicked
+    assert "folder:Refunnel - Swoveralls" not in page.clicks  # confirms it correctly never matched
+
+
+# ---------- scroll_to_top: the "stuck at the bottom" bug ----------
+
+class _ScrollTopTrackingPage:
+    def __init__(self, initial_scroll_top=691285):
+        self.scroll_top = initial_scroll_top
+        self.evaluate_calls = []
+
+    def evaluate(self, js):
+        self.evaluate_calls.append(js)
+        self.scroll_top = 0  # simulates the real DOM assignment happening
+
+    def wait_for_timeout(self, ms):
+        pass
+
+
+def test_scroll_to_top_resets_scroll_position():
+    page = _ScrollTopTrackingPage(initial_scroll_top=691285)
+    scroll_to_top(page)
+    assert page.scroll_top == 0
+
+
+def test_scroll_to_top_targets_the_given_container_selector():
+    page = _ScrollTopTrackingPage()
+    scroll_to_top(page, scroll_container_selector="#customContainer")
+    assert "#customContainer" in page.evaluate_calls[0]
+
+
+def test_scroll_to_top_defaults_to_the_real_scrollable_div():
+    page = _ScrollTopTrackingPage()
+    scroll_to_top(page)
+    assert "#scrollableDiv" in page.evaluate_calls[0]
+
+
+def test_sabotage_scroll_never_reset_would_be_caught():
+    # confirmed real, exact bug: without this call, the page stayed
+    # stuck at the bottom (scrollTop == scrollHeight - clientHeight)
+    # for the entire remainder of a real run
+    page = _ScrollTopTrackingPage(initial_scroll_top=691285)
+    scroll_to_top(page)
+    with pytest.raises(AssertionError):
+        assert page.scroll_top == 691285  # wrong -- would mean the bug is still present
+    assert page.scroll_top == 0  # confirms actual correct behavior
+
+
+# ---------- scrape_creator_emails: cascading scroll-stuck failure (the real Swoveralls bug) ----------
+
+class _MinimalScrapePage:
+    """Just enough of a Page fake to drive scrape_creator_emails()
+    through its "card not found" path -- the simplest reproduction of
+    the real cascading bug, without needing the full click/menu/popup
+    flow a successful find would require."""
+
+    def __init__(self):
+        self.scroll_to_top_calls = 0
+
+    def evaluate(self, js, *a, **kw):
+        if "scrollTop = 0" in js:
+            self.scroll_to_top_calls += 1
+            return None
+        return {"scrollTop": 691285, "scrollHeight": 692005, "clientHeight": 720}
+
+    def wait_for_timeout(self, ms):
+        pass
+
+    def locator(self, selector):
+        class _Empty:
+            def count(_self):
+                return 0
+        return _Empty()
+
+    def url(self):
+        return "https://app.refunnel.com/dashboard/content/social-listening"
+
+
+def test_scrape_creator_emails_resets_scroll_after_each_failed_search(monkeypatch):
+    import refunnel_export as re_module
+    monkeypatch.setattr(re_module, "_is_logged_out", lambda page: False)
+    monkeypatch.setattr(re_module, "_pace", lambda *a, **kw: None)
+
+    page = _MinimalScrapePage()
+    from refunnel_export import scrape_creator_emails
+
+    media_rows = {"tk_1": {}, "tk_2": {}, "tk_3": {}}
+    scrape_creator_emails(
+        page, media_rows=media_rows, media_ids=["tk_1", "tk_2", "tk_3"],
+    )
+
+    # confirmed real bug this fixes: without a reset after EACH failed
+    # search, the scroll position never recovers, and every id after
+    # the first failure is doomed for the rest of the entire run.
+    # 1 unconditional reset at the function's own start + 1 per failure.
+    assert page.scroll_to_top_calls == 1 + 3
+
+
+def test_sabotage_missing_reset_would_have_left_every_later_id_doomed(monkeypatch):
+    import refunnel_export as re_module
+    monkeypatch.setattr(re_module, "_is_logged_out", lambda page: False)
+    monkeypatch.setattr(re_module, "_pace", lambda *a, **kw: None)
+
+    page = _MinimalScrapePage()
+    from refunnel_export import scrape_creator_emails
+
+    media_rows = {"tk_1": {}, "tk_2": {}}
+    scrape_creator_emails(page, media_rows=media_rows, media_ids=["tk_1", "tk_2"])
+
+    with pytest.raises(AssertionError):
+        assert page.scroll_to_top_calls == 1  # wrong -- would mean only the initial reset ran, no per-failure ones
+    assert page.scroll_to_top_calls == 1 + 2  # confirms actual correct behavior
+
+
+# ---------- the over-broad reset removal (confirmed real: caused a NEW cascade) ----------
+
+class _GenericFailurePage(_MinimalScrapePage):
+    """Simulates a card that's found successfully but then fails for a
+    reason unrelated to scrolling (e.g. a menu never appearing) --
+    confirmed real: resetting scroll here turned out to destabilize
+    the virtualized list right before the NEXT item's click, causing
+    every subsequent item to fail too -- the opposite of the
+    intended protection."""
+
+    def locator(self, selector):
+        class _Found:
+            def count(_self):
+                return 1
+
+            @property
+            def first(_self):
+                class _Row:
+                    def hover(_s):
+                        pass
+
+                    def locator(_s, _sel):
+                        class _Toggle:
+                            @property
+                            def first(__s):
+                                return __s
+
+                            def wait_for(__s, state=None, timeout=None):
+                                pass
+
+                            def scroll_into_view_if_needed(__s, timeout=None):
+                                pass
+
+                            def check(__s):
+                                raise RuntimeError("simulated menu-timeout-style failure, unrelated to scroll")
+                        return _Toggle()
+                return _Row()
+        return _Found()
+
+
+def test_generic_failure_unrelated_to_scroll_does_not_reset(monkeypatch):
+    import refunnel_export as re_module
+    monkeypatch.setattr(re_module, "_is_logged_out", lambda page: False)
+    monkeypatch.setattr(re_module, "_pace", lambda *a, **kw: None)
+    monkeypatch.setattr(re_module, "_is_target_crashed", lambda e: False)
+
+    page = _GenericFailurePage()
+    from refunnel_export import scrape_creator_emails
+
+    media_rows = {"tk_1": {}}
+    scrape_creator_emails(page, media_rows=media_rows, media_ids=["tk_1"])
+
+    # only the function's own unconditional start-of-run reset should
+    # have happened -- the generic-exception branch must NOT add one
+    assert page.scroll_to_top_calls == 1
+
+
+def test_sabotage_reset_on_every_exception_would_be_caught(monkeypatch):
+    import refunnel_export as re_module
+    monkeypatch.setattr(re_module, "_is_logged_out", lambda page: False)
+    monkeypatch.setattr(re_module, "_pace", lambda *a, **kw: None)
+    monkeypatch.setattr(re_module, "_is_target_crashed", lambda e: False)
+
+    page = _GenericFailurePage()
+    from refunnel_export import scrape_creator_emails
+
+    media_rows = {"tk_1": {}, "tk_2": {}}
+    scrape_creator_emails(page, media_rows=media_rows, media_ids=["tk_1", "tk_2"])
+
+    with pytest.raises(AssertionError):
+        assert page.scroll_to_top_calls == 3  # wrong -- would mean the harmful over-reset is back
+    assert page.scroll_to_top_calls == 1  # confirms actual correct behavior: only the initial reset
+
+
+# ---------- the usage-rights toggle selector, verified against REAL saved markup ----------
+
+CARD_STRUCTURE_FIXTURE = Path(__file__).parent / "fixtures" / "refunnel_card_structure.html"
+
+
+def test_real_markup_nests_the_card_inside_an_aria_disclosure_wrapper():
+    # confirmed real, from an actual saved page: the clickable element
+    # is the aria-controls wrapper, NOT the .usage-rights-*-card div
+    # nested two levels inside it
+    html = CARD_STRUCTURE_FIXTURE.read_text()
+    assert 'aria-controls=' in html
+    # the card appears AFTER its wrapper's aria-controls attribute --
+    # i.e. it's nested inside, not the wrapper itself
+    wrapper_pos = html.find('aria-controls="_r_c1_"')
+    card_pos = html.find('class="usage-rights-request-card"')
+    assert wrapper_pos != -1 and card_pos != -1
+    assert wrapper_pos < card_pos
+
+
+def test_real_markup_has_two_distinct_menus_per_card():
+    # confirmed real, genuine risk: each card has TWO sibling
+    # .pop-up-menu disclosures -- the usage-rights one AND the dotted
+    # "..." menu (Upload to Google Drive / Attach to a campaign).
+    # Targeting the wrong one opens the Drive-upload menu instead.
+    html = CARD_STRUCTURE_FIXTURE.read_text()
+    assert html.count('class="pop-up-menu"') == 2
+    assert 'disclosure="true"' in html          # the dotted "..." menu
+    assert 'usage-rights-request-card' in html  # the usage-rights one
+
+
+def test_selector_scopes_to_the_usage_rights_menu_not_the_dotted_one():
+    # the selector must require a usage-rights card INSIDE the wrapper,
+    # so the dotted-menu wrapper (which has none) can never match
+    import refunnel_export  # noqa: F401  -- selector is built inline in scrape_creator_emails
+    import inspect
+    source = inspect.getsource(refunnel_export.scrape_creator_emails)
+    assert ":has(.usage-rights-request-card)" in source
+    assert ":has(.usage-rights-requested-card)" in source
+
+
+def test_sabotage_clicking_the_inner_card_would_be_caught():
+    import refunnel_export
+    import inspect
+    source = inspect.getsource(refunnel_export.scrape_creator_emails)
+    # the OLD, broken approach targeted the inner card directly as the
+    # whole selector -- that exact bare form must not be what's used
+    with pytest.raises(AssertionError):
+        assert '".usage-rights-request-card, .usage-rights-requested-card"' in source
+    assert "[aria-controls]" in source  # confirms the real, correct target
+
+
+# ---------- Pending review posts: structurally unscrapeable (confirmed from real markup) ----------
+
+def test_real_markup_confirms_pending_review_shares_the_requested_card_class():
+    # confirmed real, genuine trap this guards against: a "Pending
+    # review" card uses .usage-rights-requested-card -- the SAME class
+    # as a real "Usage rights requested" card -- so the class alone
+    # cannot distinguish them. Only the .urq-title text can.
+    from refunnel_export import PENDING_REVIEW_TITLE_TEXT
+    assert PENDING_REVIEW_TITLE_TEXT == "Pending review"
+
+
+class _PendingReviewPage(_MinimalScrapePage):
+    """A card that IS found, and IS a Pending review card -- confirmed
+    real: its menu has no usage-rights option at all, so opening it
+    could only ever time out."""
+
+    def __init__(self):
+        super().__init__()
+        self.toggle_clicked = False
+
+    def locator(self, selector):
+        page = self
+
+        class _Found:
+            def count(_self):
+                return 1
+
+            @property
+            def first(_self):
+                class _Row:
+                    def hover(_s):
+                        pass
+
+                    def locator(_s, sel):
+                        class _Inner:
+                            def count(__s):
+                                # the Pending-review title IS present
+                                return 1 if "urq-title" in sel else 1
+
+                            @property
+                            def first(__s):
+                                return __s
+
+                            def wait_for(__s, state=None, timeout=None):
+                                pass
+
+                            def scroll_into_view_if_needed(__s, timeout=None):
+                                pass
+
+                            def check(__s):
+                                page.toggle_clicked = True
+
+                            def click(__s):
+                                page.toggle_clicked = True
+                        return _Inner()
+                return _Row()
+        return _Found()
+
+
+def test_pending_review_post_is_skipped_without_opening_its_menu(monkeypatch, capsys):
+    import refunnel_export as re_module
+    monkeypatch.setattr(re_module, "_is_logged_out", lambda page: False)
+    monkeypatch.setattr(re_module, "_pace", lambda *a, **kw: None)
+
+    page = _PendingReviewPage()
+    from refunnel_export import scrape_creator_emails
+
+    scrape_creator_emails(page, media_rows={"ig_1": {}}, media_ids=["ig_1"])
+
+    out = capsys.readouterr().out
+    assert "Pending review" in out
+    assert "Not a failure" in out
+    assert page.toggle_clicked is False  # never even opened the menu
+
+
+def test_pending_review_skip_is_reported_in_the_summary(monkeypatch, capsys):
+    import refunnel_export as re_module
+    monkeypatch.setattr(re_module, "_is_logged_out", lambda page: False)
+    monkeypatch.setattr(re_module, "_pace", lambda *a, **kw: None)
+
+    page = _PendingReviewPage()
+    from refunnel_export import scrape_creator_emails
+
+    scrape_creator_emails(page, media_rows={"ig_1": {}, "ig_2": {}}, media_ids=["ig_1", "ig_2"])
+
+    out = capsys.readouterr().out
+    assert "skipped 2 post(s)" in out
+    assert "Approving or declining them" in out
+
+
+def test_sabotage_opening_a_pending_review_menu_would_be_caught(monkeypatch):
+    import refunnel_export as re_module
+    monkeypatch.setattr(re_module, "_is_logged_out", lambda page: False)
+    monkeypatch.setattr(re_module, "_pace", lambda *a, **kw: None)
+
+    page = _PendingReviewPage()
+    from refunnel_export import scrape_creator_emails
+
+    scrape_creator_emails(page, media_rows={"ig_1": {}}, media_ids=["ig_1"])
+
+    with pytest.raises(AssertionError):
+        assert page.toggle_clicked is True  # wrong -- that's the old, doomed behavior
+    assert page.toggle_clicked is False  # confirms it correctly skipped before clicking
