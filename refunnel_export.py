@@ -641,12 +641,48 @@ def filter_by_campaign(page: Page, campaign_name: str, debug_dir: Optional[str] 
     """
     clear_all_filters(page)
 
-    campaign_button = page.locator(CAMPAIGN_FILTER_BUTTON_SELECTOR).first
-    campaign_button.click()
+    # CONFIRMED REAL root cause of erratic campaign failures: clicking
+    # the Campaign filter is a TOGGLE, not "open". A live run across 10
+    # Swoveralls campaigns failed in three different ways -- "Apply
+    # Changes" never enabling (30s), the search input never becoming
+    # visible (15s), and "<div> intercepts pointer events" -- with
+    # successes and failures interleaved. All three are the same
+    # underlying problem: the dropdown was ALREADY open, left over from
+    # the previous campaign, so the click CLOSED it instead of opening
+    # it. Everything after that then operates on a panel that isn't
+    # there (no search box), or on a stale one (nothing gets checked,
+    # so Apply stays disabled), or against a lingering overlay.
+    #
+    # Fixed by making "open" deterministic instead of assuming a
+    # starting state: force it closed with Escape first, then open it,
+    # then VERIFY the search box actually appeared -- retrying the
+    # whole open sequence rather than charging ahead into a panel that
+    # never opened.
+    search_box = None
+    for open_attempt in range(3):
+        try:
+            page.keyboard.press("Escape")  # guarantee closed, whatever state it was in
+            page.wait_for_timeout(400)
+            page.locator(CAMPAIGN_FILTER_BUTTON_SELECTOR).first.click()
+            candidate = page.locator(CAMPAIGN_SEARCH_INPUT_SELECTOR).first
+            candidate.wait_for(state="visible", timeout=5000)
+            search_box = candidate
+            break
+        except Exception:
+            continue
 
-    search_box = page.locator(CAMPAIGN_SEARCH_INPUT_SELECTOR).first
-    search_box.wait_for(state="visible", timeout=timeout_ms)
+    if search_box is None:
+        raise ExportError(
+            f"couldn't get the Campaign filter dropdown open for {campaign_name!r} after 3 "
+            f"attempts -- its search box never became visible. Refusing to continue rather "
+            f"than acting on a panel that isn't there."
+        )
+
     search_box.fill(campaign_name)
+    # Let the campaign list actually filter down to the typed text
+    # before matching a row against it -- without this the row we match
+    # can be one the list is about to replace.
+    page.wait_for_timeout(600)
 
     row = page.locator(CAMPAIGN_CHECKBOX_ROW_SELECTOR).filter(
         has=page.get_by_text(campaign_name, exact=True)
@@ -663,8 +699,26 @@ def filter_by_campaign(page: Page, campaign_name: str, debug_dir: Optional[str] 
     # box ends up genuinely checked, not just clicked at.
     row.locator(CAMPAIGN_CHECKBOX_INPUT_SELECTOR).check()
 
+    # Wait for Apply to actually become enabled before clicking it.
+    # Confirmed real: when the checkbox didn't register, the old code
+    # clicked a permanently-disabled Apply and burned the full 30s
+    # timeout before failing. Checking the state first turns that into
+    # a fast, clearly-worded failure instead of a long silent stall.
     apply_button = page.locator(CAMPAIGN_APPLY_BUTTON_SELECTOR).first
-    apply_button.click()
+    try:
+        apply_button.wait_for(state="visible", timeout=5000)
+        page.wait_for_selector(
+            f"{CAMPAIGN_APPLY_BUTTON_SELECTOR}:not([disabled])", timeout=5000
+        )
+    except Exception as e:
+        raise ExportError(
+            f"the checkbox for {campaign_name!r} doesn't appear to have registered -- "
+            f"'Apply Changes' never became enabled. Skipping rather than clicking a "
+            f"disabled button for 30s. Original error: {e}"
+        ) from e
+
+    apply_button.click(timeout=10000)
+    page.wait_for_timeout(800)  # let the filtered view settle before anything reads it
 
     if debug_dir:
         try:
