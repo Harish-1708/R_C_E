@@ -191,7 +191,8 @@ def main() -> int:
             # including Master Data again) reconciles everything
             # regardless, so this is a safety net, not the only write.
             print("Writing Master Data once before scraping starts, so progress can be saved incrementally...")
-            sheets_sync.sync_tab(master_client, parse_refunnel.MASTER_COLUMNS, result.master, never_delete=True)
+            sheets_sync.sync_tab(master_client, parse_refunnel.MASTER_COLUMNS, result.master, never_delete=True,
+                                 preserve_columns=parse_refunnel.SHEET_OWNED_COLUMNS)
 
             # scrape_creator_emails() now owns its own scroll reset
             # entirely (both at its own start and after every failed
@@ -488,12 +489,30 @@ def main() -> int:
             ("Payments", parse_refunnel.PAYMENT_COLUMNS, result.payments, True, None),
         ]
 
+        # Copy each post's campaign from Master Data onto every
+        # Master-schema tab (Approved / Requested / Declined), so the
+        # campaign is visible wherever the post appears -- not only on
+        # Master Data. Read once here, after scraping, from the sheet
+        # itself: it's sheet-owned data that the CSV never contains.
+        try:
+            master_campaigns = sheets_sync.read_column_values(master_client, "campaigns")
+        except Exception:
+            master_campaigns = {}
+        for bucket in (result.master, result.rights_approved,
+                       result.rights_requested, result.rights_declined):
+            for mid, row in bucket.items():
+                if master_campaigns.get(mid):
+                    row["campaigns"] = master_campaigns[mid]
+
         for title, columns, rows, never_delete, sort_key in tab_plan:
             ws = sheets_sync.get_or_create_worksheet(sh, title)
             client = sheets_sync.GspreadSheetsClient(ws)
+            preserve = (parse_refunnel.SHEET_OWNED_COLUMNS
+                        if columns is parse_refunnel.MASTER_COLUMNS else None)
             summary = sheets_sync.sync_tab(
                 client, columns, rows, never_delete=never_delete,
                 sort_key=sort_key, sort_reverse=(sort_key is not None),
+                preserve_columns=preserve,
             )
             print(f"{title}: wrote {summary['rows_written']} rows "
                   f"(preserved columns: {summary['extra_columns_preserved']}, "
