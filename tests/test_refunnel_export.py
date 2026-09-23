@@ -1198,6 +1198,9 @@ class _FakeMenuButton:
     def __init__(self, owner):
         self.owner = owner
 
+    def scroll_into_view_if_needed(self, timeout=None):
+        pass
+
     def click(self):
         self.owner.menu_clicked = True
 
@@ -1253,6 +1256,11 @@ class _DriveUploadPage:
 
     def wait_for_timeout(self, ms):
         pass
+
+    def wait_for_selector(self, selector, timeout=None):
+        # Save to Drive enables once a folder is picked; the fake always
+        # picks one, so it's enabled.
+        return None
 
     def locator(self, selector):
         from refunnel_export import (
@@ -1806,20 +1814,6 @@ def test_sabotage_retry_without_reset_would_never_find_the_card():
 
 # ---------- Drive: confirmed-real selector + scroll reset ----------
 
-def test_drive_menu_selector_targets_the_real_dotted_menu():
-    # the earlier aria-label guess matched ZERO elements on the real
-    # page -- the dotted menu is the disclosure containing dottedMenuIcon
-    from refunnel_export import DRIVE_CARD_MENU_BUTTON_SELECTOR
-    assert "dottedMenuIcon" in DRIVE_CARD_MENU_BUTTON_SELECTOR
-    assert "aria-label" not in DRIVE_CARD_MENU_BUTTON_SELECTOR
-
-
-def test_drive_menu_selector_matches_exactly_one_per_card_in_real_markup():
-    from bs4 import BeautifulSoup
-    from refunnel_export import DRIVE_CARD_MENU_BUTTON_SELECTOR
-    html = CARD_STRUCTURE_FIXTURE.read_text()
-    soup = BeautifulSoup(html, "html.parser")
-    assert len(soup.select(DRIVE_CARD_MENU_BUTTON_SELECTOR)) == 1
 
 
 def test_drive_upload_resets_scroll_before_searching(_stub_scroll_found):
@@ -1910,3 +1904,150 @@ def test_sabotage_single_read_missing_later_campaigns_would_be_caught():
     with pytest.raises(AssertionError):
         assert len(found) == 10  # wrong -- that's the live bug (first batch only)
     assert len(found) == 23
+
+
+# ---------- Drive, pinned to a REAL Approved card (confirmed from a live screenshot) ----------
+
+APPROVED_CARD_FIXTURE = Path(__file__).parent / "fixtures" / "refunnel_approved_card.html"
+
+
+def _approved_soup():
+    from bs4 import BeautifulSoup
+    return BeautifulSoup(APPROVED_CARD_FIXTURE.read_text(), "html.parser")
+
+
+def test_approved_toggle_matches_exactly_once_on_a_real_approved_card():
+    from refunnel_export import DRIVE_APPROVED_TOGGLE_SELECTOR
+    assert len(_approved_soup().select(DRIVE_APPROVED_TOGGLE_SELECTOR)) == 1
+
+
+def test_approved_toggle_is_not_the_dotted_menu():
+    # confirmed real: the dotted icon opens "Show content / Mute creator /
+    # Delete from library" -- the wrong menu, where Upload to Drive never appears
+    from refunnel_export import DRIVE_APPROVED_TOGGLE_SELECTOR
+    soup = _approved_soup()
+    toggle = soup.select_one(DRIVE_APPROVED_TOGGLE_SELECTOR)
+    dotted = soup.select_one(".post_dotted_menu__cpgc")
+    assert toggle is not None and dotted is not None
+    assert dotted not in toggle.parents and toggle not in dotted.parents
+
+
+def test_sabotage_targeting_the_dotted_menu_would_be_caught():
+    from refunnel_export import DRIVE_APPROVED_TOGGLE_SELECTOR
+    with pytest.raises(AssertionError):
+        assert "dottedMenuIcon" in DRIVE_APPROVED_TOGGLE_SELECTOR  # wrong -- that opened the wrong menu live
+    assert "usage-rights-approved-card" in DRIVE_APPROVED_TOGGLE_SELECTOR
+
+
+# ---------- the Approved filter is a URL param (confirmed from the live address bar) ----------
+
+def test_approved_url_matches_the_real_address_bar_encoding():
+    import refunnel_auth
+    url = refunnel_auth.refunnel_social_listening_url("GRANTED")
+    assert "usage_rights=%5B%22GRANTED%22%5D" in url   # usage_rights=["GRANTED"]
+    assert "usage_rightsOpt=%22is%22" in url           # usage_rightsOpt="is"
+
+
+def test_unfiltered_url_has_no_usage_rights_param():
+    import refunnel_auth
+    assert "usage_rights" not in refunnel_auth.refunnel_social_listening_url()
+
+
+# ---------- username + date fallback (suggested; for hex Instagram ids) ----------
+
+def test_date_label_matches_how_cards_display_dates():
+    from refunnel_export import card_date_label
+    assert card_date_label("2026-09-11T14:02:00Z") == "Sep 11"
+    assert card_date_label("2026-03-05T00:00:00Z") == "Mar 5"   # unpadded, like "Mar 10"/"Jul 19"
+    assert card_date_label("") is None
+
+
+def test_fallback_selector_finds_the_real_card_by_handle_and_date():
+    from refunnel_export import card_selector_for_username_date
+    soup = _approved_soup()
+    sel = card_selector_for_username_date("indycub9", "2026-09-11T00:00:00Z")
+    # soupsieve spells exact-text matching differently from Playwright;
+    # verify the two confirmed-real anchors the selector relies on
+    assert soup.select_one("span.post-header-uname").get_text(strip=True) == "@indycub9"
+    assert soup.select_one(".post_time__cpgc").get_text(strip=True) == "Sep 11"
+    assert "span.post-header-uname:text-is('@indycub9')" in sel
+    assert ".post_time__cpgc:text-is('Sep 11')" in sel
+
+
+def test_fallback_uses_exact_match_so_a_longer_handle_cannot_collide():
+    from refunnel_export import card_selector_for_username_date
+    sel = card_selector_for_username_date("indycub9", "2026-09-11T00:00:00Z")
+    assert ":text-is(" in sel and ":has-text(" not in sel
+
+
+def test_ambiguous_fallback_skips_rather_than_uploading_the_wrong_video(monkeypatch):
+    import refunnel_export as re_module
+    calls = {"n": 0}
+
+    def fake_find(page, media_id, sel, card_selector=None):
+        calls["n"] += 1
+        return (None, {}) if card_selector is None else (object(), {})
+
+    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_find)
+
+    class _TwoMatches(_DriveUploadPage):
+        def locator(self, selector):
+            if "post-header-uname" in selector:
+                class _C:
+                    def count(_s):
+                        return 2   # same creator, same day
+                return _C()
+            return super().locator(selector)
+
+    page = _TwoMatches()
+    ok = re_module.trigger_native_drive_upload(
+        page, "ig_0431480af70141eab24c76d9f2b5b40c", "Refunnel - Swoveralls",
+        username="indycub9", created_at="2026-09-11T00:00:00Z",
+    )
+    assert ok is False
+    assert page.clicks == []   # never opened any menu
+
+
+def test_sabotage_uploading_on_an_ambiguous_match_would_be_caught(monkeypatch):
+    import refunnel_export as re_module
+    monkeypatch.setattr(re_module, "_scroll_until_card_found",
+                        lambda p, m, s, card_selector=None: (None, {}) if card_selector is None else (object(), {}))
+
+    class _TwoMatches(_DriveUploadPage):
+        def locator(self, selector):
+            if "post-header-uname" in selector:
+                class _C:
+                    def count(_s):
+                        return 2
+                return _C()
+            return super().locator(selector)
+
+    page = _TwoMatches()
+    re_module.trigger_native_drive_upload(page, "ig_x", "Refunnel - Swoveralls",
+                                          username="a", created_at="2026-09-11T00:00:00Z")
+    with pytest.raises(AssertionError):
+        assert "save_button" in page.clicks  # wrong -- would mean it uploaded a guessed video
+    assert "save_button" not in page.clicks
+
+
+# ---------- click-attempt timeout (confirmed real regression: up to 90s per stuck card) ----------
+
+def test_retry_click_uses_a_short_timeout_not_the_30s_default():
+    from refunnel_export import CLICK_ATTEMPT_TIMEOUT_MS
+    assert CLICK_ATTEMPT_TIMEOUT_MS <= 10000
+    assert 3 * CLICK_ATTEMPT_TIMEOUT_MS < 30000  # worse-case retries now cheaper than ONE old attempt
+
+
+def test_safe_click_passes_the_timeout_through():
+    from refunnel_export import _safe_click
+    seen = {}
+
+    class _L:
+        def inner_text(self, timeout=None):
+            return ""
+
+        def click(self, timeout=None):
+            seen["timeout"] = timeout
+
+    _safe_click(_L(), timeout_ms=8000)
+    assert seen["timeout"] == 8000
