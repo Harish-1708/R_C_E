@@ -44,6 +44,11 @@ on:
         required: false
         default: "50"
         type: string
+      scrape_max_posts:
+        description: "Smoke test: max posts to scrape emails for this run (e.g. 25). Blank = no cap."
+        required: false
+        default: ""
+        type: string
 
 jobs:
   determine-workspaces:
@@ -120,6 +125,7 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           SCRAPE_TIME_BUDGET_MINUTES: ${{ github.event.inputs.scrape_budget_minutes || '150' }}
+          SCRAPE_MAX_POSTS: ${{ github.event.inputs.scrape_max_posts || '' }}
         run: |
           echo "$GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT" > service_account.json
           python -u run_daily_sync.py
