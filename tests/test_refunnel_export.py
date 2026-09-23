@@ -743,6 +743,14 @@ class _RealCampaignPage(_CampaignPage):
     def get_by_text(self, text, exact=False):
         return _ExactTextLocator(text)
 
+    def wait_for_timeout(self, ms):
+        pass
+
+    def wait_for_selector(self, selector, timeout=None):
+        # mirrors the real page: Apply becomes enabled once a checkbox
+        # has registered. The fakes always register, so this succeeds.
+        return None
+
     def locator(self, selector):
         from refunnel_export import CAMPAIGN_CHECKBOX_ROW_SELECTOR
         if selector == CAMPAIGN_CHECKBOX_ROW_SELECTOR:
@@ -1668,3 +1676,64 @@ def test_sabotage_opening_a_pending_review_menu_would_be_caught(monkeypatch):
     with pytest.raises(AssertionError):
         assert page.toggle_clicked is True  # wrong -- that's the old, doomed behavior
     assert page.toggle_clicked is False  # confirms it correctly skipped before clicking
+
+
+# ---------- the dropdown-toggle bug (confirmed real, erratic campaign failures) ----------
+
+def test_dropdown_is_forced_closed_before_being_opened():
+    # confirmed real root cause: clicking the Campaign filter TOGGLES
+    # it. If it was already open from the previous campaign, the click
+    # closed it -- producing "search input not visible", "Apply never
+    # enabled", and "intercepts pointer events" in the same live run.
+    from refunnel_export import filter_by_campaign
+    page = _RealCampaignPage([], real_rows=["Campaign A"])
+    filter_by_campaign(page, "Campaign A")
+    assert "Escape" in page.keyboard.pressed
+
+
+def test_open_is_retried_when_the_search_box_never_appears():
+    from refunnel_export import filter_by_campaign, CAMPAIGN_SEARCH_INPUT_SELECTOR, ExportError
+
+    class _NeverOpensPage(_RealCampaignPage):
+        def locator(self, selector):
+            if selector == CAMPAIGN_SEARCH_INPUT_SELECTOR:
+                class _Invisible:
+                    @property
+                    def first(_s):
+                        return _s
+
+                    def wait_for(_s, state=None, timeout=None):
+                        raise RuntimeError("search box never appeared")
+                return _Invisible()
+            return super().locator(selector)
+
+    page = _NeverOpensPage([], real_rows=["Campaign A"])
+    with pytest.raises(ExportError) as exc:
+        filter_by_campaign(page, "Campaign A")
+    assert "3 attempts" in str(exc.value)
+    # three real open attempts, each preceded by an Escape
+    assert page.keyboard.pressed.count("Escape") == 3
+
+
+def test_disabled_apply_fails_fast_instead_of_stalling():
+    # confirmed real: the old code clicked a permanently-disabled Apply
+    # and burned the full 30s timeout before failing
+    from refunnel_export import filter_by_campaign, ExportError
+
+    class _ApplyNeverEnablesPage(_RealCampaignPage):
+        def wait_for_selector(self, selector, timeout=None):
+            raise RuntimeError("Apply Changes stayed disabled")
+
+    page = _ApplyNeverEnablesPage([], real_rows=["Campaign A"])
+    with pytest.raises(ExportError) as exc:
+        filter_by_campaign(page, "Campaign A")
+    assert "never became enabled" in str(exc.value)
+
+
+def test_sabotage_assuming_the_dropdown_was_closed_would_be_caught():
+    from refunnel_export import filter_by_campaign
+    page = _RealCampaignPage([], real_rows=["Campaign A"])
+    filter_by_campaign(page, "Campaign A")
+    with pytest.raises(AssertionError):
+        assert page.keyboard.pressed == []  # wrong -- that's the old, state-assuming behaviour
+    assert "Escape" in page.keyboard.pressed
