@@ -1553,9 +1553,12 @@ CARD_STRUCTURE_FIXTURE = Path(__file__).parent / "fixtures" / "refunnel_card_str
 
 
 def test_real_markup_nests_the_card_inside_an_aria_disclosure_wrapper():
-    # confirmed real, from an actual saved page: the clickable element
-    # is the aria-controls wrapper, NOT the .usage-rights-*-card div
-    # nested two levels inside it
+    # confirmed real, from an actual saved page: the card sits nested
+    # inside an aria-controls wrapper. This nesting fact is real and
+    # unchanged -- what was WRONG was concluding from it that the
+    # wrapper must be the correct click target. A proven-working prior
+    # version of this code clicked the card directly and worked fine;
+    # see test_click_target_is_the_card_directly_not_an_aria_wrapper.
     html = CARD_STRUCTURE_FIXTURE.read_text()
     assert 'aria-controls=' in html
     # the card appears AFTER its wrapper's aria-controls attribute --
@@ -1577,25 +1580,27 @@ def test_real_markup_has_two_distinct_menus_per_card():
     assert 'usage-rights-request-card' in html  # the usage-rights one
 
 
-def test_selector_scopes_to_the_usage_rights_menu_not_the_dotted_one():
-    # the selector must require a usage-rights card INSIDE the wrapper,
-    # so the dotted-menu wrapper (which has none) can never match
-    import refunnel_export  # noqa: F401  -- selector is built inline in scrape_creator_emails
-    import inspect
-    source = inspect.getsource(refunnel_export.scrape_creator_emails)
-    assert ":has(.usage-rights-request-card)" in source
-    assert ":has(.usage-rights-requested-card)" in source
-
-
-def test_sabotage_clicking_the_inner_card_would_be_caught():
+def test_click_target_is_the_card_directly_not_an_aria_wrapper():
+    # confirmed real by a proven-working prior version of this exact
+    # code (shared as reference): it clicked
+    # .usage-rights-request-card / -requested-card DIRECTLY and
+    # extracted emails successfully for an extended period on
+    # Duderobe. A later change here switched to an ARIA disclosure
+    # wrapper based on reasoning from an HTML dump alone, never
+    # actually confirmed against a working click -- reverted.
     import refunnel_export
     import inspect
     source = inspect.getsource(refunnel_export.scrape_creator_emails)
-    # the OLD, broken approach targeted the inner card directly as the
-    # whole selector -- that exact bare form must not be what's used
+    assert '".usage-rights-request-card, .usage-rights-requested-card"' in source
+
+
+def test_sabotage_reverting_to_the_unconfirmed_aria_wrapper_would_be_caught():
+    import refunnel_export
+    import inspect
+    source = inspect.getsource(refunnel_export.scrape_creator_emails)
     with pytest.raises(AssertionError):
-        assert '".usage-rights-request-card, .usage-rights-requested-card"' in source
-    assert "[aria-controls]" in source  # confirms the real, correct target
+        assert "[aria-controls]" in source  # wrong -- that's the unconfirmed change that broke it
+    assert '".usage-rights-request-card, .usage-rights-requested-card"' in source
 
 
 # ---------- Pending review posts: structurally unscrapeable (confirmed from real markup) ----------
