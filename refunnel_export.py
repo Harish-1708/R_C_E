@@ -1390,36 +1390,32 @@ def scrape_creator_emails(
                     break
                 continue
 
-            # CONFIRMED REAL from an actual saved HTML dump of the live
-            # page: the .usage-rights-request-card / -requested-card div
-            # is NOT the clickable element -- it's nested two levels
-            # INSIDE the element that actually carries the click
-            # handler, which is the ARIA disclosure wrapper:
-            #   <div class="pop-up-menu">
-            #     <div tabindex="-1" aria-controls="_r_c1_" aria-expanded="false">   <-- the real toggle
-            #       <div style="cursor: pointer;">
-            #         <div class="usage-rights-request-card">              <-- what we used to click
-            # Clicking the inner div could land on a child that React
-            # re-renders independently, which is very likely why clicks
-            # kept reporting "element detached" for the full 30s while
-            # the card itself resolved fine every time. The disclosure
-            # wrapper is the stable, interactive element -- same ARIA
-            # pattern already confirmed for the Campaign filter earlier
-            # in this project.
+            # CONFIRMED REAL by a proven-working prior version of this
+            # exact code, shared as reference: it clicked
+            # .usage-rights-request-card / -requested-card DIRECTLY --
+            # not any ARIA wrapper -- and extracted emails successfully
+            # for an extended period on Duderobe.
             #
-            # Scoped to the wrapper CONTAINING a usage-rights card
-            # specifically -- confirmed real, genuine risk: each card
-            # has TWO sibling .pop-up-menu disclosures (the dump has 16
-            # across 8 cards, exactly 8 of each kind). The other one
-            # opens the dotted "..." menu -- the Upload to Google
-            # Drive / Attach to a campaign menu. Targeting the wrong
-            # one would open the Drive-upload menu instead of the
-            # usage-rights flow, which is exactly what the earlier
-            # stale debug screenshot appeared to show.
-            usage_rights_toggle_selector = (
-                ".pop-up-menu > [aria-controls]:has(.usage-rights-request-card), "
-                ".pop-up-menu > [aria-controls]:has(.usage-rights-requested-card)"
-            )
+            # A later change here switched to clicking the ARIA
+            # disclosure wrapper instead, reasoning from an HTML dump's
+            # structure alone (the card sits nested inside a wrapper
+            # with aria-controls) that the wrapper must be the "real"
+            # clickable element. That reasoning was never actually
+            # confirmed against a working click -- and the proven-old
+            # code's success clicking the card directly is direct
+            # evidence it was unnecessary. Worse, the wrapper is a bare
+            # ARIA state container with no styling of its own (the
+            # visually-styled, clearly-clickable element is the card
+            # INSIDE it) -- plausibly a worse actionability target for
+            # Playwright, especially against a virtualized list that's
+            # still settling. Reverted back to the proven target.
+            #
+            # Scoped to a row containing a usage-rights card
+            # specifically is no longer needed either: the card class
+            # itself only exists in the usage-rights menu's own markup,
+            # never the dotted "..." (Upload to Drive / Attach to a
+            # campaign) menu, so there's no risk of the two colliding.
+            usage_rights_toggle_selector = ".usage-rights-request-card, .usage-rights-requested-card"
             request_toggle = grid_item.locator(usage_rights_toggle_selector).first
 
             # CONFIRMED REAL, from live screenshots of BOTH menu types
