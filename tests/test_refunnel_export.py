@@ -1415,6 +1415,12 @@ class _MinimalScrapePage:
             return None
         return {"scrollTop": 691285, "scrollHeight": 692005, "clientHeight": 720}
 
+    def screenshot(self, path, full_page=True):
+        Path(path).write_bytes(b"x")
+
+    def content(self):
+        return "<html></html>"
+
     def wait_for_timeout(self, ms):
         pass
 
@@ -2057,3 +2063,66 @@ def test_safe_click_passes_the_timeout_through():
 
     _safe_click(_L(), timeout_ms=8000)
     assert seen["timeout"] == 8000
+
+
+# ---------- per-category debug snapshots (confirmed real gap) ----------
+
+def test_save_scrape_failure_snapshot_includes_category_in_filename(tmp_path):
+    from refunnel_export import _save_scrape_failure_snapshot
+
+    class _P:
+        def screenshot(self, path, full_page=True):
+            Path(path).write_bytes(b"x")
+
+        def content(self):
+            return "<html></html>"
+
+    _save_scrape_failure_snapshot(_P(), str(tmp_path), "tk_1", category="empty_field")
+    assert (tmp_path / "scrape_failure_empty_field_tk_1.png").exists()
+    assert (tmp_path / "scrape_failure_empty_field_tk_1.html").exists()
+
+
+def test_a_couldnt_locate_failure_does_not_use_up_the_slot_for_other_categories(monkeypatch, tmp_path):
+    # confirmed real gap this fixes: a single shared flag meant whichever
+    # failure happened FIRST consumed the only snapshot for the entire
+    # run -- a live artifact only ever showed "empty field" (correct,
+    # not a bug), while a SEPARATE, ongoing "detached click" issue never
+    # got its own evidence, because empty_field happened first.
+    import refunnel_export as re_module
+    monkeypatch.setattr(re_module, "_is_logged_out", lambda page: False)
+    monkeypatch.setattr(re_module, "_pace", lambda *a, **kw: None)
+
+    page = _MinimalScrapePage()  # every search fails as "couldn't locate"
+    media_rows = {"tk_1": {}, "tk_2": {}}
+    re_module.scrape_creator_emails(page, media_rows=media_rows, media_ids=["tk_1", "tk_2"],
+                                    debug_dir=str(tmp_path))
+
+    # Only ONE couldnt_locate snapshot (still capped within its own
+    # category), but that category's slot being used doesn't block a
+    # DIFFERENT category from getting its own snapshot later.
+    saved = list(tmp_path.glob("scrape_failure_*"))
+    assert any("couldnt_locate" in f.name for f in saved)
+    assert len([f for f in saved if "couldnt_locate" in f.name and f.suffix == ".png"]) == 1
+
+
+def test_sabotage_shared_flag_would_hide_a_different_failure_type(tmp_path):
+    from refunnel_export import _save_scrape_failure_snapshot
+
+    class _P:
+        def screenshot(self, path, full_page=True):
+            Path(path).write_bytes(b"x")
+
+        def content(self):
+            return "<html></html>"
+
+    # first failure type
+    _save_scrape_failure_snapshot(_P(), str(tmp_path), "tk_1", category="empty_field")
+    # a genuinely DIFFERENT failure type must still get its own file
+    _save_scrape_failure_snapshot(_P(), str(tmp_path), "tk_2", category="exception:TimeoutError")
+
+    saved = {f.name for f in tmp_path.glob("*.png")}
+    with pytest.raises(AssertionError):
+        assert len(saved) == 1  # wrong -- that's the old shared-flag behaviour that hid the second one
+    assert len(saved) == 2
+    assert any("empty_field" in n for n in saved)
+    assert any("exception_TimeoutError" in n for n in saved)
