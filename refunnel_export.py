@@ -1523,29 +1523,49 @@ def scrape_creator_emails(
                     # cost. Going straight from "found" to "click
                     # attempted" minimizes that window instead.
                     _safe_click(request_toggle, timeout_ms=CLICK_ATTEMPT_TIMEOUT_MS)
+
+                    # CONFIRMED REAL, same instability, one step later:
+                    # a debug snapshot taken right as this specific wait
+                    # timed out showed the toggle's own aria-expanded
+                    # still "false" -- the menu never opened at all, not
+                    # "opened with different text than expected" (a
+                    # SEPARATE, successful snapshot proved the existing
+                    # text below still matches correctly once the menu
+                    # does open). Previously this wait sat OUTSIDE the
+                    # retry loop entirely, so a card click that
+                    # "succeeded" but didn't actually open its menu
+                    # (the underlying node recycled again right after
+                    # the click landed, before React processed the
+                    # state change) went straight to the outer failure
+                    # handler with no retry at all. Folded into the same
+                    # retriable unit as the card click, so this failure
+                    # mode gets the same fresh-reference retry treatment.
+                    top_menu_item = page.get_by_role("menuitem").filter(
+                        has_text="Request creator approval to use this content in your marketing"
+                    ).first
+                    top_menu_item.wait_for(state="visible", timeout=5000)
+                    _safe_click(top_menu_item)
+
                     last_click_error = None
                     break
                 except Exception as e:
                     last_click_error = e
+                    # The menu may have partially opened before failing --
+                    # close it so the NEXT attempt starts clean rather than
+                    # stacking a fresh open on top of a stale one.
+                    try:
+                        page.keyboard.press("Escape")
+                    except Exception:
+                        pass
             if last_click_error is not None:
                 raise ExportError(
-                    f"Card for media_id={media_id!r} was found, but clicking its status "
-                    f"toggle kept failing (element detached / recycled by the virtualized "
-                    f"list) even after {click_attempt + 1} fresh attempts. "
+                    f"Card for media_id={media_id!r} was found, but its usage-rights menu "
+                    f"kept failing to open/complete (element detached / recycled by the "
+                    f"virtualized list) even after {click_attempt + 1} fresh attempts. "
                     f"Original error: {last_click_error}"
                 ) from last_click_error
             _pace(page)
 
-            # The popup's top item's TITLE differs by status ("Request
-            # usage-rights" vs "Usage-rights requested"), but its
-            # subtitle is identical either way -- matched on that
-            # instead, since it doesn't vary.
-            top_menu_item = page.get_by_role("menuitem").filter(
-                has_text="Request creator approval to use this content in your marketing"
-            ).first
-            top_menu_item.wait_for(state="visible", timeout=5000)
-            _safe_click(top_menu_item)
-            _pace(page)
 
             # Email tab is active by default, but click it explicitly in
             # case that ever changes.
