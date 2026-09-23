@@ -1206,24 +1206,54 @@ def modal_post_check(image_srcs: Iterable[str], media_id: str) -> str:
 USAGE_RIGHTS_CARD_SELECTOR = ".usage-rights-request-card, .usage-rights-requested-card"
 USAGE_RIGHTS_MENU_TEXT = "Request creator approval to use this content in your marketing"
 
+# Per-attempt timings for opening the usage-rights menu. CONFIRMED REAL
+# cost this cuts: 4 attempts x a 5s menu wait meant every post whose menu
+# wouldn't open burned 20+ seconds -- the "it never ends" feeling on a
+# ~4,000-post backlog. 3 attempts x (1.5s click + 2.5s menu wait) caps a
+# genuinely stuck post at roughly 12s, and a working one returns at once.
+MENU_CLICK_TIMEOUT_MS = 1500
+MENU_OPEN_TIMEOUT_MS = 2500
+
 # Runs INSIDE the page, in one synchronous turn, on the resolved card.
 # Every step happens before react-virtuoso can process a scroll event
 # and recycle the node -- so there is no gap for the card to vanish in.
-_DOM_CLICK_CARD_JS = """(el, dangerous) => {
+# Centers the card and runs the send-button safety net, in one turn.
+# It deliberately does NOT click: a live run proved a synthetic click
+# reaches the correct, connected card and still doesn't open the menu.
+_CENTER_CARD_JS = """(el, dangerous) => {
     if (!el.isConnected) { throw new Error("card detached before click"); }
-    // Preserve _safe_click's hard safety net: never click anything that
-    // looks like a send/submit control, however we got here.
     if (new RegExp(dangerous, "i").test(el.innerText || "")) {
         throw new Error("refusing to click a send/submit-like element");
     }
     el.scrollIntoView({block: "center", inline: "nearest"});
     if (!el.isConnected) { throw new Error("card detached after centering"); }
-    el.click();
+}"""
+
+# Second mechanism: the FULL pointer/mouse sequence dispatched straight to
+# the card element (no coordinates, so nothing can intercept it). Used only
+# if the real forced click didn't open the menu.
+_POINTER_SEQUENCE_JS = """(el) => {
+    if (!el.isConnected) { throw new Error("card detached before pointer sequence"); }
+    const r = el.getBoundingClientRect();
+    const opts = {bubbles: true, cancelable: true, view: window, button: 0,
+                  clientX: r.left + r.width / 2, clientY: r.top + r.height / 2};
+    el.dispatchEvent(new PointerEvent("pointerdown", {...opts, pointerId: 1, isPrimary: true}));
+    el.dispatchEvent(new MouseEvent("mousedown", opts));
+    el.dispatchEvent(new PointerEvent("pointerup", {...opts, pointerId: 1, isPrimary: true}));
+    el.dispatchEvent(new MouseEvent("mouseup", opts));
+    el.dispatchEvent(new MouseEvent("click", opts));
+}"""
+
+# Reads (never clicks) the disclosure wrapper's open state from the card's
+# CURRENT node, so a recycled node can't leave us polling a stale one.
+_MENU_EXPANDED_JS = """(el) => {
+    const w = el.closest('[aria-controls]');
+    return w ? w.getAttribute('aria-expanded') : null;
 }"""
 
 
 def _open_usage_rights_menu(page: Page, media_id: str, grid_item, scroll_container_selector: str,
-                            media_row: Optional[dict] = None, attempts: int = 4):
+                            media_row: Optional[dict] = None, attempts: int = 3):
     """Opens the usage-rights menu for media_id's card and clicks its
     "Request creator approval..." item. Returns the (possibly re-found)
     grid_item. Raises ExportError if it can't.
@@ -1235,8 +1265,19 @@ def _open_usage_rights_menu(page: Page, media_id: str, grid_item, scroll_contain
        set-sticky> intercepts pointer events", then "element was
        detached". Playwright's actionability wait gave the virtualized
        list time to recycle the card, and the sticky header sat over it.
-       A DOM click is dispatched straight to the element -- no hit
-       testing, so the sticky header cannot intercept it.
+
+    1b. BUT A CLICK-ONLY DOM EVENT DOESN'T OPEN THE MENU. A later live
+       run clicked the correct, connected card with el.click() four times
+       per post; the menu never opened (the final error was the menu wait,
+       not "card detached", so the click genuinely landed). el.click() --
+       like dispatchEvent(new MouseEvent("click")) -- fires ONLY "click".
+       The proven-working original code used a real click, which fires
+       pointerdown, mousedown, pointerup, mouseup AND click; popover
+       triggers commonly listen on pointerdown/mousedown. So each attempt
+       now uses (a) Playwright's real click with force=True -- the full
+       trusted sequence, minus the actionability wait that caused the
+       recycling race -- and only if that didn't open it, (b) the full
+       pointer sequence dispatched directly to the element.
 
     2. WHY THE CARD SAT UNDER THE STICKY HEADER. The card search scrolls
        800px per step against a 720px viewport, so it overshoots: a card
@@ -1271,10 +1312,40 @@ def _open_usage_rights_menu(page: Page, media_id: str, grid_item, scroll_contain
                     raise ExportError(f"card for media_id={media_id!r} left the page and couldn't be re-found")
                 card = grid_item.locator(USAGE_RIGHTS_CARD_SELECTOR).first
 
-            card.evaluate(_DOM_CLICK_CARD_JS, _DANGEROUS_BUTTON_PATTERN.pattern)
+            card.evaluate(_CENTER_CARD_JS, _DANGEROUS_BUTTON_PATTERN.pattern)
+
+            # Mechanism 1: Playwright's REAL click -- trusted pointerdown,
+            # mousedown, pointerup, mouseup, click, exactly what the
+            # proven-working original code sent -- but force=True skips the
+            # actionability wait that gave virtuoso time to recycle the card.
+            # The card is centered, so the sticky header isn't over it.
+            try:
+                card.click(force=True, timeout=MENU_CLICK_TIMEOUT_MS)
+            except Exception:
+                pass  # mechanism 2 below still gets its chance
+
+            page.wait_for_timeout(150)  # let React commit the open state
+            try:
+                expanded = card.evaluate(_MENU_EXPANDED_JS)
+            except Exception:
+                expanded = None
 
             menu_item = page.get_by_role("menuitem").filter(has_text=USAGE_RIGHTS_MENU_TEXT).first
-            menu_item.wait_for(state="visible", timeout=5000)
+            try:
+                already_open = menu_item.is_visible()
+            except Exception:
+                already_open = False
+
+            # Only fire mechanism 2 when the menu is confirmed NOT open. The
+            # menu-item check guards the case where the state read came back
+            # unknown (e.g. the node just re-rendered) -- firing a second
+            # click into an ALREADY-open menu would toggle it shut again.
+            if expanded != "true" and not already_open:
+                # Mechanism 2: the full pointer sequence dispatched straight
+                # to the element -- no coordinates, nothing can intercept.
+                card.evaluate(_POINTER_SEQUENCE_JS)
+
+            menu_item.wait_for(state="visible", timeout=MENU_OPEN_TIMEOUT_MS)
             _safe_click(menu_item)
             return grid_item
         except Exception as e:
@@ -1287,7 +1358,9 @@ def _open_usage_rights_menu(page: Page, media_id: str, grid_item, scroll_contain
                 page.wait_for_timeout(150)
     raise ExportError(
         f"Card for media_id={media_id!r} was found, but its usage-rights menu didn't open "
-        f"after {attempts} DOM-click attempts. Original error: {last_error}"
+        f"after {attempts} attempts (real forced click, then full pointer sequence, each "
+        f"attempt). Not marked as 'no email' -- it will be retried on a future run. "
+        f"Original error: {last_error}"
     ) from last_error
 
 
