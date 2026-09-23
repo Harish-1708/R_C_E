@@ -2301,7 +2301,7 @@ class _MenuPage:
 
             def evaluate(_s, js, arg=None, timeout=None):
                 if "scrollIntoView" in js:
-                    page.events.append("center")
+                    page.events.append("scroll_into_view")
                     return None
                 if "pointerdown" in js:
                     page.events.append("pointer_sequence")
@@ -2471,28 +2471,32 @@ def test_sabotage_relying_on_a_click_only_event_would_be_caught():
 
 # -- centering, target, safety --
 
-def test_no_scroll_happens_between_finding_the_card_and_clicking_it(monkeypatch):
-    # confirmed real reversal: this used to assert centering happened
-    # here. A user's own screenshot showed a failing card only 4th from
-    # the top of the whole feed -- almost no scrolling needed -- yet its
-    # failure snapshot showed cards from much further down the list.
-    # Centering a near-top card to the viewport's MIDDLE can require
-    # scrolling well past where it actually is, and that scroll is
-    # itself what was churning the virtualized list. Removed -- nothing
-    # should scroll here at all anymore.
+def test_card_is_scrolled_into_view_with_nearest_not_center(monkeypatch):
+    # confirmed real, two-part correction: this used to assert NO
+    # scrolling happened at all, reasoning force=True doesn't need the
+    # element positioned anywhere. That was wrong -- direct geometry
+    # from 5 live failures showed every one sitting below the viewport
+    # (top > 720) the moment it was found; force=True skips hit-testing,
+    # not the need for real on-screen coordinates. block:"nearest" scrolls
+    # only enough to bring it into view -- never centers, so it can't
+    # reproduce the earlier over-scroll either.
     page = _MenuPage(email="a@b.com")
     _scrape(monkeypatch, page)
-    assert "center" not in page.events
+    assert "scroll_into_view" in page.events
     import refunnel_export
-    assert 'scrollIntoView' not in refunnel_export._VERIFY_CARD_JS
+    assert 'block: "nearest"' in refunnel_export._VERIFY_CARD_JS
+    assert 'block: "center"' not in refunnel_export._VERIFY_CARD_JS
 
 
-def test_sabotage_reintroducing_centering_would_be_caught(monkeypatch):
+def test_sabotage_centering_or_removing_the_scroll_would_be_caught(monkeypatch):
     page = _MenuPage(email="a@b.com")
     _scrape(monkeypatch, page)
     with pytest.raises(AssertionError):
-        assert "center" in page.events  # wrong -- the exact behaviour that over-scrolled
-    assert "center" not in page.events
+        assert "scroll_into_view" not in page.events  # wrong -- off-screen cards need this
+    import refunnel_export
+    with pytest.raises(AssertionError):
+        assert 'block: "center"' in refunnel_export._VERIFY_CARD_JS  # wrong -- the over-scroll bug
+    assert 'block: "nearest"' in refunnel_export._VERIFY_CARD_JS
 
 
 def test_the_innermost_card_is_the_click_target_not_its_wrapper():
@@ -2754,3 +2758,19 @@ def test_sabotage_dropping_the_geometry_note_would_be_caught(monkeypatch, capsys
     with pytest.raises(AssertionError):
         assert "Toggle geometry" not in out  # wrong -- that's silently dropping real evidence
     assert "Toggle geometry" in out
+
+
+def test_a_card_below_the_viewport_gets_scrolled_up_before_clicking(monkeypatch):
+    # pinned to real data: a live run captured 5 failing cards, each
+    # geometry read the moment it was first found -- all had top > 720
+    # (the viewport's own height), width/height a normal 185x46, and a
+    # horizontal position nowhere near an edge (left 379, right 564 of
+    # 1280). Not a sizing or column problem -- just not scrolled into
+    # view yet, and the fix is scrolling it, minimally, before clicking.
+    page = _MenuPage(email="a@b.com", geometry={
+        "connected": True, "width": 185, "height": 46, "top": 1115,
+        "left": 379, "right": 564, "viewportWidth": 1280, "viewportHeight": 720,
+    })
+    results, _ = _scrape(monkeypatch, page)
+    assert results == {"tk_1": "a@b.com"}
+    assert page.events.index("scroll_into_view") < page.events.index("forced_click")
