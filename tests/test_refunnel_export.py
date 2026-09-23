@@ -2637,3 +2637,37 @@ def test_a_genuine_bug_in_the_interaction_path_is_not_silently_swallowed(monkeyp
     # just a bare "didn't open"
     # (covered by test_a_stuck_post_gives_up_after_three_attempts_not_four
     # via capsys; this test documents WHY that coverage matters)
+
+
+# ---------- settle time and evaluate timeout, widened from a real "works once then stops" run ----------
+
+def test_item_pace_gives_the_grid_real_room_to_settle_after_a_modal_closes():
+    # confirmed real, new pattern: a live 25-post run had post 1 succeed
+    # completely (menu, modal, email field), then every post after it
+    # fail at the first step. The one thing that changes after a
+    # successful post is a modal (with its own overlay) closing --
+    # widened from (600, 1200) to give the grid real room to re-settle.
+    import refunnel_export as r
+    assert r.EMAIL_SCRAPE_ITEM_PACE_MS[0] >= 1500
+
+
+def test_evaluate_timeout_is_not_re_tightened_below_what_a_real_element_needs():
+    # 2000 was tuned against a DIFFERENT bug (a 30s unbounded wait) and
+    # never actually validated as long enough for a genuinely-present,
+    # momentarily-settling element -- loosened to 4000
+    import refunnel_export as r
+    assert r.EVALUATE_TIMEOUT_MS >= 3000
+
+
+def test_evaluate_timeout_still_stays_nowhere_near_the_original_30s_problem():
+    # the ORIGINAL complaint this whole investigation started from --
+    # loosening must never silently drift back toward it
+    import refunnel_export as r
+    assert 3 * r.EVALUATE_TIMEOUT_MS < 20000
+
+
+def test_sabotage_re_tightening_the_settle_time_would_be_caught():
+    import refunnel_export as r
+    with pytest.raises(AssertionError):
+        assert r.EMAIL_SCRAPE_ITEM_PACE_MS == (600, 1200)  # wrong -- the value this run's evidence disproved
+    assert r.EMAIL_SCRAPE_ITEM_PACE_MS[0] >= 1500
