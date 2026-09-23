@@ -1329,6 +1329,26 @@ def scrape_creator_emails(
             last_click_error = None
             for click_attempt in range(3):
                 if click_attempt > 0:
+                    # Reset to the top BEFORE re-searching -- confirmed
+                    # real, and the reason these retries never once
+                    # succeeded: _scroll_until_card_found only ever
+                    # scrolls FORWARD, but by the time the first click
+                    # attempt has failed the container is typically at
+                    # or near its real bottom (a live run showed
+                    # scrollTop 692698 of scrollHeight 693418). Searching
+                    # forward from there can never re-find a card that
+                    # is above the current position, so every retry
+                    # returned None and the loop always ended in
+                    # "detached after 2 fresh attempts".
+                    #
+                    # It also explains the alternating pattern in that
+                    # run: a detached failure left the page pinned at
+                    # the bottom, so the NEXT post failed with
+                    # "couldn't locate" (whose own handler resets), and
+                    # so on. Scoped to retries only -- NOT to every
+                    # exception, which is what caused a harmful
+                    # cascade when tried before.
+                    scroll_to_top(page, scroll_container_selector)
                     grid_item, _ = _scroll_until_card_found(page, media_id, scroll_container_selector)
                     if grid_item is None:
                         break  # genuinely gone now, not just detached -- let the outer handling deal with it
