@@ -2034,8 +2034,14 @@ def test_sabotage_uploading_on_an_ambiguous_match_would_be_caught(monkeypatch):
 
 def test_retry_click_uses_a_short_timeout_not_the_30s_default():
     from refunnel_export import CLICK_ATTEMPT_TIMEOUT_MS
-    assert CLICK_ATTEMPT_TIMEOUT_MS <= 10000
-    assert 3 * CLICK_ATTEMPT_TIMEOUT_MS < 30000  # worse-case retries now cheaper than ONE old attempt
+    # confirmed real: 8000 was too aggressive -- a live run showed 3-for-3
+    # clicks failing at exactly that value once the SEPARATE cascading-reset
+    # bug was fixed, consistent with the element needing more time to
+    # stabilize, not being permanently unclickable. Bounds relaxed to allow
+    # more patience per attempt, while still well under the original
+    # 3 x 30s = 90s worst case that caused the long apparent stalls.
+    assert CLICK_ATTEMPT_TIMEOUT_MS <= 20000
+    assert 3 * CLICK_ATTEMPT_TIMEOUT_MS < 90000
 
 
 def test_safe_click_passes_the_timeout_through():
