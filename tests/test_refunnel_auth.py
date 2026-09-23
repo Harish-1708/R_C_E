@@ -435,3 +435,121 @@ def test_sabotage_silent_success_would_be_caught(monkeypatch, tmp_path, capsys):
     with pytest.raises(AssertionError):
         assert out.strip() == ""  # wrong -- this used to be true, and was the whole problem
     assert "Reused the cached Refunnel session" in out  # confirms the fix
+
+
+# ---------- _perform_login's OTP retry loop (isolated with fakes) ----------
+#
+# _perform_login itself still drives a real Playwright page and isn't
+# fully testable without one, but its retry LOGIC -- attempt counting,
+# when it re-clicks Send, when it gives up -- is pure enough to isolate
+# with fakes for page/_find_first/gmail_otp.fetch_latest_code.
+
+import gmail_otp
+
+
+class _FakeOtpRequestPage:
+    def __init__(self):
+        self.goto_calls = 0
+        self.filled = None
+        self.url = "https://app.refunnel.com/dashboard"
+
+    def goto(self, url, wait_until=None, timeout=None):
+        self.goto_calls += 1
+
+    def wait_for_timeout(self, ms):
+        pass
+
+
+class _FakeElement:
+    def __init__(self, on_click=None):
+        self.filled = None
+        self.click_count = 0
+        self._on_click = on_click
+
+    def fill(self, value):
+        self.filled = value
+
+    def click(self):
+        self.click_count += 1
+        if self._on_click:
+            self._on_click()
+
+
+def test_retries_the_whole_request_cycle_not_just_the_poll(monkeypatch):
+    # confirmed real gap this fixes: the old code clicked Send ONCE and
+    # gave up outright if the email never arrived within the wait window
+    send_button = _FakeElement()
+    monkeypatch.setattr(refunnel_auth, "_find_first",
+                        lambda page, sel, name, **kw: send_button)
+
+    calls = {"n": 0}
+
+    def fake_fetch(requested_after_ts, max_wait_seconds):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise gmail_otp.OtpNotFoundError("nothing arrived")
+        return "123456"
+
+    monkeypatch.setattr(gmail_otp, "fetch_latest_code", fake_fetch)
+    monkeypatch.setattr(refunnel_auth, "_enter_login_code", lambda page, code: None)
+    monkeypatch.setattr(refunnel_auth, "_submit_login_code", lambda page: None)
+
+    refunnel_auth._perform_login(_FakeOtpRequestPage(), "x@example.com", otp_wait_seconds=1)
+
+    assert send_button.click_count == 2  # Send was clicked AGAIN, not just polled again
+    assert calls["n"] == 2
+
+
+def test_gives_up_after_the_configured_number_of_attempts(monkeypatch):
+    send_button = _FakeElement()
+    monkeypatch.setattr(refunnel_auth, "_find_first",
+                        lambda page, sel, name, **kw: send_button)
+
+    def always_fails(requested_after_ts, max_wait_seconds):
+        raise gmail_otp.OtpNotFoundError("nothing arrived")
+
+    monkeypatch.setattr(gmail_otp, "fetch_latest_code", always_fails)
+
+    with pytest.raises(refunnel_auth.LoginError) as exc:
+        refunnel_auth._perform_login(_FakeOtpRequestPage(), "x@example.com",
+                                     otp_wait_seconds=1, otp_request_attempts=3)
+
+    assert send_button.click_count == 3
+    assert "3 request(s)" in str(exc.value)
+
+
+def test_succeeds_immediately_without_retrying_when_the_first_code_arrives(monkeypatch):
+    send_button = _FakeElement()
+    monkeypatch.setattr(refunnel_auth, "_find_first",
+                        lambda page, sel, name, **kw: send_button)
+    monkeypatch.setattr(gmail_otp, "fetch_latest_code", lambda **kw: "654321")
+    monkeypatch.setattr(refunnel_auth, "_enter_login_code", lambda page, code: None)
+    monkeypatch.setattr(refunnel_auth, "_submit_login_code", lambda page: None)
+
+    refunnel_auth._perform_login(_FakeOtpRequestPage(), "x@example.com")
+
+    assert send_button.click_count == 1  # no unnecessary retry
+
+
+def test_sabotage_single_attempt_would_be_caught(monkeypatch):
+    send_button = _FakeElement()
+    monkeypatch.setattr(refunnel_auth, "_find_first",
+                        lambda page, sel, name, **kw: send_button)
+
+    calls = {"n": 0}
+
+    def fake_fetch(requested_after_ts, max_wait_seconds):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise gmail_otp.OtpNotFoundError("nothing arrived")
+        return "123456"
+
+    monkeypatch.setattr(gmail_otp, "fetch_latest_code", fake_fetch)
+    monkeypatch.setattr(refunnel_auth, "_enter_login_code", lambda page, code: None)
+    monkeypatch.setattr(refunnel_auth, "_submit_login_code", lambda page: None)
+
+    refunnel_auth._perform_login(_FakeOtpRequestPage(), "x@example.com", otp_wait_seconds=1)
+
+    with pytest.raises(AssertionError):
+        assert send_button.click_count == 1  # wrong -- that's the old, unretried behaviour
+    assert send_button.click_count == 2
