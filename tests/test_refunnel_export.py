@@ -2240,13 +2240,18 @@ class _MenuNeverOpensPage(_MinimalScrapePage):
 
 class _MenuPage:
     def __init__(self, media_id="tk_1", opens_on="forced", fail_attempts=0,
-                 card_in_dom=True, modal_img="tk_1_0.jpg", email=""):
+                 card_in_dom=True, modal_img="tk_1_0.jpg", email="",
+                 geometry=None):
         self.media_id = media_id
         self.opens_on = opens_on          # "forced" | "pointer" | "click_only" | "never"
         self.fail_attempts = fail_attempts
         self.card_in_dom = card_in_dom
         self.modal_img = modal_img
         self.email = email
+        self.geometry = geometry if geometry is not None else {
+            "connected": True, "width": 300, "height": 80, "top": 100, "left": 50,
+            "right": 350, "viewportWidth": 1280, "viewportHeight": 800,
+        }
         self.events = []
         self.scroll_resets = 0
         self.attempt = 0
@@ -2305,6 +2310,11 @@ class _MenuPage:
                     return None
                 if "aria-expanded" in js:
                     return "true" if page.menu_open else "false"
+                if "getBoundingClientRect" in js:
+                    page.events.append("geometry_read")
+                    if getattr(page, "geometry_read_fails", False):
+                        raise RuntimeError("card genuinely gone now")
+                    return page.geometry
                 if "el.click()" in js:                       # a click-only event
                     page.events.append("click_only")
                     if page.opens_on == "click_only":
@@ -2685,3 +2695,55 @@ def test_sabotage_re_tightening_the_settle_time_would_be_caught():
     with pytest.raises(AssertionError):
         assert r.EMAIL_SCRAPE_ITEM_PACE_MS == (600, 1200)  # wrong -- the value this run's evidence disproved
     assert r.EMAIL_SCRAPE_ITEM_PACE_MS[0] >= 1500
+
+
+# ---------- geometry diagnostic on final failure (evidence for the next run, not a fix) ----------
+#
+# A user's own manual audit of a 25-post run found EVERY failure was the
+# 4th (rightmost) card of a 4-column grid row -- no exceptions. Ruled
+# out one structural theory directly (checked the real HTML: one
+# rf-virtuoso-item is genuinely one card, not a row of 4). Rather than
+# guess again, the failure message itself now carries the toggle's
+# actual on-screen geometry, so the next occurrence gives real numbers.
+
+def test_failure_message_includes_toggle_geometry(monkeypatch, capsys):
+    page = _MenuPage(opens_on="never", geometry={
+        "connected": True, "width": 0, "height": 0, "top": 900, "left": 1250,
+        "right": 1250, "viewportWidth": 1280, "viewportHeight": 800,
+    })
+    _scrape(monkeypatch, page)
+    out = capsys.readouterr().out
+    assert "Toggle geometry at time of failure" in out
+    assert "'width': 0" in out and "'left': 1250" in out
+
+
+def test_geometry_read_happens_once_after_giving_up_not_during_retries(monkeypatch):
+    # diagnostic-only -- must never add cost to the retry loop itself
+    page = _MenuPage(opens_on="never")
+    _scrape(monkeypatch, page)
+    assert page.events.count("geometry_read") == 1
+
+
+def test_a_successful_run_never_pays_for_the_geometry_read(monkeypatch):
+    page = _MenuPage(opens_on="forced", email="a@b.com")
+    _scrape(monkeypatch, page)
+    assert "geometry_read" not in page.events
+
+
+def test_geometry_read_failing_is_reported_plainly_not_silently_dropped(monkeypatch, capsys):
+    # if the card is genuinely gone by the time we try to read geometry,
+    # that itself is informative -- must not vanish from the message
+    page = _MenuPage(opens_on="never")
+    page.geometry_read_fails = True
+    _scrape(monkeypatch, page)
+    out = capsys.readouterr().out
+    assert "Couldn't read toggle geometry" in out
+
+
+def test_sabotage_dropping_the_geometry_note_would_be_caught(monkeypatch, capsys):
+    page = _MenuPage(opens_on="never")
+    _scrape(monkeypatch, page)
+    out = capsys.readouterr().out
+    with pytest.raises(AssertionError):
+        assert "Toggle geometry" not in out  # wrong -- that's silently dropping real evidence
+    assert "Toggle geometry" in out
