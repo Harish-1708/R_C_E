@@ -32,6 +32,7 @@ completes; see README "Testing the login flow".
 from __future__ import annotations
 
 import time
+from typing import Optional
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -58,10 +59,20 @@ REFUNNEL_LOGIN_URL = f"{REFUNNEL_BASE_URL}/login"
 # safe fallback is reverting this one function back to a plain
 # f-string with no query params at all (Refunnel's own "Last 3 months"
 # default) -- see git history for that exact version.
-def refunnel_social_listening_url() -> str:
+def refunnel_social_listening_url(usage_rights: Optional[str] = None) -> str:
+    """The Social Listening URL for the rolling last 12 months.
+
+    usage_rights: optionally filter the grid to one usage-rights status
+    (e.g. "GRANTED" for Approved). CONFIRMED REAL -- read directly from
+    the address bar of a saved Refunnel page with the Approved filter
+    applied: the filter is just two query params,
+      usage_rights=["GRANTED"]  and  usage_rightsOpt="is"
+    so it can be applied by navigating, with no clicking through a
+    filter dropdown whose selectors are unverified.
+    """
     today = date.today()
     from_date = today - timedelta(days=365)
-    return (
+    url = (
         f"{REFUNNEL_BASE_URL}/dashboard/content/social-listening"
         f"?sort_by=%22BY_DATE%22"
         f"&from_date=%22{from_date.isoformat()}%22"
@@ -69,6 +80,9 @@ def refunnel_social_listening_url() -> str:
         f"&snv=true"
         f"&insights_timeline=%22last12months%22"
     )
+    if usage_rights:
+        url += f"&usage_rights=%5B%22{usage_rights}%22%5D&usage_rightsOpt=%22is%22"
+    return url
 
 
 # Confirmed for real (you sent the exact URL from your address bar):
