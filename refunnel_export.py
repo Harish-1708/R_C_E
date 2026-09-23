@@ -1250,16 +1250,35 @@ EVALUATE_TIMEOUT_MS = 4000
 # Runs INSIDE the page, in one synchronous turn, on the resolved card.
 # Every step happens before react-virtuoso can process a scroll event
 # and recycle the node -- so there is no gap for the card to vanish in.
-# Centers the card and runs the send-button safety net, in one turn.
-# It deliberately does NOT click: a live run proved a synthetic click
-# reaches the correct, connected card and still doesn't open the menu.
-_CENTER_CARD_JS = """(el, dangerous) => {
+# Runs the send-button safety net and confirms the element is genuinely
+# connected, in one turn. It deliberately does NOT click: a live run
+# proved a synthetic click reaches the correct, connected card and
+# still doesn't open the menu.
+#
+# CONFIRMED REAL, and a genuine reversal of an earlier assumption: this
+# used to ALSO center the card first (scrollIntoView block:"center"),
+# reasoning that it would keep the sticky header off the click point.
+# A user's own screenshot showed a failing card sitting only 4th from
+# the very top of the feed -- almost no scrolling needed to reach it at
+# all -- yet the failure snapshot showed a COMPLETELY different set of
+# cards on screen, many rows further down. That's centering itself:
+# forcing a near-top card to the MIDDLE of the viewport can require
+# scrolling well past where it actually is, and doing that inside a
+# virtualized list is exactly the kind of scroll that churns it.
+#
+# It's also no longer needed for its original purpose. Both click
+# mechanisms here bypass hit-testing entirely: locator.click(force=True)
+# explicitly skips the "receives events" check the sticky header used
+# to fail (and, per Playwright's own docs, also works on an element
+# that's outside the viewport), and the pointer-event sequence is
+# dispatched straight to the element object via JS, never through
+# screen coordinates. Neither one needs the element visually
+# positioned anywhere in particular.
+_VERIFY_CARD_JS = """(el, dangerous) => {
     if (!el.isConnected) { throw new Error("card detached before click"); }
     if (new RegExp(dangerous, "i").test(el.innerText || "")) {
         throw new Error("refusing to click a send/submit-like element");
     }
-    el.scrollIntoView({block: "center", inline: "nearest"});
-    if (!el.isConnected) { throw new Error("card detached after centering"); }
 }"""
 
 # Second mechanism: the FULL pointer/mouse sequence dispatched straight to
@@ -1312,13 +1331,18 @@ def _open_usage_rights_menu(page: Page, media_id: str, grid_item, scroll_contain
        recycling race -- and only if that didn't open it, (b) the full
        pointer sequence dispatched directly to the element.
 
-    2. WHY THE CARD SAT UNDER THE STICKY HEADER. The card search scrolls
-       800px per step against a 720px viewport, so it overshoots: a card
-       is often detected while ABOVE the viewport, and Playwright then
-       scrolls it minimally to the nearest edge -- the top, under the
-       header. Centering it (block: "center") fixes that, and the middle
-       of the rendered window is also where virtuoso is least likely to
-       unmount it.
+    2. WHY THIS ISN'T FIXED BY SCROLLING EITHER. It's tempting to think
+       the sticky header meant a card just needed scrolling somewhere
+       safer -- centered, say. That was tried. A user's own screenshot
+       showed a failing card sitting 4th from the top of the whole feed
+       -- almost no scrolling needed -- yet its failure snapshot showed
+       a completely different, much-further-down set of cards on
+       screen. Forcing a near-top card to the MIDDLE of the viewport
+       can require scrolling well past where it actually is, and that
+       scroll is itself what churns a virtualized list. Removed
+       entirely rather than tuned: force=True and the pointer sequence
+       below don't need the element positioned anywhere in particular
+       to begin with (see _VERIFY_CARD_JS).
 
     3. CLICK THE CARD ITSELF, NOT ITS WRAPPER. The real ancestor chain
        is card -> div[cursor:pointer] -> div[aria-controls]. The
@@ -1345,7 +1369,7 @@ def _open_usage_rights_menu(page: Page, media_id: str, grid_item, scroll_contain
                     raise ExportError(f"card for media_id={media_id!r} left the page and couldn't be re-found")
                 card = grid_item.locator(USAGE_RIGHTS_CARD_SELECTOR).first
 
-            card.evaluate(_CENTER_CARD_JS, _DANGEROUS_BUTTON_PATTERN.pattern, timeout=EVALUATE_TIMEOUT_MS)
+            card.evaluate(_VERIFY_CARD_JS, _DANGEROUS_BUTTON_PATTERN.pattern, timeout=EVALUATE_TIMEOUT_MS)
 
             # Mechanism 1: Playwright's REAL click -- trusted pointerdown,
             # mousedown, pointerup, mouseup, click, exactly what the
