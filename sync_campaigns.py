@@ -196,20 +196,34 @@ def sync_campaigns_for_brand(
 
     fresh = parse_refunnel.build_campaign_membership(campaign_to_ids)
 
-    # Only writes what actually changed -- a post's fresh value differs
-    # from what's currently in the sheet, including correctly writing
-    # a BLANK when a post no longer belongs to anything it used to.
-    # Unlike Reviewed/drive_uploaded_at, campaign membership is a
-    # refreshed snapshot, not an append-only fact, so clearing a stale
-    # value here is correct, not a bug.
-    all_relevant_ids = set(existing_campaigns) | set(fresh)
+    # FREEZE-ONCE-SET, by explicit instruction: a row that already has
+    # a campaign value is NEVER touched again. Only rows currently
+    # blank get written.
+    #
+    # This deliberately REVERSES an earlier design here (which treated
+    # campaigns as a refreshed snapshot and cleared stale values), and
+    # the stated reason is a good one: this column depends on a long
+    # chain of UI automation -- discovering campaigns, applying a
+    # filter, scrolling, exporting -- and any silent failure anywhere
+    # in that chain produces an empty result that looks exactly like
+    # "this post is in no campaign". Under the old behaviour that
+    # would WIPE correct campaign data already in the sheet. Freezing
+    # means the worst case is a stale value, never a destroyed one.
+    #
+    # The real tradeoff, stated honestly: if a post is genuinely
+    # removed from a campaign in Refunnel, or moved to a different
+    # one, the sheet will keep showing the old value and this script
+    # will not correct it. Clearing that cell by hand is enough -- the
+    # next run refills it from live data, since a blank is the one
+    # state this will write to.
     updates = {
-        media_id: fresh.get(media_id, "")
-        for media_id in all_relevant_ids
-        if (existing_campaigns.get(media_id) or "") != fresh.get(media_id, "")
+        media_id: value
+        for media_id, value in fresh.items()
+        if not (existing_campaigns.get(media_id) or "").strip()
     }
     written = master_client.update_cells_by_id(updates, "campaigns")
-    print(f"{brand}: updated campaign tags on {written} row(s).")
+    print(f"{brand}: set campaign tags on {written} row(s) that didn't have one yet "
+          f"(rows with an existing value are left untouched by design).")
 
 
 def main() -> int:
