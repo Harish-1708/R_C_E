@@ -60,6 +60,12 @@ SCRAPE_EMAILS_ENABLED = True
 # alone can't be used to detect it.
 PENDING_REVIEW_TITLE_TEXT = "Pending review"
 
+# Per-attempt click timeout inside the detached-card retry loop. 3
+# attempts x 8s = 24s worst case per un-clickable card, versus up to
+# 90s with Playwright's 30s default -- which a live run showed was the
+# main cause of long apparent stalls.
+CLICK_ATTEMPT_TIMEOUT_MS = 8000
+
 # Refunnel's "Request usage rights" flow has a "Send request" button
 # (confirmed from your screenshot). We refuse to click anything whose
 # accessible name matches this, as a hard safety net independent of
@@ -168,7 +174,8 @@ def select_workspace(
     page.wait_for_timeout(2000)  # let the workspace switch (page reload/content refresh) settle
 
 
-def goto_social_listening_for_workspace(page: Page, workspace_name: str, known_workspace_names: Iterable[str]) -> None:
+def goto_social_listening_for_workspace(page: Page, workspace_name: str, known_workspace_names: Iterable[str],
+                                       usage_rights: Optional[str] = None) -> None:
     """Navigates to Social Listening for a SPECIFIC workspace, with the
     intended 12-months time range GENUINELY applied afterward -- not
     just requested in the URL before the switch.
@@ -189,12 +196,12 @@ def goto_social_listening_for_workspace(page: Page, workspace_name: str, known_w
     so every caller (the main sync, campaign sync, the Drive backfill)
     gets the fix by using this instead of the two calls directly.
     """
-    page.goto(refunnel_auth.refunnel_social_listening_url())
+    page.goto(refunnel_auth.refunnel_social_listening_url(usage_rights))
     select_workspace(page, workspace_name, known_workspace_names)
     # Re-navigate: the workspace switch above can silently reset the
     # time-range filter to THIS workspace's own default -- see the
     # docstring above for the confirmed real evidence.
-    page.goto(refunnel_auth.refunnel_social_listening_url())
+    page.goto(refunnel_auth.refunnel_social_listening_url(usage_rights))
 
 
 def scroll_to_top(page: Page, scroll_container_selector: str = "#scrollableDiv") -> None:
@@ -799,7 +806,7 @@ def clear_all_filters(page: Page) -> None:
         pass  # nothing was active to clear -- not an error
 
 
-def _safe_click(locator) -> None:
+def _safe_click(locator, timeout_ms: Optional[int] = None) -> None:
     """Click, but refuse if the element's own text matches
     _DANGEROUS_BUTTON_PATTERN (looks like 'Send request') -- a hard
     safety net independent of whatever locator logic got us here."""
@@ -812,7 +819,11 @@ def _safe_click(locator) -> None:
             f"Refusing to click an element whose text matches a dangerous "
             f"send/submit pattern: {text!r}"
         )
-    locator.click()
+    # timeout_ms=None keeps Playwright's default for existing callers.
+    if timeout_ms is None:
+        locator.click()
+    else:
+        locator.click(timeout=timeout_ms)
 
 
 def _order_ids_for_scraping(media_rows: dict, media_ids: Iterable[str]) -> list:
@@ -833,6 +844,7 @@ def _scroll_until_card_found(
     scroll_step: int = 800,
     pace_ms_range: tuple = SCROLL_SEARCH_PACE_MS,
     bottom_rounds_before_giving_up: int = 4,
+    card_selector: Optional[str] = None,
 ):
     """react-virtuoso (the grid library this page uses) only keeps
     nearby cards mounted in the DOM, unmounting far-off ones as you
@@ -873,7 +885,10 @@ def _scroll_until_card_found(
     taking effect on this element), separate from "moved fine but the
     card still never rendered."
     """
-    selector = f"div.rf-virtuoso-item:has(img[src*='{media_id}'])"
+    # card_selector overrides the default id-in-image match -- used by
+    # the username+date fallback for posts whose id never appears in
+    # their thumbnail URL (see card_selector_for_username_date).
+    selector = card_selector or f"div.rf-virtuoso-item:has(img[src*='{media_id}'])"
     state = None
     rounds_at_bottom = 0
 
@@ -984,17 +999,57 @@ def _format_progress_line(attempted: int, total: int, found: int, empty_fields: 
             f"{other_failed} other error(s)")
 
 
-# CONFIRMED REAL from a saved HTML dump of the live page, replacing an
-# earlier aria-label guess that matched ZERO elements (which is exactly
-# why a live run's Drive menu click timed out every time). The dotted
-# "..." menu is the ARIA disclosure wrapper containing the
-# dottedMenuIcon image -- the SIBLING of the usage-rights toggle inside
-# each card's footer. Verified against the real DOM: matches exactly one
-# element per card, and never the usage-rights toggle.
-DRIVE_CARD_MENU_BUTTON_SELECTOR = ".pop-up-menu > [aria-controls]:has(img[src*='dottedMenuIcon'])"
+# CONFIRMED REAL from a saved page with the Approved filter applied: an
+# Approved card's footer holds ONLY the usage-rights toggle -- the ARIA
+# disclosure wrapping .usage-rights-approved-card -- and "Upload to
+# Google Drive" is in THAT toggle's dropdown. An earlier selector
+# targeted a dotted "..." icon; on the live page that opened the card's
+# other menu (Show content / Mute creator / Delete from library).
+DRIVE_APPROVED_TOGGLE_SELECTOR = ".pop-up-menu > [aria-controls]:has(.usage-rights-approved-card)"
 DRIVE_UPLOAD_MENU_ITEM_SELECTOR = "text=Upload to Google Drive"
 DRIVE_MODAL_ALL_FOLDERS_TAB_SELECTOR = "button:has-text('All folders')"
 DRIVE_MODAL_SAVE_BUTTON_SELECTOR = "button:has-text('Save to Drive')"
+
+
+_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def card_date_label(created_at: str) -> Optional[str]:
+    """Formats an ISO created_at ("2026-09-11T14:02:00Z") the way a card
+    displays its date ("Sep 11") -- confirmed real from saved pages:
+    "Sep 11", "Jul 19", "Mar 10" (abbreviated month, unpadded day, no
+    year). Returns None if created_at can't be parsed."""
+    try:
+        y, m, d = (created_at or "")[:10].split("-")
+        return f"{_MONTHS[int(m) - 1]} {int(d)}"
+    except Exception:
+        return None
+
+
+def card_selector_for_username_date(username: str, created_at: str) -> Optional[str]:
+    """Selector locating a card by creator handle + displayed post date --
+    the fallback for posts whose media id never appears in their
+    thumbnail URL.
+
+    CONFIRMED REAL need: TikTok ids and numeric Instagram ids DO appear
+    in card image filenames (e.g. "ig_18352380517172428.jpg"), but the
+    32-character hex Instagram ids (e.g. ig_0431480af70141eab24c76d9f2b5b40c)
+    do not -- which is exactly why those kept failing with "couldn't
+    locate". Suggested directly: match on creator + date instead.
+
+    Uses confirmed-real classes (span.post-header-uname for the handle,
+    .post_time__cpgc for the date) and :text-is() for EXACT matching,
+    so "@indycub9" can never match "@indycub99".
+    """
+    label = card_date_label(created_at)
+    if not username or not label:
+        return None
+    handle = username if username.startswith("@") else f"@{username}"
+    handle = handle.replace("'", "\\'")
+    return (f"div.rf-virtuoso-item"
+            f":has(span.post-header-uname:text-is('{handle}'))"
+            f":has(.post_time__cpgc:text-is('{label}'))")
 
 
 def trigger_native_drive_upload(
@@ -1004,54 +1059,68 @@ def trigger_native_drive_upload(
     scroll_container_selector: str = "#scrollableDiv",
     debug_dir: Optional[str] = None,
     timeout_ms: int = 15000,
+    username: Optional[str] = None,
+    created_at: Optional[str] = None,
 ) -> bool:
-    """Uses Refunnel's OWN native "Upload to Google Drive" feature to
-    save a post's video directly into a connected Drive folder --
-    confirmed real, replacing an earlier custom download-then-upload
-    design entirely (that approach used a guessed download-button
-    selector never verified against real markup; this uses a feature
-    you confirmed is already connected and working from your own
-    account). Refunnel handles the actual file transfer server-side;
-    this only triggers it and selects the right folder.
+    """Saves one Approved post's video to Google Drive using Refunnel's
+    OWN native upload -- Refunnel does the file transfer server-side;
+    this only drives the UI and picks the folder.
 
-    Confirmed real UI flow, from live screenshots: open the card's
-    "..." menu -> "Upload to Google Drive" -> a modal with three tabs
-    (New folder / In root folder / All folders) -> select "All
-    folders" -> pick the target folder by name -> "Save to Drive".
+    CONFIRMED REAL flow, from saved pages and screenshots of the live UI:
+      1. On an APPROVED card, "Upload to Google Drive" lives in the
+         "Usage rights approved" status bar's chevron dropdown -- the
+         card footer holds ONLY that toggle (wrapping
+         .usage-rights-approved-card). An earlier version clicked a
+         dotted "..." icon instead; a live run's screenshot showed that
+         opened the card's OTHER menu ("Show content / Mute creator /
+         Delete from library"), so "Upload to Google Drive" never
+         appeared and every attempt timed out.
+      2. The save modal: "All folders" tab -> the brand's folder (a
+         span with its exact name) -> "Save to Drive", which is
+         DISABLED until a folder is picked, so it is waited on rather
+         than clicked blind.
 
-    The exact selectors below are still BEST-GUESS, not verified
-    against real markup -- same caveat as every other new UI element
-    in this project until a live run confirms or corrects them.
-    debug_dir captures a screenshot + HTML on any failure, so a wrong
-    guess can be fixed from real evidence on the next round rather
-    than another blind guess.
+    Card lookup: by media id in the thumbnail URL first (works for
+    TikTok and numeric Instagram ids -- confirmed), then, if given,
+    by creator handle + displayed date for the 32-char hex Instagram
+    ids that never appear in thumbnail URLs. The fallback refuses to
+    act when more than one card matches (same creator, same day) --
+    skipping is always safer than uploading the wrong video.
 
-    Refunnel's own upload does NOT preserve the agreed naming
-    convention -- it uses its own format (confirmed real example:
-    "INSTAGRAM_REEL_username_2026-09-21-UGC_<last 8 digits of the real
-    id>.mp4"). Finding that file afterward and renaming it is
-    drive_upload.py's job, not this function's -- this only triggers
-    the upload and confirms the modal flow completed.
-
-    Returns True once "Save to Drive" has been clicked. False if the
-    card itself couldn't be located (same meaning as everywhere else
-    in this file). Raises on any other failure in the flow.
+    Returns True once Save to Drive is clicked, False if the card
+    couldn't be located (or was ambiguous). Raises on any other failure
+    in the flow, after saving a debug snapshot if debug_dir is given.
     """
-    # Reset BEFORE searching -- confirmed real, the same bug class as
-    # email scraping: _scroll_until_card_found only scrolls FORWARD, and
-    # this function never reset, so every approved video sitting ABOVE
-    # wherever the previous one left the page was unreachable. A live run
-    # reported "couldn't locate" for 4 of 5 approved videos. Resetting
-    # makes each search independent of processing order.
+    # Reset BEFORE searching -- confirmed real: the search only scrolls
+    # FORWARD, so anything above the current position was unreachable.
     scroll_to_top(page, scroll_container_selector)
     grid_item, _ = _scroll_until_card_found(page, media_id, scroll_container_selector)
+
+    if grid_item is None and username and created_at:
+        fallback = card_selector_for_username_date(username, created_at)
+        if fallback:
+            scroll_to_top(page, scroll_container_selector)
+            grid_item, _ = _scroll_until_card_found(
+                page, media_id, scroll_container_selector, card_selector=fallback
+            )
+            if grid_item is not None:
+                try:
+                    matches = page.locator(fallback).count()
+                except Exception:
+                    matches = 1
+                if matches > 1:
+                    print(f"drive upload: {matches} cards match @{username.lstrip('@')} on "
+                          f"{card_date_label(created_at)} -- skipping media_id={media_id!r} "
+                          f"rather than risk uploading the wrong video.")
+                    return False
+
     if grid_item is None:
         return False
 
     try:
-        grid_item.hover()
-        menu_button = grid_item.locator(DRIVE_CARD_MENU_BUTTON_SELECTOR).first
-        menu_button.click()
+        toggle = grid_item.locator(DRIVE_APPROVED_TOGGLE_SELECTOR).first
+        toggle.scroll_into_view_if_needed(timeout=4000)
+        toggle.click()
 
         upload_item = page.locator(DRIVE_UPLOAD_MENU_ITEM_SELECTOR).first
         upload_item.wait_for(state="visible", timeout=timeout_ms)
@@ -1061,11 +1130,12 @@ def trigger_native_drive_upload(
         all_folders_tab.wait_for(state="visible", timeout=timeout_ms)
         all_folders_tab.click()
 
-        folder_row = page.get_by_text(drive_folder_name, exact=False).first
+        folder_row = page.get_by_text(drive_folder_name, exact=True).first
         folder_row.wait_for(state="visible", timeout=timeout_ms)
         folder_row.click()
 
         save_button = page.locator(DRIVE_MODAL_SAVE_BUTTON_SELECTOR).first
+        page.wait_for_selector(f"{DRIVE_MODAL_SAVE_BUTTON_SELECTOR}:not([disabled])", timeout=timeout_ms)
         save_button.click()
         return True
     except Exception:
@@ -1078,7 +1148,6 @@ def trigger_native_drive_upload(
             except Exception:
                 pass
         raise
-
 
 def scrape_creator_emails(
     page: Page,
@@ -1412,7 +1481,13 @@ def scrape_creator_emails(
                     # eliminate the race, just gives a re-render that's
                     # already in flight a chance to finish first.
                     page.wait_for_timeout(300)
-                    _safe_click(request_toggle)
+                    # SHORT per-attempt timeout -- confirmed real regression
+                    # this fixes: with Playwright's default 30s and up to 3
+                    # attempts, every un-clickable card burned up to 90s, and
+                    # a live log showed the retries still never succeeded.
+                    # A detached element doesn't become clickable by waiting;
+                    # the loop's job is to fetch a FRESH one, so fail fast.
+                    _safe_click(request_toggle, timeout_ms=CLICK_ATTEMPT_TIMEOUT_MS)
                     last_click_error = None
                     break
                 except Exception as e:
