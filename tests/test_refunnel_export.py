@@ -1245,6 +1245,14 @@ class _DriveUploadPage:
         self.menu_clicked = False
         self.clicks = []
         self._folder_name = folder_name_to_select
+        self.scroll_resets = 0
+
+    def evaluate(self, js, *a, **kw):
+        if "scrollTop = 0" in js:
+            self.scroll_resets += 1
+
+    def wait_for_timeout(self, ms):
+        pass
 
     def locator(self, selector):
         from refunnel_export import (
@@ -1794,3 +1802,111 @@ def test_sabotage_retry_without_reset_would_never_find_the_card():
     with pytest.raises(AssertionError):
         assert page.at_bottom is False  # wrong -- that's only true after a reset
     assert page.scroll_to_top_calls == 0
+
+
+# ---------- Drive: confirmed-real selector + scroll reset ----------
+
+def test_drive_menu_selector_targets_the_real_dotted_menu():
+    # the earlier aria-label guess matched ZERO elements on the real
+    # page -- the dotted menu is the disclosure containing dottedMenuIcon
+    from refunnel_export import DRIVE_CARD_MENU_BUTTON_SELECTOR
+    assert "dottedMenuIcon" in DRIVE_CARD_MENU_BUTTON_SELECTOR
+    assert "aria-label" not in DRIVE_CARD_MENU_BUTTON_SELECTOR
+
+
+def test_drive_menu_selector_matches_exactly_one_per_card_in_real_markup():
+    from bs4 import BeautifulSoup
+    from refunnel_export import DRIVE_CARD_MENU_BUTTON_SELECTOR
+    html = CARD_STRUCTURE_FIXTURE.read_text()
+    soup = BeautifulSoup(html, "html.parser")
+    assert len(soup.select(DRIVE_CARD_MENU_BUTTON_SELECTOR)) == 1
+
+
+def test_drive_upload_resets_scroll_before_searching(_stub_scroll_found):
+    page = _DriveUploadPage()
+    trigger_native_drive_upload(page, "tk_1", "Refunnel - Swoveralls")
+    assert page.scroll_resets == 1
+
+
+def test_sabotage_drive_search_without_reset_would_be_caught(_stub_scroll_found):
+    page = _DriveUploadPage()
+    trigger_native_drive_upload(page, "tk_1", "Refunnel - Swoveralls")
+    with pytest.raises(AssertionError):
+        assert page.scroll_resets == 0  # wrong -- that's the bug that stranded 4 of 5 videos
+    assert page.scroll_resets == 1
+
+
+# ---------- campaign discovery must scroll the dropdown (confirmed real: 10 of 22+) ----------
+
+class _LazyCampaignRows:
+    """A dropdown list that renders 10 more campaigns each time its last
+    row is scrolled into view -- mirrors the real behaviour where a
+    single read found only the first 10 of Swoveralls' 22+."""
+
+    def __init__(self, all_names, batch=10):
+        self.all_names = all_names
+        self.batch = batch
+        self.rendered = min(batch, len(all_names))
+
+    def count(self):
+        return self.rendered
+
+    @property
+    def first(self):
+        return self
+
+    def wait_for(self, state=None, timeout=None):
+        pass
+
+    def nth(self, i):
+        outer = self
+
+        class _Row:
+            def inner_text(_s):
+                return outer.all_names[i]
+
+            def scroll_into_view_if_needed(_s, timeout=None):
+                if i == outer.rendered - 1:
+                    outer.rendered = min(outer.rendered + outer.batch, len(outer.all_names))
+        return _Row()
+
+
+class _LazyDropdownPage:
+    def __init__(self, names):
+        self._rows = _LazyCampaignRows(names)
+        self.keyboard = _FakeKeyboard()
+
+    def locator(self, selector):
+        from refunnel_export import CAMPAIGN_DISCLOSURE_TOGGLE_SELECTOR
+        if selector == CAMPAIGN_DISCLOSURE_TOGGLE_SELECTOR:
+            loc = _FakeCampaignLocator()
+            loc._attrs = {"aria-controls": "_r_k_"}
+            return loc
+        if ".campaign-option" in selector:
+            return self._rows
+        return _FakeCampaignLocator()
+
+    def wait_for_timeout(self, ms):
+        pass
+
+
+def test_discovers_every_campaign_not_just_the_first_batch():
+    from refunnel_export import list_available_campaigns
+    names = [f"Campaign {n:02d}" for n in range(1, 24)]  # 23, like Swoveralls' 22+
+    names_found = list_available_campaigns(_LazyDropdownPage(names))
+    assert names_found == names  # all 23, in order, no duplicates
+
+
+def test_stops_cleanly_when_the_list_is_exhausted():
+    from refunnel_export import list_available_campaigns
+    names = [f"Campaign {n}" for n in range(1, 6)]  # fewer than one batch
+    assert list_available_campaigns(_LazyDropdownPage(names)) == names
+
+
+def test_sabotage_single_read_missing_later_campaigns_would_be_caught():
+    from refunnel_export import list_available_campaigns
+    names = [f"Campaign {n:02d}" for n in range(1, 24)]
+    found = list_available_campaigns(_LazyDropdownPage(names))
+    with pytest.raises(AssertionError):
+        assert len(found) == 10  # wrong -- that's the live bug (first batch only)
+    assert len(found) == 23
