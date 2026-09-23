@@ -45,10 +45,20 @@ from typing import Callable, Iterable, Optional
 
 from playwright.sync_api import Page
 
+import refunnel_auth
+
 
 # Turn this on only after you've manually verified scrape_creator_email()
 # against the real site -- see module docstring and README.
-SCRAPE_EMAILS_ENABLED = False
+SCRAPE_EMAILS_ENABLED = True
+
+# Confirmed real, exact text from the live page's own markup
+# (.urq-title inside a .usage-rights-requested-card). A card showing
+# this is awaiting the brand's own approve/decline decision, and its
+# menu has NO usage-rights option at all -- see scrape_creator_emails'
+# skip logic for the full confirmed evidence and why the class name
+# alone can't be used to detect it.
+PENDING_REVIEW_TITLE_TEXT = "Pending review"
 
 # Refunnel's "Request usage rights" flow has a "Send request" button
 # (confirmed from your screenshot). We refuse to click anything whose
@@ -156,6 +166,74 @@ def select_workspace(
         ) from e
 
     page.wait_for_timeout(2000)  # let the workspace switch (page reload/content refresh) settle
+
+
+def goto_social_listening_for_workspace(page: Page, workspace_name: str, known_workspace_names: Iterable[str]) -> None:
+    """Navigates to Social Listening for a SPECIFIC workspace, with the
+    intended 12-months time range GENUINELY applied afterward -- not
+    just requested in the URL before the switch.
+
+    CONFIRMED REAL, SERIOUS BUG this fixes: switching workspaces
+    silently RESETS the active time-range filter back to THAT
+    workspace's own default/last-used setting, overriding whatever was
+    in the URL beforehand. A live run navigated with
+    insights_timeline=last12months, then switched to Swoveralls -- and
+    a screenshot of the resulting page showed "Last 3 months" in the
+    dropdown, not 12. Every script that ever did "goto, then
+    select_workspace" was exposed to this for any workspace whose own
+    default differs from 12 months (which just Swoveralls being an
+    additional brand, not Duderobe specifically, was enough to prove).
+
+    Re-navigates to the SAME URL again, AFTER the workspace switch has
+    settled -- this is the one, single place that sequence lives now,
+    so every caller (the main sync, campaign sync, the Drive backfill)
+    gets the fix by using this instead of the two calls directly.
+    """
+    page.goto(refunnel_auth.refunnel_social_listening_url())
+    select_workspace(page, workspace_name, known_workspace_names)
+    # Re-navigate: the workspace switch above can silently reset the
+    # time-range filter to THIS workspace's own default -- see the
+    # docstring above for the confirmed real evidence.
+    page.goto(refunnel_auth.refunnel_social_listening_url())
+
+
+def scroll_to_top(page: Page, scroll_container_selector: str = "#scrollableDiv") -> None:
+    """Resets the scrollable grid back to scrollTop=0.
+
+    CONFIRMED REAL, serious bug this fixes: run_daily_sync.py calls
+    scroll_to_load_all() (which scrolls the container all the way to
+    its real bottom, to load everything for the CSV export) BEFORE
+    scrape_creator_emails() ever runs, on the SAME page instance, with
+    nothing in between resetting the scroll position. But
+    _scroll_until_card_found() -- what scrape_creator_emails() uses to
+    locate each card -- only ever scrolls FORWARD, matching
+    _order_ids_for_scraping()'s own documented assumption that ids are
+    processed in feed order (newest first) starting from the top.
+
+    Starting from the bottom instead means the newest posts (searched
+    for first) can never be reached going forward -- confirmed real
+    from an actual failed run against Swoveralls' much larger backlog:
+    every single "couldn't locate" failure reported the EXACT SAME
+    scrollTop, matching the container's real bottom exactly, for
+    nearly 2000 consecutive different ids in a row. The underlying CSV
+    export itself was complete (confirmed: 5873 rows, a full year) --
+    only the scraper's own separate, forward-only search was affected.
+    Duderobe's much smaller backlog never surfaced this, since its
+    virtualized list likely still kept early cards close enough to
+    stay reachable even scrolled to the bottom; Swoveralls' far larger
+    one does not.
+
+    Called once, right before scraping starts on the SAME page
+    instance the export just used -- a restart's fresh page.goto()
+    naturally resets scroll position on its own and doesn't need this.
+    """
+    page.evaluate(
+        f"""() => {{
+            const el = document.querySelector({scroll_container_selector!r});
+            if (el) el.scrollTop = 0;
+        }}"""
+    )
+    page.wait_for_timeout(500)  # let the virtualized list settle back to the top
 
 
 def scroll_to_load_all(
@@ -379,6 +457,259 @@ def export_media_csv(page: Page, download_dir: str, scroll_container_selector: s
     return out_path
 
 
+# Best guess based on a single screenshot of the filter bar (see below
+# for the one selector that was WRONG and has since been confirmed
+# fixed against real markup) -- the rest are still unverified.
+# Centralized here so a real run's failure message points straight at
+# what to fix.
+#
+# CAMPAIGN_FILTER_BUTTON_SELECTOR: CONFIRMED WRONG in a real run, now
+# fixed. The initial guess assumed a native <button>; the real element
+# is a styled <div class="campaign-filter-label clickable"> with a
+# <span class="campaign-text">Campaign</span> inside -- a real
+# TimeoutError and the actual failing markup confirmed this. Matches
+# the real class first; the old button-based guess stays as a
+# comma-separated fallback in case a future redesign goes back to a
+# real button, rather than silently losing that possibility.
+CAMPAIGN_FILTER_BUTTON_SELECTOR = ".campaign-filter-label.clickable, button:has-text('Campaign')"
+# Confirmed real from an actual HTML dump: the visible "Campaign" label
+# above has a SIBLING element carrying the ARIA disclosure state --
+# `<div tabindex="-1" aria-controls="_r_k_" aria-owns="_r_k_"
+# aria-expanded="false"><div></div></div>` -- immediately after
+# .campaign-filter-label inside .campaign-filter-container. Its
+# aria-controls value is the dropdown panel's real id, regenerated on
+# every page load, so it's read at runtime rather than ever hardcoded.
+CAMPAIGN_DISCLOSURE_TOGGLE_SELECTOR = ".campaign-filter-container [aria-controls]"
+CAMPAIGN_SEARCH_INPUT_SELECTOR = "input[placeholder*='search campaign' i]"
+# Confirmed real from the SAME dump, once actually captured with the
+# panel genuinely open: each campaign is
+# `<div class="campaign-option "><input class="campaign-checkbox"
+# type="checkbox"><span title="Exact Campaign Name">Exact Campaign
+# Name</span></div>`. The earlier [role='checkbox']/input[type=checkbox]
+# guess was wrong not because it was a bad guess about checkboxes in
+# general (these genuinely ARE <input type="checkbox">), but because
+# scoping it as "#panel_id " + that whole comma-separated string builds
+# invalid CSS: a leading #id scope only applies to the FIRST
+# comma-branch, leaving the second (input[type='checkbox']) searching
+# the entire page again -- the exact page-wide-leak risk this scoping
+# was meant to prevent in the first place.
+CAMPAIGN_CHECKBOX_ROW_SELECTOR = ".campaign-option"
+CAMPAIGN_CHECKBOX_INPUT_SELECTOR = "input.campaign-checkbox"
+CAMPAIGN_APPLY_BUTTON_SELECTOR = "button:has-text('Apply Changes')"
+CLEAR_ALL_FILTERS_SELECTOR = "text=Clear"
+
+
+def list_available_campaigns(page: Page, debug_dir: Optional[str] = None, timeout_ms: int = 15000) -> list:
+    """Reads the full, current list of campaign names straight from the
+    Campaign filter's own checklist -- confirmed real requirement: with
+    22 campaigns today and more added over time, a hardcoded list would
+    silently miss new ones. This is the single source of truth, read
+    fresh every run, never stored in our own code.
+
+    Each campaign name is read from its checkbox row's own text, not
+    assumed from a fixed list -- so a campaign being renamed or removed
+    on Refunnel's side is reflected automatically too.
+
+    Scoped to the ACTUAL open panel, not a page-wide search -- confirmed
+    real from an actual HTML dump: the panel is a React disclosure with
+    a DYNAMICALLY GENERATED id (e.g. "_r_k_", different on every page
+    load), referenced by aria-controls on a sibling of the visible
+    "Campaign" label, and the panel isn't even mounted in the DOM while
+    closed. Reading that id at runtime and scoping the search to it
+    means this can't accidentally match some OTHER filter's checkboxes
+    elsewhere on the page -- confirmed real risk with the previous,
+    page-wide CAMPAIGN_CHECKBOX_ROW_SELECTOR search.
+
+    If this finds ZERO campaigns and debug_dir is given, it saves a
+    screenshot + page HTML BEFORE closing the dropdown -- confirmed
+    real bug in an earlier version of this function: the diagnostic was
+    captured AFTER the Escape key had already closed the panel, so the
+    very evidence meant to show what's actually there showed nothing
+    useful at all (aria-expanded="false", panel not even in the DOM).
+    Capturing before closing is what makes this diagnostic worth having.
+    """
+    filter_container = page.locator(CAMPAIGN_FILTER_BUTTON_SELECTOR).first
+    filter_container.click()
+
+    # The panel's real id is read at RUNTIME from the toggle sibling's
+    # aria-controls -- never hardcoded, since it's regenerated on every
+    # page load and a stale id from a previous run would silently match
+    # nothing.
+    toggle = page.locator(CAMPAIGN_DISCLOSURE_TOGGLE_SELECTOR).first
+    panel_id = None
+    try:
+        toggle.wait_for(state="attached", timeout=timeout_ms)
+        panel_id = toggle.get_attribute("aria-controls")
+    except Exception:
+        pass
+
+    rows = page.locator(f"#{panel_id} {CAMPAIGN_CHECKBOX_ROW_SELECTOR}") if panel_id else page.locator(CAMPAIGN_CHECKBOX_ROW_SELECTOR)
+    try:
+        rows.first.wait_for(state="visible", timeout=timeout_ms)
+    except Exception:
+        pass  # fall through to the empty-result handling below, which
+        # captures a diagnostic either way (timed out waiting, or found
+        # something that just yielded no usable text) -- both mean the
+        # selector doesn't match what's really on the page.
+    count = rows.count()
+    names = []
+    for i in range(count):
+        text = rows.nth(i).inner_text().strip()
+        if text:
+            names.append(text)
+
+    if not names and debug_dir:
+        # Captured BEFORE the Escape below, while the panel (if it
+        # opened at all) is still actually in the DOM -- see the
+        # docstring above for why the previous ordering made this
+        # diagnostic useless.
+        try:
+            out_dir = Path(debug_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            page.screenshot(path=str(out_dir / "campaign_discovery_empty.png"), full_page=True)
+            (out_dir / "campaign_discovery_empty.html").write_text(page.content(), encoding="utf-8")
+            print(f"Found 0 campaigns -- saved a debug snapshot to {out_dir} for diagnosis "
+                  f"(panel_id read as {panel_id!r}; CAMPAIGN_CHECKBOX_ROW_SELECTOR in "
+                  f"refunnel_export.py likely still needs updating).")
+        except Exception as e:
+            print(f"Found 0 campaigns, and couldn't save a debug snapshot either: {e}")
+
+    # Closes the dropdown without applying anything -- this call is
+    # read-only by design, it must never change the active filter.
+    # Deliberately LAST, after any diagnostic capture above.
+    page.keyboard.press("Escape")
+
+    return names
+
+
+def filter_is_genuinely_active(page: Page, campaign_name: str) -> bool:
+    """True if the applied campaign filter is ACTUALLY showing on the
+    page for this exact campaign -- confirmed real, serious bug this
+    guards against: a live run reported 2795 posts for "SheRobe
+    Content Campaign" (the FULL, unfiltered library size) while a
+    manual check of the same campaign showed genuinely zero results.
+    The filter silently failed to take effect that one time, and
+    nothing caught it -- scroll_to_load_all() and export_media_csv()
+    happily proceeded against the UNFILTERED view, which would have
+    mistagged all 2795 posts as belonging to a campaign they were
+    never in.
+
+    Checks that campaign_name appears in the active-filter chip text
+    (confirmed real from a screenshot: "Campaign | is | <name> | X"),
+    by checking the page's own visible text rather than guessing at
+    the chip's exact CSS structure -- a real caption mentioning a
+    marketing campaign's exact name by coincidence is a low enough
+    risk to accept, especially against the alternative of trusting an
+    unverified filter and silently exporting the wrong data.
+    """
+    try:
+        return campaign_name in page.inner_text("body")
+    except Exception:
+        return False
+
+
+def filter_by_campaign(page: Page, campaign_name: str, debug_dir: Optional[str] = None, timeout_ms: int = 15000) -> None:
+    """Clears any currently active filters, then applies ONLY
+    campaign_name. Clearing first (rather than just unchecking the
+    previous campaign) also resets any OTHER stray filter that might
+    be active, so each campaign's export genuinely reflects "only this
+    campaign", not "this campaign plus whatever was left over".
+
+    Selects the EXACT campaign, not a substring match -- confirmed
+    real, genuine risk from actual campaign data: "Partner with
+    DudeRobe!" and "Partner with DudeRobe" both exist as real,
+    distinct campaigns, differing only by trailing punctuation.
+    Searching for one and taking the first checkbox that merely
+    CONTAINS matching text could silently check the wrong one. Uses
+    Playwright's own exact-text matching (get_by_text(..., exact=True))
+    rather than string-interpolating campaign_name into a raw CSS
+    selector, which also sidesteps any issue if a campaign name ever
+    contains a quote or other CSS-special character.
+
+    If debug_dir is given, captures a screenshot + HTML right after
+    clicking Apply -- confirmed real need: a live run had every single
+    campaign stall scroll_to_load_all at exactly "20 of 2795", the same
+    number as the FULL unfiltered library. That's genuinely ambiguous
+    from the log alone -- it could mean the filter applied and 20 is a
+    real (tiny) match count, or it could mean the filter never actually
+    took effect and this is just Refunnel's normal unfiltered
+    first-batch view. Deliberately NOT guessed at or "fixed" by making
+    the scroll lenient here -- doing that without knowing which
+    explanation is true risks silently tagging random unrelated posts
+    as belonging to a campaign they're not actually in, which is worse
+    than just being missing. This capture is what settles it.
+    """
+    clear_all_filters(page)
+
+    campaign_button = page.locator(CAMPAIGN_FILTER_BUTTON_SELECTOR).first
+    campaign_button.click()
+
+    search_box = page.locator(CAMPAIGN_SEARCH_INPUT_SELECTOR).first
+    search_box.wait_for(state="visible", timeout=timeout_ms)
+    search_box.fill(campaign_name)
+
+    row = page.locator(CAMPAIGN_CHECKBOX_ROW_SELECTOR).filter(
+        has=page.get_by_text(campaign_name, exact=True)
+    ).first
+    row.wait_for(state="visible", timeout=timeout_ms)
+
+    # .check() rather than .click() -- confirmed real symptom this
+    # addresses: "DudeRobe Content Campaign" left Apply Changes
+    # permanently disabled (30s of retries, "element is not enabled"),
+    # the same shape of failure as the OTP multi-box issue -- a plain
+    # .click() can register visually without firing the change event a
+    # React form needs to consider a selection made. .check() is
+    # Playwright's own checkbox-specific method, built to verify the
+    # box ends up genuinely checked, not just clicked at.
+    row.locator(CAMPAIGN_CHECKBOX_INPUT_SELECTOR).check()
+
+    apply_button = page.locator(CAMPAIGN_APPLY_BUTTON_SELECTOR).first
+    apply_button.click()
+
+    if debug_dir:
+        try:
+            out_dir = Path(debug_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            safe_name = re.sub(r"[^A-Za-z0-9]+", "_", campaign_name)[:60]
+            page.wait_for_timeout(1000)  # let the filtered view settle before capturing
+            page.screenshot(path=str(out_dir / f"after_apply_{safe_name}.png"), full_page=True)
+            (out_dir / f"after_apply_{safe_name}.html").write_text(page.content(), encoding="utf-8")
+        except Exception as e:
+            print(f"Couldn't save post-Apply debug snapshot for {campaign_name!r}: {e}")
+
+
+NO_RESULTS_TEXT_PATTERN = "No results for these filter"
+
+
+def has_no_results_for_filter(page: Page) -> bool:
+    """True if Refunnel is showing its own "no matching content" empty
+    state -- confirmed real, exact text from a live run's debug
+    screenshots: "No results for these filters(s)" (Refunnel's own
+    typo -- matched on the stable leading substring so either spelling
+    of the trailing "(s)" still counts). Checked BEFORE attempting to
+    scroll/export a campaign-filtered view, since a genuinely empty
+    result has no "<n> of <total> media" counter at all -- confirmed
+    real: without this check, scroll_to_load_all() raised ExportError
+    trying to find a counter that will never exist, treating a
+    perfectly legitimate "this campaign has 0 posts" answer as a
+    failure to retry rather than a real, valid result to record.
+    """
+    try:
+        return NO_RESULTS_TEXT_PATTERN in page.inner_text("body")
+    except Exception:
+        return False
+
+
+def clear_all_filters(page: Page) -> None:
+    """Resets every active filter on the Content view -- used between
+    campaigns so one campaign's export can never accidentally include
+    a stray filter left over from the previous one."""
+    try:
+        page.locator(CLEAR_ALL_FILTERS_SELECTOR).first.click(timeout=3000)
+    except Exception:
+        pass  # nothing was active to clear -- not an error
+
+
 def _safe_click(locator) -> None:
     """Click, but refuse if the element's own text matches
     _DANGEROUS_BUTTON_PATTERN (looks like 'Send request') -- a hard
@@ -409,17 +740,41 @@ def _scroll_until_card_found(
     page: Page,
     media_id: str,
     scroll_container_selector: str,
-    max_rounds: int = 200,
+    max_rounds: int = 3000,
     scroll_step: int = 800,
     pace_ms_range: tuple = SCROLL_SEARCH_PACE_MS,
+    bottom_rounds_before_giving_up: int = 4,
 ):
     """react-virtuoso (the grid library this page uses) only keeps
     nearby cards mounted in the DOM, unmounting far-off ones as you
-    scroll -- confirmed from a real HTML dump. So a card matching
-    media_id may simply not exist in the DOM yet/anymore. This scrolls
+    scroll -- confirmed from a real HTML dump (a real failure snapshot
+    had just 10 cards in the entire DOM). So a card matching media_id
+    may simply not exist in the DOM yet/anymore. This scrolls
     `scroll_container_selector` forward in small steps until a card
     containing that media_id's thumbnail (matched by image src, which
-    embeds the id) appears, or gives up.
+    embeds the id) appears, or until the container is genuinely at the
+    bottom with nothing left to load.
+
+    CONFIRMED REAL BUG this fixes: the old version stopped after a
+    FIXED 200 rounds x 800px = 160,000px of scrolling, whatever the
+    actual list length was. Real failure diagnostics showed scrollTop
+    stalling at 159,951 / 159,933 -- exactly that ceiling -- while the
+    container's real scrollHeight was 327,922px. So roughly the bottom
+    HALF of the grid was permanently unreachable, and any post living
+    there could never be scraped: it failed identically on every run,
+    forever, with a misleading "couldn't locate ... after scrolling
+    through everything" message. It had never actually scrolled through
+    everything.
+
+    Now the stopping condition is the real one -- "we reached the
+    bottom and the card still isn't here" -- instead of an arbitrary
+    round count that silently became wrong as the backlog grew. The
+    bottom must be observed for several consecutive rounds
+    (bottom_rounds_before_giving_up) so a lazily-loading grid gets a
+    chance to extend scrollHeight before we conclude there's no more.
+    max_rounds stays only as a last-resort infinite-loop guard, now set
+    far above any realistic list height rather than acting as the
+    routine limit.
 
     Returns (locator_or_none, diagnostics_dict). diagnostics_dict has
     scrollTop/scrollHeight/clientHeight read from the container right
@@ -430,28 +785,66 @@ def _scroll_until_card_found(
     card still never rendered."
     """
     selector = f"div.rf-virtuoso-item:has(img[src*='{media_id}'])"
+    state = None
+    rounds_at_bottom = 0
+
     for _ in range(max_rounds):
         card = page.locator(selector)
         if card.count() > 0:
             return card.first, None
-        page.evaluate(
+
+        # Scroll and read the container's geometry in ONE evaluate call
+        # rather than two, so checking "are we at the bottom yet?" every
+        # round costs no extra round-trip over the old blind scroll.
+        state = page.evaluate(
             "(args) => { const el = document.querySelector(args.sel); "
-            "if (el) { el.scrollTop += args.step; } }",
+            "if (!el) { return null; } "
+            "el.scrollTop += args.step; "
+            "return {scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, "
+            "clientHeight: el.clientHeight}; }",
             {"sel": scroll_container_selector, "step": scroll_step},
         )
         _pace(page, pace_ms_range)
 
-    try:
-        diagnostics = page.evaluate(
-            "(sel) => { const el = document.querySelector(sel); "
-            "return el ? {scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, "
-            "clientHeight: el.clientHeight} : null; }",
-            scroll_container_selector,
-        )
-    except Exception as e:
-        diagnostics = {"diagnostic_read_failed": str(e)}
+        if not state:
+            break  # container isn't on the page at all -- scrolling can't help
 
-    return None, diagnostics
+        # 2px of slack: browsers report fractional/rounded scroll values.
+        at_bottom = state["scrollTop"] + state["clientHeight"] >= state["scrollHeight"] - 2
+        rounds_at_bottom = rounds_at_bottom + 1 if at_bottom else 0
+        if rounds_at_bottom >= bottom_rounds_before_giving_up:
+            break
+
+    if state is None:
+        try:
+            state = page.evaluate(
+                "(sel) => { const el = document.querySelector(sel); "
+                "return el ? {scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, "
+                "clientHeight: el.clientHeight} : null; }",
+                scroll_container_selector,
+            )
+        except Exception as e:
+            state = {"diagnostic_read_failed": str(e)}
+
+    return None, state
+
+
+def _is_logged_out(page: Page) -> bool:
+    """True if the page has been bounced to Refunnel's login screen.
+
+    Confirmed real: a session can expire MID-RUN. When that happened,
+    nothing noticed -- the browser was perfectly alive, so the crash
+    detector said "fine", and the scrape loop then failed all 625
+    remaining posts one at a time against the login screen ("Container
+    state: None", because #scrollableDiv doesn't exist there) before
+    the run finally died on the Payments export ~40 minutes later.
+    A logged-out page is recoverable in exactly the same way a crashed
+    one is -- get a fresh session -- but only if something detects it.
+    """
+    try:
+        return refunnel_auth.is_login_url(page.url)
+    except Exception:
+        return False
 
 
 def _save_scrape_failure_snapshot(page: Page, debug_dir: str, media_id: str) -> None:
@@ -500,6 +893,88 @@ def _format_progress_line(attempted: int, total: int, found: int, empty_fields: 
     return (f"scrape_creator_emails: progress {attempted}/{total} attempted "
             f"-- {found} found, {empty_fields} had no email on file, "
             f"{other_failed} other error(s)")
+
+
+DRIVE_CARD_MENU_BUTTON_SELECTOR = "[aria-label*='more' i], [aria-label*='options' i], button:has-text('⋯'), button:has-text('...')"
+DRIVE_UPLOAD_MENU_ITEM_SELECTOR = "text=Upload to Google Drive"
+DRIVE_MODAL_ALL_FOLDERS_TAB_SELECTOR = "button:has-text('All folders')"
+DRIVE_MODAL_SAVE_BUTTON_SELECTOR = "button:has-text('Save to Drive')"
+
+
+def trigger_native_drive_upload(
+    page: Page,
+    media_id: str,
+    drive_folder_name: str,
+    scroll_container_selector: str = "#scrollableDiv",
+    debug_dir: Optional[str] = None,
+    timeout_ms: int = 15000,
+) -> bool:
+    """Uses Refunnel's OWN native "Upload to Google Drive" feature to
+    save a post's video directly into a connected Drive folder --
+    confirmed real, replacing an earlier custom download-then-upload
+    design entirely (that approach used a guessed download-button
+    selector never verified against real markup; this uses a feature
+    you confirmed is already connected and working from your own
+    account). Refunnel handles the actual file transfer server-side;
+    this only triggers it and selects the right folder.
+
+    Confirmed real UI flow, from live screenshots: open the card's
+    "..." menu -> "Upload to Google Drive" -> a modal with three tabs
+    (New folder / In root folder / All folders) -> select "All
+    folders" -> pick the target folder by name -> "Save to Drive".
+
+    The exact selectors below are still BEST-GUESS, not verified
+    against real markup -- same caveat as every other new UI element
+    in this project until a live run confirms or corrects them.
+    debug_dir captures a screenshot + HTML on any failure, so a wrong
+    guess can be fixed from real evidence on the next round rather
+    than another blind guess.
+
+    Refunnel's own upload does NOT preserve the agreed naming
+    convention -- it uses its own format (confirmed real example:
+    "INSTAGRAM_REEL_username_2026-09-21-UGC_<last 8 digits of the real
+    id>.mp4"). Finding that file afterward and renaming it is
+    drive_upload.py's job, not this function's -- this only triggers
+    the upload and confirms the modal flow completed.
+
+    Returns True once "Save to Drive" has been clicked. False if the
+    card itself couldn't be located (same meaning as everywhere else
+    in this file). Raises on any other failure in the flow.
+    """
+    grid_item, _ = _scroll_until_card_found(page, media_id, scroll_container_selector)
+    if grid_item is None:
+        return False
+
+    try:
+        grid_item.hover()
+        menu_button = grid_item.locator(DRIVE_CARD_MENU_BUTTON_SELECTOR).first
+        menu_button.click()
+
+        upload_item = page.locator(DRIVE_UPLOAD_MENU_ITEM_SELECTOR).first
+        upload_item.wait_for(state="visible", timeout=timeout_ms)
+        upload_item.click()
+
+        all_folders_tab = page.locator(DRIVE_MODAL_ALL_FOLDERS_TAB_SELECTOR).first
+        all_folders_tab.wait_for(state="visible", timeout=timeout_ms)
+        all_folders_tab.click()
+
+        folder_row = page.get_by_text(drive_folder_name, exact=False).first
+        folder_row.wait_for(state="visible", timeout=timeout_ms)
+        folder_row.click()
+
+        save_button = page.locator(DRIVE_MODAL_SAVE_BUTTON_SELECTOR).first
+        save_button.click()
+        return True
+    except Exception:
+        if debug_dir:
+            try:
+                out_dir = Path(debug_dir)
+                out_dir.mkdir(parents=True, exist_ok=True)
+                page.screenshot(path=str(out_dir / f"drive_upload_failure_{media_id}.png"), full_page=True)
+                (out_dir / f"drive_upload_failure_{media_id}.html").write_text(page.content(), encoding="utf-8")
+            except Exception:
+                pass
+        raise
 
 
 def scrape_creator_emails(
@@ -629,10 +1104,15 @@ def scrape_creator_emails(
               "See refunnel_export.py module docstring.")
         return {}
 
-    page.evaluate(
-        "(sel) => { const el = document.querySelector(sel); if (el) { el.scrollTop = 0; } }",
-        scroll_container_selector,
-    )
+    # Consolidated onto the shared scroll_to_top() helper -- this used
+    # to be its own separate inline reset here, duplicated by a SEPARATE
+    # call the caller (run_daily_sync.py) also added, once the real
+    # cascading-failure bug below was found and fixed. Owning the whole
+    # reset responsibility (start of run AND after each failure) here,
+    # in the one function that actually needs the invariant, removes
+    # that duplication -- see scroll_to_top()'s own docstring for the
+    # full confirmed evidence.
+    scroll_to_top(page, scroll_container_selector)
     page.wait_for_timeout(500)
 
     results: dict = {}
@@ -653,16 +1133,47 @@ def scrape_creator_emails(
     attempted = 0
     found_count = 0
     empty_field_count = 0
+    pending_review_skipped = 0
     PROGRESS_CHECKPOINT = 25
     for media_id in target_ids:
         try:
             grid_item, diagnostics = _scroll_until_card_found(page, media_id, scroll_container_selector)
             if grid_item is None:
+                if _is_logged_out(page):
+                    print(
+                        "scrape_creator_emails: the session has been logged out mid-run (the "
+                        "page is now Refunnel's login screen, which is why no cards can be "
+                        "found). Stopping this attempt immediately rather than failing every "
+                        "remaining post one at a time against a login page. Nothing is lost: "
+                        "every remaining id stays in the target list and is retried once a "
+                        "fresh session is ready."
+                    )
+                    break
                 print(f"scrape_creator_emails: couldn't locate media_id={media_id!r} on the page "
                       f"after scrolling through everything. Container state: {diagnostics}")
                 if debug_dir and not debug_snapshot_saved:
                     _save_scrape_failure_snapshot(page, debug_dir, media_id)
                     debug_snapshot_saved = True
+
+                # CONFIRMED REAL, root cause of a run where every id
+                # after roughly the second one failed identically for
+                # the entire rest of a 5245-post run:
+                # _scroll_until_card_found() NEVER resets scroll
+                # position -- it always continues forward from
+                # wherever the container currently is (el.scrollTop +=
+                # step, every single call). One failed search that
+                # exhausts all the way to the real bottom therefore
+                # permanently strands every SUBSEQUENT search at that
+                # same bottom position too, since nothing else ever
+                # resets it -- a single failure cascades into
+                # destroying the rest of the entire run. Reset here,
+                # immediately after a failed search, so only THIS one
+                # id is affected and the next one gets a genuinely
+                # fresh, working search -- not on every successful
+                # search, which would make a 5000+ item run far slower
+                # for no reason.
+                scroll_to_top(page, scroll_container_selector)
+
                 consecutive_failures += 1
                 consecutive_empty_fields = 0
                 if max_consecutive_failures is not None and consecutive_failures >= max_consecutive_failures:
@@ -674,23 +1185,122 @@ def scrape_creator_emails(
                     break
                 continue
 
-            request_toggle = grid_item.locator(
-                ".usage-rights-request-card, .usage-rights-requested-card"
-            ).first
+            # CONFIRMED REAL from an actual saved HTML dump of the live
+            # page: the .usage-rights-request-card / -requested-card div
+            # is NOT the clickable element -- it's nested two levels
+            # INSIDE the element that actually carries the click
+            # handler, which is the ARIA disclosure wrapper:
+            #   <div class="pop-up-menu">
+            #     <div tabindex="-1" aria-controls="_r_c1_" aria-expanded="false">   <-- the real toggle
+            #       <div style="cursor: pointer;">
+            #         <div class="usage-rights-request-card">              <-- what we used to click
+            # Clicking the inner div could land on a child that React
+            # re-renders independently, which is very likely why clicks
+            # kept reporting "element detached" for the full 30s while
+            # the card itself resolved fine every time. The disclosure
+            # wrapper is the stable, interactive element -- same ARIA
+            # pattern already confirmed for the Campaign filter earlier
+            # in this project.
+            #
+            # Scoped to the wrapper CONTAINING a usage-rights card
+            # specifically -- confirmed real, genuine risk: each card
+            # has TWO sibling .pop-up-menu disclosures (the dump has 16
+            # across 8 cards, exactly 8 of each kind). The other one
+            # opens the dotted "..." menu -- the Upload to Google
+            # Drive / Attach to a campaign menu. Targeting the wrong
+            # one would open the Drive-upload menu instead of the
+            # usage-rights flow, which is exactly what the earlier
+            # stale debug screenshot appeared to show.
+            usage_rights_toggle_selector = (
+                ".pop-up-menu > [aria-controls]:has(.usage-rights-request-card), "
+                ".pop-up-menu > [aria-controls]:has(.usage-rights-requested-card)"
+            )
+            request_toggle = grid_item.locator(usage_rights_toggle_selector).first
+
+            # CONFIRMED REAL, from live screenshots of BOTH menu types
+            # plus the saved HTML: a post awaiting the brand's own
+            # approve/decline decision shows "Pending review", and its
+            # menu contains ONLY "Upload to Google Drive" and "Attach
+            # to a campaign" -- there is NO "Request usage-rights" item
+            # in it at all. A normal card's menu does have it (along
+            # with Set usage-rights labels / Upload to Meta).
+            #
+            # So a Pending-review post can NEVER yield a creator email:
+            # the scraper opens the menu, waits the full timeout for an
+            # item that structurally cannot appear, and fails. Confirmed
+            # against real data: ig_18018159830937735 -- the id that
+            # failed FIRST on every single run, with exactly that menu
+            # timeout -- is a Pending review card in the saved HTML.
+            #
+            # Detected by the card's TITLE text, not its class: a
+            # Pending-review card uses .usage-rights-requested-card,
+            # the SAME class as a genuine "Usage rights requested"
+            # card, so the class alone genuinely cannot tell them
+            # apart. The title text is the only real distinguisher.
+            #
+            # Skipped BEFORE opening the menu -- no click, no wasted
+            # timeout, and (importantly) no risk of leaving a stray
+            # menu open to interfere with the next post.
             try:
-                request_toggle.scroll_into_view_if_needed(timeout=4000)
-                request_toggle.wait_for(state="visible", timeout=4000)
-            except Exception as e:
+                is_pending_review = grid_item.locator(
+                    f".urq-title:has-text('{PENDING_REVIEW_TITLE_TEXT}')"
+                ).count() > 0
+            except Exception:
+                is_pending_review = False
+            if is_pending_review:
+                print(f"scrape_creator_emails: skipping media_id={media_id!r} -- it's awaiting "
+                      f"your own approve/decline decision ({PENDING_REVIEW_TITLE_TEXT!r}), and "
+                      f"that menu has no usage-rights option at all, so no email can be read "
+                      f"from it. Not a failure.")
+                pending_review_skipped += 1
+                attempted += 1
+                consecutive_failures = 0
+                consecutive_empty_fields = 0
+                continue
+
+            # Re-finds the card fresh on each attempt (re-scrolling if
+            # needed) rather than retrying the SAME stale locator chain
+            # -- confirmed real, new failure pattern: a live run against
+            # Swoveralls' much larger backlog showed the card resolving
+            # successfully every single time, then getting "detached
+            # from the DOM" mid-click, for the full 30s, on nearly every
+            # item. react-virtuoso (the virtualized list library) reuses
+            # DOM nodes for different items as the list scrolls/settles
+            # -- Playwright's own built-in retry keeps re-querying the
+            # SAME locator chain, but if the underlying node keeps
+            # getting recycled faster than a click can land, that retry
+            # alone never wins. Re-running the full find-and-click
+            # sequence gives it a genuinely fresh DOM reference each
+            # time instead of hammering the same doomed one.
+            last_click_error = None
+            for click_attempt in range(3):
+                if click_attempt > 0:
+                    grid_item, _ = _scroll_until_card_found(page, media_id, scroll_container_selector)
+                    if grid_item is None:
+                        break  # genuinely gone now, not just detached -- let the outer handling deal with it
+                    request_toggle = grid_item.locator(usage_rights_toggle_selector).first
+                try:
+                    request_toggle.scroll_into_view_if_needed(timeout=4000)
+                    request_toggle.wait_for(state="visible", timeout=4000)
+                    # A brief settle pause before clicking -- confirmed
+                    # real: the detachment happens mid-click, meaning the
+                    # card was visible a moment ago but the list churned
+                    # again right as the click landed. This doesn't
+                    # eliminate the race, just gives a re-render that's
+                    # already in flight a chance to finish first.
+                    page.wait_for_timeout(300)
+                    _safe_click(request_toggle)
+                    last_click_error = None
+                    break
+                except Exception as e:
+                    last_click_error = e
+            if last_click_error is not None:
                 raise ExportError(
-                    f"Card for media_id={media_id!r} was found in the DOM, but its "
-                    f"status toggle never became visible/clickable within 4s even "
-                    f"after scroll_into_view_if_needed() -- may be obscured by an "
-                    f"overlay, or this post's rights status uses yet another class "
-                    f"name not yet accounted for (Approved cards use a different, "
-                    f"non-clickable badge entirely -- confirmed separately). "
-                    f"Original error: {e}"
-                ) from e
-            _safe_click(request_toggle)
+                    f"Card for media_id={media_id!r} was found, but clicking its status "
+                    f"toggle kept failing (element detached / recycled by the virtualized "
+                    f"list) even after {click_attempt + 1} fresh attempts. "
+                    f"Original error: {last_click_error}"
+                ) from last_click_error
             _pace(page)
 
             # The popup's top item's TITLE differs by status ("Request
@@ -756,8 +1366,35 @@ def scrape_creator_emails(
             if debug_dir and not debug_snapshot_saved:
                 _save_scrape_failure_snapshot(page, debug_dir, media_id)
                 debug_snapshot_saved = True
+
+            # REMOVED a scroll_to_top() reset that used to be here --
+            # confirmed real, harmful over-reach: a live run showed
+            # EVERY single item failing identically at the click step
+            # ("element detached") right after this branch started
+            # resetting unconditionally for ANY exception, including
+            # ones with nothing to do with scroll position at all (a
+            # menu never appearing, for instance). The reset itself
+            # was very likely destabilizing the virtualized list right
+            # before the NEXT item's click attempt, turning one
+            # unrelated failure into a self-perpetuating cascade of
+            # detached-click failures -- the opposite of what this was
+            # meant to prevent. Only the "couldn't locate" branch above
+            # has DIRECT, confirmed evidence (the diagnostics dict
+            # showing scrollTop genuinely at the real bottom) that a
+            # reset is actually needed; this general branch never did,
+            # it was defensive insurance that turned out to cause the
+            # exact class of problem it was guarding against.
+
             consecutive_failures += 1
             consecutive_empty_fields = 0
+            if _is_logged_out(page):
+                print(
+                    "scrape_creator_emails: the session has been logged out mid-run -- "
+                    "stopping this attempt immediately rather than failing every remaining "
+                    "post against a login page. Nothing is lost: every remaining id stays in "
+                    "the target list and is retried once a fresh session is ready."
+                )
+                break
             if _is_target_crashed(e):
                 print(
                     "scrape_creator_emails: the browser target itself has crashed (not just "
@@ -813,4 +1450,9 @@ def scrape_creator_emails(
             if _should_print_progress(attempted, total_targets, PROGRESS_CHECKPOINT):
                 print(_format_progress_line(attempted, total_targets, found_count, empty_field_count))
 
+    if pending_review_skipped:
+        print(f"scrape_creator_emails: skipped {pending_review_skipped} post(s) awaiting your own "
+              f"approve/decline decision ({PENDING_REVIEW_TITLE_TEXT!r}) -- those have no "
+              f"usage-rights option to read an email from. Approving or declining them in "
+              f"Refunnel makes them scrapeable on a future run.")
     return results, empty_ids
