@@ -2227,32 +2227,36 @@ class _MenuNeverOpensPage(_MinimalScrapePage):
 
 
 
-# ---------- DOM-click menu opening (built from a live run's own call log + debug HTML) ----------
 
-class _DomClickPage:
-    """Models the NEW contract end to end: the card is clicked with
-    locator.evaluate() (a DOM click), the menu can fail to open, and the
-    modal carries its own post image. The row's locator() tells the
-    pending-review lookup apart from the card lookup, so the fake can
-    never accidentally trip the Pending-review skip."""
+# ---------- opening the usage-rights menu (built from two live runs' evidence) ----------
+#
+# Live run A (physical click): "not stable" -> sticky header "intercepts
+#   pointer events" -> "detached".
+# Live run B (click-only DOM event on the correct card): the card was
+#   connected and the click landed, yet the menu never opened -- a
+#   click-only event isn't enough for this component.
+# The fake below models WHICH mechanism opens the menu, so each finding
+# is pinned down separately.
 
-    def __init__(self, media_id="tk_1", menu_failures=0, card_in_dom=True,
-                 modal_img="tk_1_0.jpg", email="", evaluate_failures=0):
+class _MenuPage:
+    def __init__(self, media_id="tk_1", opens_on="forced", fail_attempts=0,
+                 card_in_dom=True, modal_img="tk_1_0.jpg", email=""):
         self.media_id = media_id
-        self.menu_failures = menu_failures
-        self.evaluate_failures = evaluate_failures
+        self.opens_on = opens_on          # "forced" | "pointer" | "click_only" | "never"
+        self.fail_attempts = fail_attempts
         self.card_in_dom = card_in_dom
         self.modal_img = modal_img
         self.email = email
-        self.events = []          # ordered log of meaningful actions
+        self.events = []
         self.scroll_resets = 0
-        self.dom_clicks = 0
-        self.menu_waits = 0
+        self.attempt = 0
+        self.menu_open = False
         self.keyboard = self
 
-    # keyboard
     def press(self, key):
         self.events.append(f"key:{key}")
+        if key == "Escape":
+            self.menu_open = False
 
     def wait_for_timeout(self, ms):
         pass
@@ -2270,6 +2274,9 @@ class _DomClickPage:
             return None
         return {"scrollTop": 0, "scrollHeight": 720, "clientHeight": 720}
 
+    def _attempt_can_open(self):
+        return self.attempt > self.fail_attempts
+
     def _card(self):
         page = self
 
@@ -2281,18 +2288,28 @@ class _DomClickPage:
             def count(_s):
                 return 1 if page.card_in_dom else 0
 
-            def scroll_into_view_if_needed(_s, timeout=None):
-                page.events.append("scroll_into_view_if_needed")
-
-            def wait_for(_s, state=None, timeout=None):
-                page.events.append("wait_for")
+            def click(_s, force=False, timeout=None):
+                page.attempt += 1
+                page.events.append("forced_click" if force else "physical_click")
+                if force and page.opens_on == "forced" and page._attempt_can_open():
+                    page.menu_open = True
 
             def evaluate(_s, js, arg=None):
-                page.dom_clicks += 1
-                page.events.append("dom_click")
-                page.last_js = js
-                if page.dom_clicks <= page.evaluate_failures:
-                    raise RuntimeError("card detached before click")
+                if "scrollIntoView" in js:
+                    page.events.append("center")
+                    return None
+                if "pointerdown" in js:
+                    page.events.append("pointer_sequence")
+                    if page.opens_on == "pointer" and page._attempt_can_open():
+                        page.menu_open = True
+                    return None
+                if "aria-expanded" in js:
+                    return "true" if page.menu_open else "false"
+                if "el.click()" in js:                       # a click-only event
+                    page.events.append("click_only")
+                    if page.opens_on == "click_only":
+                        page.menu_open = True
+                return None
         return _Card()
 
     def _row(self):
@@ -2300,16 +2317,14 @@ class _DomClickPage:
 
         class _Pending:
             def count(_s):
-                return 0   # NOT a pending-review card
+                return 0
 
         class _Row:
             def hover(_s):
                 pass
 
             def locator(_s, sel):
-                if "urq-title" in sel:
-                    return _Pending()
-                return page._card()
+                return _Pending() if "urq-title" in sel else page._card()
         return _Row()
 
     def locator(self, selector, has_text=None):
@@ -2317,7 +2332,7 @@ class _DomClickPage:
         if selector == "[role=dialog] img":
             class _Imgs:
                 def evaluate_all(_s, js):
-                    return ["cross.svg", page.modal_img] if page.modal_img else ["cross.svg"]
+                    return ["cross.svg"] + ([page.modal_img] if page.modal_img else [])
             return _Imgs()
         if ".ur-tab-card" in selector:
             class _Tab:
@@ -2355,9 +2370,12 @@ class _DomClickPage:
             def first(_s):
                 return _s
 
+            def is_visible(_s):
+                return page.menu_open
+
             def wait_for(_s, state=None, timeout=None):
-                page.menu_waits += 1
-                if page.menu_waits <= page.menu_failures:
+                page.events.append("menu_wait")
+                if not page.menu_open:
                     raise RuntimeError("menu never opened (aria-expanded stayed false)")
 
             def inner_text(_s, timeout=None):
@@ -2379,154 +2397,187 @@ class _DomClickPage:
         return _Input()
 
 
-def _run_scrape(monkeypatch, page, media_ids=("tk_1",)):
+def _scrape(monkeypatch, page, media_ids=("tk_1",)):
     import refunnel_export as re_module
     monkeypatch.setattr(re_module, "_is_logged_out", lambda p: False)
     monkeypatch.setattr(re_module, "_pace", lambda *a, **kw: None)
     rows = {m: {"username": "creator", "created_at": "2026-09-11T00:00:00Z"} for m in media_ids}
-    results, _empty = re_module.scrape_creator_emails(page, media_rows=rows, media_ids=list(media_ids))
-    return results
+    return re_module.scrape_creator_emails(page, media_rows=rows, media_ids=list(media_ids))
 
 
-# -- the click itself --
+# -- the core finding: which mechanism opens the menu --
 
-def test_card_is_opened_with_a_dom_click_not_a_physical_one(monkeypatch):
-    # confirmed real from a live call log: physical clicks hit "element is
-    # not stable" -> "new-tabs-switch intercepts pointer events" ->
-    # "element was detached". A DOM click has no hit testing to intercept.
-    page = _DomClickPage(email="a@b.com")
-    _run_scrape(monkeypatch, page)
-    assert page.dom_clicks == 1
-
-
-def test_nothing_sits_between_finding_the_card_and_clicking_it(monkeypatch):
-    # each manual wait widened the window the card was recycled in
-    page = _DomClickPage(email="a@b.com")
-    _run_scrape(monkeypatch, page)
-    first_click = page.events.index("dom_click")
-    assert "scroll_into_view_if_needed" not in page.events[:first_click]
-    assert "wait_for" not in page.events[:first_click]
-
-
-def test_dom_click_centers_the_card_away_from_the_sticky_header():
-    # confirmed real: 800px search steps vs a 720px viewport overshoot, so
-    # cards got scrolled minimally to the TOP edge -- under the sticky header
+def test_a_click_only_event_is_never_used_to_open_the_menu():
+    # live run B: el.click() reached the right, connected card and the menu
+    # still never opened. It must not be the mechanism relied on.
     import refunnel_export
-    assert 'block: "center"' in refunnel_export._DOM_CLICK_CARD_JS
+    assert "el.click()" not in refunnel_export._CENTER_CARD_JS
+    assert "el.click()" not in refunnel_export._POINTER_SEQUENCE_JS
 
 
-def test_dom_click_targets_the_innermost_card_not_its_aria_wrapper():
-    # confirmed real ancestor chain: card -> div[cursor:pointer] ->
-    # div[aria-controls]. A DOM click only bubbles UPWARD, so clicking the
-    # outer wrapper would skip the cursor:pointer div. Clicking the card
-    # itself bubbles through both -- as the proven-working old code did.
+def test_the_real_forced_click_opens_the_menu(monkeypatch):
+    page = _MenuPage(opens_on="forced", email="a@b.com")
+    results, _ = _scrape(monkeypatch, page)
+    assert results == {"tk_1": "a@b.com"}
+    assert "forced_click" in page.events
+
+
+def test_pointer_sequence_is_skipped_when_the_forced_click_already_opened_it(monkeypatch):
+    # firing a second click into an already-open menu would toggle it shut
+    page = _MenuPage(opens_on="forced", email="a@b.com")
+    _scrape(monkeypatch, page)
+    assert "pointer_sequence" not in page.events
+
+
+def test_pointer_sequence_opens_it_when_the_forced_click_does_not(monkeypatch):
+    page = _MenuPage(opens_on="pointer", email="a@b.com")
+    results, _ = _scrape(monkeypatch, page)
+    assert results == {"tk_1": "a@b.com"}
+    assert page.events.index("forced_click") < page.events.index("pointer_sequence")
+
+
+def test_pointer_sequence_fires_the_full_trusted_like_order():
     import refunnel_export
-    js = refunnel_export._DOM_CLICK_CARD_JS
-    assert "el.click()" in js
-    assert "closest(" not in js
+    js = refunnel_export._POINTER_SEQUENCE_JS
+    order = [js.index(e) for e in ('"pointerdown"', '"mousedown"', '"pointerup"', '"mouseup"', '"click"')]
+    assert order == sorted(order)
+
+
+def test_a_component_that_only_wakes_on_click_only_events_is_not_our_path(monkeypatch):
+    # if the fix silently fell back to click-only, a component like live
+    # run B's would never open -- prove the code never sends one
+    page = _MenuPage(opens_on="click_only")
+    results, _ = _scrape(monkeypatch, page)
+    assert "click_only" not in page.events
+    assert results == {}
+
+
+def test_sabotage_relying_on_a_click_only_event_would_be_caught():
+    import refunnel_export
+    with pytest.raises(AssertionError):
+        assert "el.click()" in refunnel_export._CENTER_CARD_JS  # wrong -- disproven live
+    assert '"pointerdown"' in refunnel_export._POINTER_SEQUENCE_JS
+
+
+# -- centering, target, safety --
+
+def test_card_is_centered_before_being_clicked(monkeypatch):
+    # 800px search steps vs a 720px viewport overshoot, parking cards at the
+    # top edge -- under the sticky header
+    page = _MenuPage(email="a@b.com")
+    _scrape(monkeypatch, page)
+    assert page.events.index("center") < page.events.index("forced_click")
+    import refunnel_export
+    assert 'block: "center"' in refunnel_export._CENTER_CARD_JS
+
+
+def test_the_innermost_card_is_the_click_target_not_its_wrapper():
+    import refunnel_export
     assert refunnel_export.USAGE_RIGHTS_CARD_SELECTOR == \
         ".usage-rights-request-card, .usage-rights-requested-card"
+    # the wrapper is only ever READ (for aria-expanded), never clicked
+    assert "closest" not in refunnel_export._POINTER_SEQUENCE_JS
+    assert "closest" in refunnel_export._MENU_EXPANDED_JS
+    assert ".click" not in refunnel_export._MENU_EXPANDED_JS
 
 
-def test_sabotage_clicking_the_aria_wrapper_would_be_caught():
+def test_the_send_button_safety_net_survives():
     import refunnel_export
-    js = refunnel_export._DOM_CLICK_CARD_JS
-    with pytest.raises(AssertionError):
-        assert "closest('.pop-up-menu > [aria-controls]')" in js  # wrong -- skips the handler div
-    assert "el.click()" in js
+    assert "refusing to click" in refunnel_export._CENTER_CARD_JS
 
 
-def test_dom_click_keeps_the_send_button_safety_net():
-    # a DOM click bypasses _safe_click, so the same refusal must live in the JS
-    import refunnel_export
-    assert "refusing to click" in refunnel_export._DOM_CLICK_CARD_JS
-    assert "dangerous" in refunnel_export._DOM_CLICK_CARD_JS
+# -- retries and time cost --
+
+def test_a_failed_attempt_is_retried_and_can_then_succeed(monkeypatch):
+    page = _MenuPage(opens_on="forced", fail_attempts=2, email="a@b.com")
+    results, _ = _scrape(monkeypatch, page)
+    assert results == {"tk_1": "a@b.com"}
+    assert page.events.count("forced_click") == 3
 
 
-# -- retrying --
-
-def test_menu_that_fails_to_open_is_retried_by_re_clicking_the_card(monkeypatch):
-    page = _DomClickPage(menu_failures=2, email="a@b.com")  # opens on the 3rd try
-    result = _run_scrape(monkeypatch, page)
-    assert page.dom_clicks == 3 and page.menu_waits == 3
-    assert result == {"tk_1": "a@b.com"}
-
-
-def test_retries_happen_in_place_while_the_card_is_still_on_the_page(monkeypatch):
-    # resetting to the top on every retry meant re-scrolling thousands of
-    # cards per attempt -- and that scrolling is what churns the list
-    page = _DomClickPage(menu_failures=2, email="a@b.com")
-    _run_scrape(monkeypatch, page)
-    assert page.scroll_resets == 1   # only the start-of-run reset
+def test_a_stuck_post_gives_up_after_three_attempts_not_four(monkeypatch, capsys):
+    # 4 attempts x 5s used to burn 20+s per stuck post
+    page = _MenuPage(opens_on="never")
+    results, _ = _scrape(monkeypatch, page)
+    assert results == {}
+    assert page.events.count("forced_click") == 3
+    assert "after 3 attempts" in capsys.readouterr().out
 
 
-def test_sabotage_resetting_to_top_on_every_retry_would_be_caught(monkeypatch):
-    page = _DomClickPage(menu_failures=2, email="a@b.com")
-    _run_scrape(monkeypatch, page)
-    with pytest.raises(AssertionError):
-        assert page.scroll_resets == 3  # wrong -- the costly old behaviour
-    assert page.scroll_resets == 1
+def test_menu_timings_are_short():
+    import refunnel_export as r
+    assert r.MENU_CLICK_TIMEOUT_MS <= 2000 and r.MENU_OPEN_TIMEOUT_MS <= 3000
+
+
+def test_escape_resets_between_failed_attempts(monkeypatch):
+    page = _MenuPage(opens_on="forced", fail_attempts=1, email="a@b.com")
+    _scrape(monkeypatch, page)
+    a = page.events.index("forced_click")
+    b = page.events.index("forced_click", a + 1)
+    assert "key:Escape" in page.events[a:b]
+
+
+def test_retries_stay_in_place_while_the_card_is_on_the_page(monkeypatch):
+    page = _MenuPage(opens_on="forced", fail_attempts=2, email="a@b.com")
+    _scrape(monkeypatch, page)
+    assert page.scroll_resets == 1          # only the start-of-run reset
 
 
 def test_card_that_left_the_page_is_searched_for_again(monkeypatch):
-    page = _DomClickPage(card_in_dom=False, email="a@b.com")
-    _run_scrape(monkeypatch, page)
-    assert page.scroll_resets >= 2   # start-of-run + a genuine re-search
+    page = _MenuPage(card_in_dom=False, email="a@b.com")
+    _scrape(monkeypatch, page)
+    assert page.scroll_resets >= 2
 
 
-def test_exhausting_every_attempt_fails_cleanly_after_four(monkeypatch, capsys):
-    page = _DomClickPage(menu_failures=99)
-    result = _run_scrape(monkeypatch, page)
-    assert result == {}
-    assert page.dom_clicks == 4
-    assert "didn't open after 4 DOM-click attempts" in capsys.readouterr().out
+# -- a menu that never opens must NOT be recorded as "no email" --
+
+def test_unopened_menu_is_not_misrecorded_as_no_email(monkeypatch):
+    # "no email" is only knowable by reading the modal's field -- a failure
+    # to open the menu must stay an error, so it's retried next run
+    page = _MenuPage(opens_on="never")
+    results, empty_ids = _scrape(monkeypatch, page)
+    assert results == {} and "tk_1" not in empty_ids
 
 
-def test_escape_is_pressed_between_failed_attempts(monkeypatch):
-    page = _DomClickPage(menu_failures=1, email="a@b.com")
-    _run_scrape(monkeypatch, page)
-    first_click = page.events.index("dom_click")
-    second_click = page.events.index("dom_click", first_click + 1)
-    assert "key:Escape" in page.events[first_click:second_click]
+def test_blank_email_field_is_recorded_as_confirmed_empty(monkeypatch):
+    # the state the two posts with no email should now reach
+    page = _MenuPage(opens_on="forced", email="")
+    results, empty_ids = _scrape(monkeypatch, page)
+    assert results == {} and "tk_1" in empty_ids
 
 
-def test_generic_failure_adds_no_extra_scroll_resets(monkeypatch):
-    # guards the earlier harmful cascade: resetting on every exception
-    page = _DomClickPage(menu_failures=99)
-    _run_scrape(monkeypatch, page)
-    assert page.scroll_resets == 1
+def test_sabotage_misrecording_a_failed_open_as_empty_would_be_caught(monkeypatch):
+    page = _MenuPage(opens_on="never")
+    _, empty_ids = _scrape(monkeypatch, page)
+    with pytest.raises(AssertionError):
+        assert "tk_1" in empty_ids  # wrong -- would permanently hide a real email
+    assert "tk_1" not in empty_ids
 
 
 # -- the modal belongs to the right post --
 
-def test_email_is_recorded_when_the_modal_is_this_posts(monkeypatch):
-    page = _DomClickPage(modal_img="tk_1_0.jpg", email="real@creator.com")
-    assert _run_scrape(monkeypatch, page) == {"tk_1": "real@creator.com"}
+def test_email_recorded_when_the_modal_is_this_posts(monkeypatch):
+    page = _MenuPage(modal_img="tk_1_0.jpg", email="real@creator.com")
+    results, _ = _scrape(monkeypatch, page)
+    assert results == {"tk_1": "real@creator.com"}
 
 
-def test_email_is_refused_when_the_modal_belongs_to_another_post(monkeypatch, capsys):
-    # a click landing on a shifted card would open ANOTHER creator's modal
-    page = _DomClickPage(modal_img="tk_999_0.jpg", email="someone.else@x.com")
-    assert _run_scrape(monkeypatch, page) == {}
+def test_email_refused_when_the_modal_belongs_to_another_post(monkeypatch, capsys):
+    page = _MenuPage(modal_img="tk_999_0.jpg", email="someone.else@x.com")
+    results, _ = _scrape(monkeypatch, page)
+    assert results == {}
     assert "DIFFERENT post" in capsys.readouterr().out
 
 
 def test_modal_without_an_identifiable_image_does_not_block(monkeypatch):
-    page = _DomClickPage(modal_img="", email="a@b.com")
-    assert _run_scrape(monkeypatch, page) == {"tk_1": "a@b.com"}
-
-
-def test_sabotage_recording_a_mismatched_modals_email_would_be_caught(monkeypatch):
-    page = _DomClickPage(modal_img="tk_999_0.jpg", email="someone.else@x.com")
-    result = _run_scrape(monkeypatch, page)
-    with pytest.raises(AssertionError):
-        assert result == {"tk_1": "someone.else@x.com"}  # wrong -- wrong creator's email
-    assert result == {}
+    page = _MenuPage(modal_img="", email="a@b.com")
+    results, _ = _scrape(monkeypatch, page)
+    assert results == {"tk_1": "a@b.com"}
 
 
 def test_modal_post_check_cases():
     from refunnel_export import modal_post_check
-    real = ["cross.svg", "879577.png", "tk_7688237002000551181_0.jpg"]  # a real modal's images
+    real = ["cross.svg", "879577.png", "tk_7688237002000551181_0.jpg"]
     assert modal_post_check(real, "tk_7688237002000551181") == "match"
     assert modal_post_check(real, "tk_1") == "mismatch"
     assert modal_post_check(["cross.svg"], "tk_1") == "unknown"
