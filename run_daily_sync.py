@@ -260,6 +260,19 @@ def main() -> int:
             scrape_budget_minutes = float(os.environ.get("SCRAPE_TIME_BUDGET_MINUTES", "270"))
             scrape_deadline = time.monotonic() + scrape_budget_minutes * 60
 
+            # SCRAPE_MAX_POSTS caps how many posts one run attempts -- for a
+            # quick live smoke test (e.g. 25) after a change, instead of
+            # committing to all ~4,000 and cancelling by hand. The allowed
+            # set is fixed ONCE, here, so a crash-restart mid-test can't
+            # quietly start another batch. Unset or 0 means no cap;
+            # anything left keeps its blank email and is picked up next run.
+            max_posts = int(os.environ.get("SCRAPE_MAX_POSTS", "0") or "0")
+            smoke_test_ids = None
+            if max_posts > 0:
+                smoke_test_ids = set(parse_refunnel.rows_needing_email_scrape(result)[:max_posts])
+                print(f"SCRAPE_MAX_POSTS={max_posts}: this run will attempt at most "
+                      f"{len(smoke_test_ids)} post(s) in total.")
+
             for attempt in range(max_scrape_restarts + 1):
                 if time.monotonic() >= scrape_deadline:
                     print(f"Scraping has used its {scrape_budget_minutes:.0f}-minute budget for this "
@@ -271,6 +284,8 @@ def main() -> int:
                     mid for mid in parse_refunnel.rows_needing_email_scrape(result)
                     if mid not in already_confirmed_empty
                 ]
+                if smoke_test_ids is not None:
+                    target_ids = [mid for mid in target_ids if mid in smoke_test_ids]
                 if not target_ids:
                     print("No posts left needing an email -- scraping is done for this run.")
                     break
