@@ -110,7 +110,7 @@ def _stub_browser(monkeypatch):
         sc.refunnel_auth, "load_or_refresh_session",
         lambda **kw: (_FakePlaywright(), _FakeBrowser(), _FakeContext())
     )
-    monkeypatch.setattr(sc.refunnel_auth, "refunnel_social_listening_url", lambda: "https://x")
+    monkeypatch.setattr(sc.refunnel_auth, "refunnel_social_listening_url", lambda *a, **kw: "https://x")
     monkeypatch.setattr(sc.refunnel_export, "select_workspace", lambda *a, **kw: None)
     monkeypatch.setattr(sc.refunnel_export, "scroll_to_load_all", lambda *a, **kw: None)
     monkeypatch.setattr(sc.refunnel_export, "filter_by_campaign", lambda *a, **kw: None)
