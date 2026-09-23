@@ -175,24 +175,6 @@ def test_a_post_in_two_campaigns_gets_both(monkeypatch):
     assert master_ws.rows[1][idx] == "Campaign A, Campaign B"
 
 
-def test_a_stale_campaign_tag_is_cleared_when_no_longer_a_member(monkeypatch):
-    # THE key distinction from Reviewed/drive_uploaded_at: this column
-    # must reflect current truth, including clearing a value
-    monkeypatch.setenv("SPREADSHEET_ID_DUDEROBE", "sheet1")
-    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1", campaigns="Old Campaign")])
-    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
-
-    # this run's fresh discovery finds tk_1 in NO campaign at all
-    monkeypatch.setattr(sc.refunnel_export, "list_available_campaigns", lambda page, **kw: ["Old Campaign"])
-    monkeypatch.setattr(sc.refunnel_export, "export_media_csv", lambda *a, **kw: "/tmp/fake.csv")
-    monkeypatch.setattr(sc, "_ids_from_csv", lambda path: set())  # empty -- tk_1 removed from it
-
-    sc.sync_campaigns_for_brand(gc, _brand_config(), "x@example.com", ["Duderobe"])
-
-    header = master_ws.rows[0]
-    idx = header.index("campaigns")
-    assert master_ws.rows[1][idx] == ""  # correctly cleared, not left stale
-
 
 def test_unchanged_campaign_value_is_not_rewritten(monkeypatch):
     monkeypatch.setenv("SPREADSHEET_ID_DUDEROBE", "sheet1")
@@ -250,51 +232,6 @@ def test_a_failed_campaign_does_not_stop_the_rest(monkeypatch, capsys):
     assert call_count["n"] == 2  # both were attempted despite the first failing
 
 
-def test_sabotage_stale_tag_left_in_place_would_be_caught(monkeypatch):
-    monkeypatch.setenv("SPREADSHEET_ID_DUDEROBE", "sheet1")
-    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1", campaigns="Old Campaign")])
-    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
-
-    monkeypatch.setattr(sc.refunnel_export, "list_available_campaigns", lambda page, **kw: ["Old Campaign"])
-    monkeypatch.setattr(sc.refunnel_export, "export_media_csv", lambda *a, **kw: "/tmp/fake.csv")
-    monkeypatch.setattr(sc, "_ids_from_csv", lambda path: set())
-
-    sc.sync_campaigns_for_brand(gc, _brand_config(), "x@example.com", ["Duderobe"])
-
-    header = master_ws.rows[0]
-    idx = header.index("campaigns")
-    with pytest.raises(AssertionError):
-        assert master_ws.rows[1][idx] == "Old Campaign"  # wrong -- would mean it's stuck stale
-    assert master_ws.rows[1][idx] == ""  # confirms actual correct behavior
-
-
-# ---------- genuinely empty campaigns (confirmed real: Refunnel's "No results" state) ----------
-
-def test_a_genuinely_empty_campaign_is_recorded_as_zero_not_a_failure(monkeypatch, capsys):
-    # confirmed real from live debug screenshots: all 5 of Duderobe's
-    # campaigns show Refunnel's own "No results for these filters(s)"
-    # message, matching a manual check exactly -- this must be recorded
-    # as a genuine, valid 0-post result, not logged as a failure
-    monkeypatch.setenv("SPREADSHEET_ID_DUDEROBE", "sheet1")
-    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1", campaigns="Old Campaign")])
-    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
-
-    monkeypatch.setattr(sc.refunnel_export, "list_available_campaigns", lambda page, **kw: ["Old Campaign"])
-    monkeypatch.setattr(sc.refunnel_export, "has_no_results_for_filter", lambda page: True)
-
-    scroll_called = []
-    monkeypatch.setattr(sc.refunnel_export, "scroll_to_load_all", lambda *a, **kw: scroll_called.append(1))
-
-    sc.sync_campaigns_for_brand(gc, _brand_config(), "x@example.com", ["Duderobe"])
-
-    out = capsys.readouterr().out
-    assert "0 post(s)" in out
-    assert "couldn't process" not in out  # not treated as a failure
-    assert scroll_called == []  # never attempted -- there's nothing to scroll
-
-    header = master_ws.rows[0]
-    idx = header.index("campaigns")
-    assert master_ws.rows[1][idx] == ""  # correctly cleared -- tk_1 no longer in it
 
 
 def test_a_real_campaign_still_scrolls_and_exports_normally(monkeypatch):
@@ -406,3 +343,74 @@ def test_sabotage_the_shed_robe_bug_would_be_caught(monkeypatch):
     with pytest.raises(AssertionError):
         assert master_ws.rows[1][idx] == "SheRobe Content Campaign"  # wrong -- would mean the bug is back
     assert master_ws.rows[1][idx] == ""  # confirms the safety gate actually stopped it
+
+
+# ---------- campaigns are FREEZE-ONCE-SET (explicit instruction) ----------
+
+def test_blank_campaign_cell_gets_filled(monkeypatch):
+    monkeypatch.setenv("SPREADSHEET_ID_DUDEROBE", "sheet1")
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1")])  # blank campaigns
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+
+    monkeypatch.setattr(sc.refunnel_export, "list_available_campaigns", lambda page, **kw: ["Campaign A"])
+    monkeypatch.setattr(sc.refunnel_export, "has_no_results_for_filter", lambda page: False)
+    monkeypatch.setattr(sc.refunnel_export, "export_media_csv", lambda *a, **kw: "/tmp/f.csv")
+    monkeypatch.setattr(sc, "_ids_from_csv", lambda path: {"tk_1"})
+
+    sc.sync_campaigns_for_brand(gc, _brand_config(), "x@example.com", ["Duderobe"])
+
+    idx = master_ws.rows[0].index("campaigns")
+    assert master_ws.rows[1][idx] == "Campaign A"
+
+
+def test_existing_campaign_value_is_never_overwritten(monkeypatch):
+    # the whole point of freezing: protects real data from being wiped
+    # by a silently-failed filter/scroll/export chain
+    monkeypatch.setenv("SPREADSHEET_ID_DUDEROBE", "sheet1")
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1", campaigns="Original Campaign")])
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+
+    monkeypatch.setattr(sc.refunnel_export, "list_available_campaigns", lambda page, **kw: ["Different Campaign"])
+    monkeypatch.setattr(sc.refunnel_export, "has_no_results_for_filter", lambda page: False)
+    monkeypatch.setattr(sc.refunnel_export, "export_media_csv", lambda *a, **kw: "/tmp/f.csv")
+    monkeypatch.setattr(sc, "_ids_from_csv", lambda path: {"tk_1"})
+
+    sc.sync_campaigns_for_brand(gc, _brand_config(), "x@example.com", ["Duderobe"])
+
+    idx = master_ws.rows[0].index("campaigns")
+    assert master_ws.rows[1][idx] == "Original Campaign"
+
+
+def test_empty_campaign_result_never_wipes_an_existing_value(monkeypatch):
+    # THE failure mode this design protects against: a campaign that
+    # returns nothing (genuinely empty, OR a silently broken filter)
+    # must not clear campaign data already in the sheet
+    monkeypatch.setenv("SPREADSHEET_ID_DUDEROBE", "sheet1")
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1", campaigns="Real Campaign")])
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+
+    monkeypatch.setattr(sc.refunnel_export, "list_available_campaigns", lambda page, **kw: ["Real Campaign"])
+    monkeypatch.setattr(sc.refunnel_export, "has_no_results_for_filter", lambda page: True)  # empty
+
+    sc.sync_campaigns_for_brand(gc, _brand_config(), "x@example.com", ["Duderobe"])
+
+    idx = master_ws.rows[0].index("campaigns")
+    assert master_ws.rows[1][idx] == "Real Campaign"
+
+
+def test_sabotage_overwriting_an_existing_campaign_would_be_caught(monkeypatch):
+    monkeypatch.setenv("SPREADSHEET_ID_DUDEROBE", "sheet1")
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1", campaigns="Original Campaign")])
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+
+    monkeypatch.setattr(sc.refunnel_export, "list_available_campaigns", lambda page, **kw: ["Different Campaign"])
+    monkeypatch.setattr(sc.refunnel_export, "has_no_results_for_filter", lambda page: False)
+    monkeypatch.setattr(sc.refunnel_export, "export_media_csv", lambda *a, **kw: "/tmp/f.csv")
+    monkeypatch.setattr(sc, "_ids_from_csv", lambda path: {"tk_1"})
+
+    sc.sync_campaigns_for_brand(gc, _brand_config(), "x@example.com", ["Duderobe"])
+
+    idx = master_ws.rows[0].index("campaigns")
+    with pytest.raises(AssertionError):
+        assert master_ws.rows[1][idx] == "Different Campaign"  # wrong -- freezing forbids this
+    assert master_ws.rows[1][idx] == "Original Campaign"
