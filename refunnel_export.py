@@ -1501,21 +1501,27 @@ def scrape_creator_emails(
                         break  # genuinely gone now, not just detached -- let the outer handling deal with it
                     request_toggle = grid_item.locator(usage_rights_toggle_selector).first
                 try:
-                    request_toggle.scroll_into_view_if_needed(timeout=4000)
-                    request_toggle.wait_for(state="visible", timeout=4000)
-                    # A brief settle pause before clicking -- confirmed
-                    # real: the detachment happens mid-click, meaning the
-                    # card was visible a moment ago but the list churned
-                    # again right as the click landed. This doesn't
-                    # eliminate the race, just gives a re-render that's
-                    # already in flight a chance to finish first.
-                    page.wait_for_timeout(300)
-                    # SHORT per-attempt timeout -- confirmed real regression
-                    # this fixes: with Playwright's default 30s and up to 3
-                    # attempts, every un-clickable card burned up to 90s, and
-                    # a live log showed the retries still never succeeded.
-                    # A detached element doesn't become clickable by waiting;
-                    # the loop's job is to fetch a FRESH one, so fail fast.
+                    # CONFIRMED REAL from an actual debug snapshot: at
+                    # the moment a click finally gave up (after 3
+                    # attempts), the target media_id was completely
+                    # ABSENT from the page's own HTML -- 0 occurrences.
+                    # The card was genuinely found moments earlier (the
+                    # error message itself confirms that), then
+                    # recycled away before the click could land.
+                    #
+                    # This removes the manual scroll_into_view_if_needed
+                    # + wait_for(state="visible") + a 300ms settle pause
+                    # that used to sit between "found" and "click
+                    # attempted" -- each step was ADDING TO exactly the
+                    # window during which the virtualized list could
+                    # recycle the card away again. Playwright's own
+                    # .click() already performs this same actionability
+                    # waiting (scrolled into view, visible, stable,
+                    # receives events) internally as part of the click
+                    # itself, so the manual version was pure redundant
+                    # delay with no confirmed benefit, and real, evidenced
+                    # cost. Going straight from "found" to "click
+                    # attempted" minimizes that window instead.
                     _safe_click(request_toggle, timeout_ms=CLICK_ATTEMPT_TIMEOUT_MS)
                     last_click_error = None
                     break
