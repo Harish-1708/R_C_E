@@ -716,3 +716,21 @@ def test_sabotage_wrong_fragment_would_be_caught():
     with pytest.raises(AssertionError):
         assert result == "18018159"  # wrong -- that's the FIRST 8 digits, not the last
     assert result == "30937735"  # confirms actual correct behavior, matching the real upload
+
+
+# ---------- campaigns column placement (explicit request: "proper area and align properly") ----------
+
+def test_campaigns_sits_directly_after_collections():
+    assert "campaigns" in MASTER_COLUMNS
+    assert MASTER_COLUMNS.index("campaigns") == MASTER_COLUMNS.index("collections") + 1
+
+
+def test_campaigns_is_declared_sheet_owned_so_it_is_never_blanked():
+    from parse_refunnel import SHEET_OWNED_COLUMNS
+    assert "campaigns" in SHEET_OWNED_COLUMNS
+
+
+def test_sabotage_campaigns_left_at_the_end_would_be_caught():
+    with pytest.raises(AssertionError):
+        assert MASTER_COLUMNS[-1] == "campaigns"  # wrong -- that's where an unplaced extra column lands
+    assert MASTER_COLUMNS[-1] == "updated_at"
