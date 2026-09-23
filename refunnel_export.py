@@ -60,6 +60,26 @@ SCRAPE_EMAILS_ENABLED = True
 # alone can't be used to detect it.
 PENDING_REVIEW_TITLE_TEXT = "Pending review"
 
+# Per-attempt click timeout inside the detached-card retry loop.
+#
+# CONFIRMED REAL overcorrection this replaces: the previous value (8000)
+# was set based on evidence gathered while a SEPARATE bug (the general
+# exception handler over-resetting scroll) was still present, which
+# meant retries could never succeed regardless of timeout length --
+# any value would have looked equally "doomed" at the time. Once that
+# bug was fixed (retries do get a genuinely fresh element now), a live
+# run showed 3-for-3 clicks still failing, every single one at exactly
+# 8s -- consistent with the element genuinely needing MORE time to
+# stabilize (virtualized-list re-render settling, image lazy-loading),
+# not with it being permanently un-clickable. 8s never gave it the
+# chance to find out.
+#
+# 15s is a middle ground, not a confirmed-correct number -- if clicks
+# still fail consistently at this value too, that would be real
+# evidence the problem isn't about time at all, and needs a fresh debug
+# snapshot from the moment of failure to diagnose properly.
+CLICK_ATTEMPT_TIMEOUT_MS = 15000
+
 # Refunnel's "Request usage rights" flow has a "Send request" button
 # (confirmed from your screenshot). We refuse to click anything whose
 # accessible name matches this, as a hard safety net independent of
@@ -168,7 +188,8 @@ def select_workspace(
     page.wait_for_timeout(2000)  # let the workspace switch (page reload/content refresh) settle
 
 
-def goto_social_listening_for_workspace(page: Page, workspace_name: str, known_workspace_names: Iterable[str]) -> None:
+def goto_social_listening_for_workspace(page: Page, workspace_name: str, known_workspace_names: Iterable[str],
+                                       usage_rights: Optional[str] = None) -> None:
     """Navigates to Social Listening for a SPECIFIC workspace, with the
     intended 12-months time range GENUINELY applied afterward -- not
     just requested in the URL before the switch.
@@ -189,12 +210,12 @@ def goto_social_listening_for_workspace(page: Page, workspace_name: str, known_w
     so every caller (the main sync, campaign sync, the Drive backfill)
     gets the fix by using this instead of the two calls directly.
     """
-    page.goto(refunnel_auth.refunnel_social_listening_url())
+    page.goto(refunnel_auth.refunnel_social_listening_url(usage_rights))
     select_workspace(page, workspace_name, known_workspace_names)
     # Re-navigate: the workspace switch above can silently reset the
     # time-range filter to THIS workspace's own default -- see the
     # docstring above for the confirmed real evidence.
-    page.goto(refunnel_auth.refunnel_social_listening_url())
+    page.goto(refunnel_auth.refunnel_social_listening_url(usage_rights))
 
 
 def scroll_to_top(page: Page, scroll_container_selector: str = "#scrollableDiv") -> None:
@@ -499,7 +520,8 @@ CAMPAIGN_APPLY_BUTTON_SELECTOR = "button:has-text('Apply Changes')"
 CLEAR_ALL_FILTERS_SELECTOR = "text=Clear"
 
 
-def list_available_campaigns(page: Page, debug_dir: Optional[str] = None, timeout_ms: int = 15000) -> list:
+def list_available_campaigns(page: Page, debug_dir: Optional[str] = None, timeout_ms: int = 15000,
+                             max_scroll_rounds: int = 40) -> list:
     """Reads the full, current list of campaign names straight from the
     Campaign filter's own checklist -- confirmed real requirement: with
     22 campaigns today and more added over time, a hardcoded list would
@@ -551,12 +573,46 @@ def list_available_campaigns(page: Page, debug_dir: Optional[str] = None, timeou
         # captures a diagnostic either way (timed out waiting, or found
         # something that just yielded no usable text) -- both mean the
         # selector doesn't match what's really on the page.
-    count = rows.count()
-    names = []
-    for i in range(count):
-        text = rows.nth(i).inner_text().strip()
-        if text:
-            names.append(text)
+    # Scroll WITHIN the dropdown until no new campaigns appear --
+    # confirmed real: Swoveralls has 22+ campaigns but a single read
+    # found only the first 10, because the list lazy-loads more as it
+    # is scrolled. Scrolling the LAST currently-rendered row into view
+    # forces whichever ancestor actually scrolls to load the next batch,
+    # without having to guess that container's selector.
+    #
+    # Names are collected in first-seen order and de-duplicated, since
+    # the same rows stay rendered across rounds. Stops after two rounds
+    # in a row with nothing new -- one quiet round can just be the list
+    # still rendering.
+    names: list = []
+    seen: set = set()
+    quiet_rounds = 0
+    for _ in range(max_scroll_rounds):
+        count = rows.count()
+        before = len(names)
+        for i in range(count):
+            try:
+                text = rows.nth(i).inner_text().strip()
+            except Exception:
+                continue  # a row recycled mid-read; the next round catches it
+            if text and text not in seen:
+                seen.add(text)
+                names.append(text)
+
+        if len(names) == before:
+            quiet_rounds += 1
+            if quiet_rounds >= 2:
+                break
+        else:
+            quiet_rounds = 0
+
+        if count == 0:
+            break
+        try:
+            rows.nth(count - 1).scroll_into_view_if_needed(timeout=2000)
+        except Exception:
+            break  # nothing further to scroll to
+        page.wait_for_timeout(400)  # let the next batch render
 
     if not names and debug_dir:
         # Captured BEFORE the Escape below, while the panel (if it
@@ -641,12 +697,48 @@ def filter_by_campaign(page: Page, campaign_name: str, debug_dir: Optional[str] 
     """
     clear_all_filters(page)
 
-    campaign_button = page.locator(CAMPAIGN_FILTER_BUTTON_SELECTOR).first
-    campaign_button.click()
+    # CONFIRMED REAL root cause of erratic campaign failures: clicking
+    # the Campaign filter is a TOGGLE, not "open". A live run across 10
+    # Swoveralls campaigns failed in three different ways -- "Apply
+    # Changes" never enabling (30s), the search input never becoming
+    # visible (15s), and "<div> intercepts pointer events" -- with
+    # successes and failures interleaved. All three are the same
+    # underlying problem: the dropdown was ALREADY open, left over from
+    # the previous campaign, so the click CLOSED it instead of opening
+    # it. Everything after that then operates on a panel that isn't
+    # there (no search box), or on a stale one (nothing gets checked,
+    # so Apply stays disabled), or against a lingering overlay.
+    #
+    # Fixed by making "open" deterministic instead of assuming a
+    # starting state: force it closed with Escape first, then open it,
+    # then VERIFY the search box actually appeared -- retrying the
+    # whole open sequence rather than charging ahead into a panel that
+    # never opened.
+    search_box = None
+    for open_attempt in range(3):
+        try:
+            page.keyboard.press("Escape")  # guarantee closed, whatever state it was in
+            page.wait_for_timeout(400)
+            page.locator(CAMPAIGN_FILTER_BUTTON_SELECTOR).first.click()
+            candidate = page.locator(CAMPAIGN_SEARCH_INPUT_SELECTOR).first
+            candidate.wait_for(state="visible", timeout=5000)
+            search_box = candidate
+            break
+        except Exception:
+            continue
 
-    search_box = page.locator(CAMPAIGN_SEARCH_INPUT_SELECTOR).first
-    search_box.wait_for(state="visible", timeout=timeout_ms)
+    if search_box is None:
+        raise ExportError(
+            f"couldn't get the Campaign filter dropdown open for {campaign_name!r} after 3 "
+            f"attempts -- its search box never became visible. Refusing to continue rather "
+            f"than acting on a panel that isn't there."
+        )
+
     search_box.fill(campaign_name)
+    # Let the campaign list actually filter down to the typed text
+    # before matching a row against it -- without this the row we match
+    # can be one the list is about to replace.
+    page.wait_for_timeout(600)
 
     row = page.locator(CAMPAIGN_CHECKBOX_ROW_SELECTOR).filter(
         has=page.get_by_text(campaign_name, exact=True)
@@ -663,8 +755,26 @@ def filter_by_campaign(page: Page, campaign_name: str, debug_dir: Optional[str] 
     # box ends up genuinely checked, not just clicked at.
     row.locator(CAMPAIGN_CHECKBOX_INPUT_SELECTOR).check()
 
+    # Wait for Apply to actually become enabled before clicking it.
+    # Confirmed real: when the checkbox didn't register, the old code
+    # clicked a permanently-disabled Apply and burned the full 30s
+    # timeout before failing. Checking the state first turns that into
+    # a fast, clearly-worded failure instead of a long silent stall.
     apply_button = page.locator(CAMPAIGN_APPLY_BUTTON_SELECTOR).first
-    apply_button.click()
+    try:
+        apply_button.wait_for(state="visible", timeout=5000)
+        page.wait_for_selector(
+            f"{CAMPAIGN_APPLY_BUTTON_SELECTOR}:not([disabled])", timeout=5000
+        )
+    except Exception as e:
+        raise ExportError(
+            f"the checkbox for {campaign_name!r} doesn't appear to have registered -- "
+            f"'Apply Changes' never became enabled. Skipping rather than clicking a "
+            f"disabled button for 30s. Original error: {e}"
+        ) from e
+
+    apply_button.click(timeout=10000)
+    page.wait_for_timeout(800)  # let the filtered view settle before anything reads it
 
     if debug_dir:
         try:
@@ -710,7 +820,7 @@ def clear_all_filters(page: Page) -> None:
         pass  # nothing was active to clear -- not an error
 
 
-def _safe_click(locator) -> None:
+def _safe_click(locator, timeout_ms: Optional[int] = None) -> None:
     """Click, but refuse if the element's own text matches
     _DANGEROUS_BUTTON_PATTERN (looks like 'Send request') -- a hard
     safety net independent of whatever locator logic got us here."""
@@ -723,7 +833,11 @@ def _safe_click(locator) -> None:
             f"Refusing to click an element whose text matches a dangerous "
             f"send/submit pattern: {text!r}"
         )
-    locator.click()
+    # timeout_ms=None keeps Playwright's default for existing callers.
+    if timeout_ms is None:
+        locator.click()
+    else:
+        locator.click(timeout=timeout_ms)
 
 
 def _order_ids_for_scraping(media_rows: dict, media_ids: Iterable[str]) -> list:
@@ -744,6 +858,7 @@ def _scroll_until_card_found(
     scroll_step: int = 800,
     pace_ms_range: tuple = SCROLL_SEARCH_PACE_MS,
     bottom_rounds_before_giving_up: int = 4,
+    card_selector: Optional[str] = None,
 ):
     """react-virtuoso (the grid library this page uses) only keeps
     nearby cards mounted in the DOM, unmounting far-off ones as you
@@ -784,7 +899,10 @@ def _scroll_until_card_found(
     taking effect on this element), separate from "moved fine but the
     card still never rendered."
     """
-    selector = f"div.rf-virtuoso-item:has(img[src*='{media_id}'])"
+    # card_selector overrides the default id-in-image match -- used by
+    # the username+date fallback for posts whose id never appears in
+    # their thumbnail URL (see card_selector_for_username_date).
+    selector = card_selector or f"div.rf-virtuoso-item:has(img[src*='{media_id}'])"
     state = None
     rounds_at_bottom = 0
 
@@ -847,17 +965,26 @@ def _is_logged_out(page: Page) -> bool:
         return False
 
 
-def _save_scrape_failure_snapshot(page: Page, debug_dir: str, media_id: str) -> None:
-    """One-time diagnostic capture for scrape_creator_emails -- a
-    screenshot and the raw page HTML, saved once (not per-failure) so
-    we can actually see what's on screen when the scroll-search gives
-    up, instead of guessing from log lines alone."""
+def _save_scrape_failure_snapshot(page: Page, debug_dir: str, media_id: str, category: str = "unknown") -> None:
+    """Diagnostic capture for scrape_creator_emails -- a screenshot and
+    the raw page HTML.
+
+    category names WHICH kind of failure this is (e.g. "couldnt_locate",
+    "empty_field", "exception:TimeoutError") and is folded into the
+    filename, so each distinct failure type gets its own capture once
+    per run -- not one shared snapshot for the whole run. CONFIRMED
+    REAL gap this fixes: a live artifact only ever showed the "no email
+    on file" case (correct, not a bug), because it happened to occur
+    first and used up the single shared slot -- a genuinely different,
+    ongoing issue (detached clicks) never got its own evidence at all.
+    """
     try:
         out_dir = Path(debug_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        page.screenshot(path=str(out_dir / f"scrape_failure_{media_id}.png"), full_page=True)
-        (out_dir / f"scrape_failure_{media_id}.html").write_text(page.content(), encoding="utf-8")
-        print(f"Saved scrape-failure debug snapshot for media_id={media_id!r} to {out_dir}")
+        safe_category = re.sub(r"[^A-Za-z0-9_]+", "_", category)
+        page.screenshot(path=str(out_dir / f"scrape_failure_{safe_category}_{media_id}.png"), full_page=True)
+        (out_dir / f"scrape_failure_{safe_category}_{media_id}.html").write_text(page.content(), encoding="utf-8")
+        print(f"Saved scrape-failure debug snapshot ({category}) for media_id={media_id!r} to {out_dir}")
     except Exception as e:
         print(f"Couldn't save scrape-failure debug snapshot: {e}")
 
@@ -895,10 +1022,57 @@ def _format_progress_line(attempted: int, total: int, found: int, empty_fields: 
             f"{other_failed} other error(s)")
 
 
-DRIVE_CARD_MENU_BUTTON_SELECTOR = "[aria-label*='more' i], [aria-label*='options' i], button:has-text('⋯'), button:has-text('...')"
+# CONFIRMED REAL from a saved page with the Approved filter applied: an
+# Approved card's footer holds ONLY the usage-rights toggle -- the ARIA
+# disclosure wrapping .usage-rights-approved-card -- and "Upload to
+# Google Drive" is in THAT toggle's dropdown. An earlier selector
+# targeted a dotted "..." icon; on the live page that opened the card's
+# other menu (Show content / Mute creator / Delete from library).
+DRIVE_APPROVED_TOGGLE_SELECTOR = ".pop-up-menu > [aria-controls]:has(.usage-rights-approved-card)"
 DRIVE_UPLOAD_MENU_ITEM_SELECTOR = "text=Upload to Google Drive"
 DRIVE_MODAL_ALL_FOLDERS_TAB_SELECTOR = "button:has-text('All folders')"
 DRIVE_MODAL_SAVE_BUTTON_SELECTOR = "button:has-text('Save to Drive')"
+
+
+_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def card_date_label(created_at: str) -> Optional[str]:
+    """Formats an ISO created_at ("2026-09-11T14:02:00Z") the way a card
+    displays its date ("Sep 11") -- confirmed real from saved pages:
+    "Sep 11", "Jul 19", "Mar 10" (abbreviated month, unpadded day, no
+    year). Returns None if created_at can't be parsed."""
+    try:
+        y, m, d = (created_at or "")[:10].split("-")
+        return f"{_MONTHS[int(m) - 1]} {int(d)}"
+    except Exception:
+        return None
+
+
+def card_selector_for_username_date(username: str, created_at: str) -> Optional[str]:
+    """Selector locating a card by creator handle + displayed post date --
+    the fallback for posts whose media id never appears in their
+    thumbnail URL.
+
+    CONFIRMED REAL need: TikTok ids and numeric Instagram ids DO appear
+    in card image filenames (e.g. "ig_18352380517172428.jpg"), but the
+    32-character hex Instagram ids (e.g. ig_0431480af70141eab24c76d9f2b5b40c)
+    do not -- which is exactly why those kept failing with "couldn't
+    locate". Suggested directly: match on creator + date instead.
+
+    Uses confirmed-real classes (span.post-header-uname for the handle,
+    .post_time__cpgc for the date) and :text-is() for EXACT matching,
+    so "@indycub9" can never match "@indycub99".
+    """
+    label = card_date_label(created_at)
+    if not username or not label:
+        return None
+    handle = username if username.startswith("@") else f"@{username}"
+    handle = handle.replace("'", "\\'")
+    return (f"div.rf-virtuoso-item"
+            f":has(span.post-header-uname:text-is('{handle}'))"
+            f":has(.post_time__cpgc:text-is('{label}'))")
 
 
 def trigger_native_drive_upload(
@@ -908,47 +1082,68 @@ def trigger_native_drive_upload(
     scroll_container_selector: str = "#scrollableDiv",
     debug_dir: Optional[str] = None,
     timeout_ms: int = 15000,
+    username: Optional[str] = None,
+    created_at: Optional[str] = None,
 ) -> bool:
-    """Uses Refunnel's OWN native "Upload to Google Drive" feature to
-    save a post's video directly into a connected Drive folder --
-    confirmed real, replacing an earlier custom download-then-upload
-    design entirely (that approach used a guessed download-button
-    selector never verified against real markup; this uses a feature
-    you confirmed is already connected and working from your own
-    account). Refunnel handles the actual file transfer server-side;
-    this only triggers it and selects the right folder.
+    """Saves one Approved post's video to Google Drive using Refunnel's
+    OWN native upload -- Refunnel does the file transfer server-side;
+    this only drives the UI and picks the folder.
 
-    Confirmed real UI flow, from live screenshots: open the card's
-    "..." menu -> "Upload to Google Drive" -> a modal with three tabs
-    (New folder / In root folder / All folders) -> select "All
-    folders" -> pick the target folder by name -> "Save to Drive".
+    CONFIRMED REAL flow, from saved pages and screenshots of the live UI:
+      1. On an APPROVED card, "Upload to Google Drive" lives in the
+         "Usage rights approved" status bar's chevron dropdown -- the
+         card footer holds ONLY that toggle (wrapping
+         .usage-rights-approved-card). An earlier version clicked a
+         dotted "..." icon instead; a live run's screenshot showed that
+         opened the card's OTHER menu ("Show content / Mute creator /
+         Delete from library"), so "Upload to Google Drive" never
+         appeared and every attempt timed out.
+      2. The save modal: "All folders" tab -> the brand's folder (a
+         span with its exact name) -> "Save to Drive", which is
+         DISABLED until a folder is picked, so it is waited on rather
+         than clicked blind.
 
-    The exact selectors below are still BEST-GUESS, not verified
-    against real markup -- same caveat as every other new UI element
-    in this project until a live run confirms or corrects them.
-    debug_dir captures a screenshot + HTML on any failure, so a wrong
-    guess can be fixed from real evidence on the next round rather
-    than another blind guess.
+    Card lookup: by media id in the thumbnail URL first (works for
+    TikTok and numeric Instagram ids -- confirmed), then, if given,
+    by creator handle + displayed date for the 32-char hex Instagram
+    ids that never appear in thumbnail URLs. The fallback refuses to
+    act when more than one card matches (same creator, same day) --
+    skipping is always safer than uploading the wrong video.
 
-    Refunnel's own upload does NOT preserve the agreed naming
-    convention -- it uses its own format (confirmed real example:
-    "INSTAGRAM_REEL_username_2026-09-21-UGC_<last 8 digits of the real
-    id>.mp4"). Finding that file afterward and renaming it is
-    drive_upload.py's job, not this function's -- this only triggers
-    the upload and confirms the modal flow completed.
-
-    Returns True once "Save to Drive" has been clicked. False if the
-    card itself couldn't be located (same meaning as everywhere else
-    in this file). Raises on any other failure in the flow.
+    Returns True once Save to Drive is clicked, False if the card
+    couldn't be located (or was ambiguous). Raises on any other failure
+    in the flow, after saving a debug snapshot if debug_dir is given.
     """
+    # Reset BEFORE searching -- confirmed real: the search only scrolls
+    # FORWARD, so anything above the current position was unreachable.
+    scroll_to_top(page, scroll_container_selector)
     grid_item, _ = _scroll_until_card_found(page, media_id, scroll_container_selector)
+
+    if grid_item is None and username and created_at:
+        fallback = card_selector_for_username_date(username, created_at)
+        if fallback:
+            scroll_to_top(page, scroll_container_selector)
+            grid_item, _ = _scroll_until_card_found(
+                page, media_id, scroll_container_selector, card_selector=fallback
+            )
+            if grid_item is not None:
+                try:
+                    matches = page.locator(fallback).count()
+                except Exception:
+                    matches = 1
+                if matches > 1:
+                    print(f"drive upload: {matches} cards match @{username.lstrip('@')} on "
+                          f"{card_date_label(created_at)} -- skipping media_id={media_id!r} "
+                          f"rather than risk uploading the wrong video.")
+                    return False
+
     if grid_item is None:
         return False
 
     try:
-        grid_item.hover()
-        menu_button = grid_item.locator(DRIVE_CARD_MENU_BUTTON_SELECTOR).first
-        menu_button.click()
+        toggle = grid_item.locator(DRIVE_APPROVED_TOGGLE_SELECTOR).first
+        toggle.scroll_into_view_if_needed(timeout=4000)
+        toggle.click()
 
         upload_item = page.locator(DRIVE_UPLOAD_MENU_ITEM_SELECTOR).first
         upload_item.wait_for(state="visible", timeout=timeout_ms)
@@ -958,11 +1153,12 @@ def trigger_native_drive_upload(
         all_folders_tab.wait_for(state="visible", timeout=timeout_ms)
         all_folders_tab.click()
 
-        folder_row = page.get_by_text(drive_folder_name, exact=False).first
+        folder_row = page.get_by_text(drive_folder_name, exact=True).first
         folder_row.wait_for(state="visible", timeout=timeout_ms)
         folder_row.click()
 
         save_button = page.locator(DRIVE_MODAL_SAVE_BUTTON_SELECTOR).first
+        page.wait_for_selector(f"{DRIVE_MODAL_SAVE_BUTTON_SELECTOR}:not([disabled])", timeout=timeout_ms)
         save_button.click()
         return True
     except Exception:
@@ -975,6 +1171,224 @@ def trigger_native_drive_upload(
             except Exception:
                 pass
         raise
+
+_MEDIA_ID_IN_SRC = re.compile(r"(tk_\d+|ig_[0-9a-f]{32}|ig_\d+)")
+
+
+def modal_post_check(image_srcs: Iterable[str], media_id: str) -> str:
+    """Does the open "Request usage rights" modal belong to media_id?
+
+    CONFIRMED REAL: the modal shows the post's own preview image, whose
+    filename embeds the media id (a live snapshot's modal contained
+    "tk_7688237002000551181_0.jpg" for exactly that post). So the modal
+    can be checked against the post we MEANT to open.
+
+    Why it matters: on a virtualized grid that keeps re-rendering, a
+    click can land on a DIFFERENT card than the one resolved moments
+    earlier -- opening another creator's modal. Without this check that
+    creator's email would be silently recorded against the wrong post.
+
+    Returns "match", "mismatch" (another post's id is present -- refuse),
+    or "unknown" (no identifiable post image, e.g. some Instagram posts
+    -- nothing to contradict, so don't block on it).
+    """
+    found = set()
+    for src in image_srcs:
+        for mid in _MEDIA_ID_IN_SRC.findall(src or ""):
+            found.add(mid)
+    if media_id in found:
+        return "match"
+    if found:
+        return "mismatch"
+    return "unknown"
+
+
+USAGE_RIGHTS_CARD_SELECTOR = ".usage-rights-request-card, .usage-rights-requested-card"
+USAGE_RIGHTS_MENU_TEXT = "Request creator approval to use this content in your marketing"
+
+# Per-attempt timings for opening the usage-rights menu. CONFIRMED REAL
+# cost this cuts: 4 attempts x a 5s menu wait meant every post whose menu
+# wouldn't open burned 20+ seconds -- the "it never ends" feeling on a
+# ~4,000-post backlog. 3 attempts x (1.5s click + 2.5s menu wait) caps a
+# genuinely stuck post at roughly 12s, and a working one returns at once.
+MENU_CLICK_TIMEOUT_MS = 1500
+MENU_OPEN_TIMEOUT_MS = 2500
+
+# Runs INSIDE the page, in one synchronous turn, on the resolved card.
+# Every step happens before react-virtuoso can process a scroll event
+# and recycle the node -- so there is no gap for the card to vanish in.
+# Centers the card and runs the send-button safety net, in one turn.
+# It deliberately does NOT click: a live run proved a synthetic click
+# reaches the correct, connected card and still doesn't open the menu.
+_CENTER_CARD_JS = """(el, dangerous) => {
+    if (!el.isConnected) { throw new Error("card detached before click"); }
+    if (new RegExp(dangerous, "i").test(el.innerText || "")) {
+        throw new Error("refusing to click a send/submit-like element");
+    }
+    el.scrollIntoView({block: "center", inline: "nearest"});
+    if (!el.isConnected) { throw new Error("card detached after centering"); }
+}"""
+
+# Second mechanism: the FULL pointer/mouse sequence dispatched straight to
+# the card element (no coordinates, so nothing can intercept it). Used only
+# if the real forced click didn't open the menu.
+_POINTER_SEQUENCE_JS = """(el) => {
+    if (!el.isConnected) { throw new Error("card detached before pointer sequence"); }
+    const r = el.getBoundingClientRect();
+    const opts = {bubbles: true, cancelable: true, view: window, button: 0,
+                  clientX: r.left + r.width / 2, clientY: r.top + r.height / 2};
+    el.dispatchEvent(new PointerEvent("pointerdown", {...opts, pointerId: 1, isPrimary: true}));
+    el.dispatchEvent(new MouseEvent("mousedown", opts));
+    el.dispatchEvent(new PointerEvent("pointerup", {...opts, pointerId: 1, isPrimary: true}));
+    el.dispatchEvent(new MouseEvent("mouseup", opts));
+    el.dispatchEvent(new MouseEvent("click", opts));
+}"""
+
+# Reads (never clicks) the disclosure wrapper's open state from the card's
+# CURRENT node, so a recycled node can't leave us polling a stale one.
+_MENU_EXPANDED_JS = """(el) => {
+    const w = el.closest('[aria-controls]');
+    return w ? w.getAttribute('aria-expanded') : null;
+}"""
+
+
+def _open_usage_rights_menu(page: Page, media_id: str, grid_item, scroll_container_selector: str,
+                            media_row: Optional[dict] = None, attempts: int = 3):
+    """Opens the usage-rights menu for media_id's card and clicks its
+    "Request creator approval..." item. Returns the (possibly re-found)
+    grid_item. Raises ExportError if it can't.
+
+    Built from a live run's own Playwright call log plus debug HTML:
+
+    1. PHYSICAL CLICKS KEPT MISSING. The log showed "element is not
+       stable", then "<div class=new-tabs-switch> from <div class=
+       set-sticky> intercepts pointer events", then "element was
+       detached". Playwright's actionability wait gave the virtualized
+       list time to recycle the card, and the sticky header sat over it.
+
+    1b. BUT A CLICK-ONLY DOM EVENT DOESN'T OPEN THE MENU. A later live
+       run clicked the correct, connected card with el.click() four times
+       per post; the menu never opened (the final error was the menu wait,
+       not "card detached", so the click genuinely landed). el.click() --
+       like dispatchEvent(new MouseEvent("click")) -- fires ONLY "click".
+       The proven-working original code used a real click, which fires
+       pointerdown, mousedown, pointerup, mouseup AND click; popover
+       triggers commonly listen on pointerdown/mousedown. So each attempt
+       now uses (a) Playwright's real click with force=True -- the full
+       trusted sequence, minus the actionability wait that caused the
+       recycling race -- and only if that didn't open it, (b) the full
+       pointer sequence dispatched directly to the element.
+
+    2. WHY THE CARD SAT UNDER THE STICKY HEADER. The card search scrolls
+       800px per step against a 720px viewport, so it overshoots: a card
+       is often detected while ABOVE the viewport, and Playwright then
+       scrolls it minimally to the nearest edge -- the top, under the
+       header. Centering it (block: "center") fixes that, and the middle
+       of the rendered window is also where virtuoso is least likely to
+       unmount it.
+
+    3. CLICK THE CARD ITSELF, NOT ITS WRAPPER. The real ancestor chain
+       is card -> div[cursor:pointer] -> div[aria-controls]. The
+       cursor:pointer div, sitting between them, most likely owns the
+       handler. A DOM click only bubbles UPWARD, so clicking the outer
+       aria-controls wrapper would never pass through it. Clicking the
+       innermost card bubbles through both -- matching what the
+       proven-working original code clicked.
+
+    4. RETRY IN PLACE. Retries re-query the card where it is (Playwright
+       locators are lazy). Only if it has genuinely left the page do we
+       reset to the top and search again -- resetting on every retry
+       meant re-scrolling thousands of cards per attempt, and that
+       scrolling is itself what churns the list.
+    """
+    last_error: Optional[Exception] = None
+    for attempt in range(attempts):
+        try:
+            card = grid_item.locator(USAGE_RIGHTS_CARD_SELECTOR).first
+            if card.count() == 0:
+                scroll_to_top(page, scroll_container_selector)
+                grid_item = _find_card_for_media(page, media_id, scroll_container_selector, media_row)
+                if grid_item is None:
+                    raise ExportError(f"card for media_id={media_id!r} left the page and couldn't be re-found")
+                card = grid_item.locator(USAGE_RIGHTS_CARD_SELECTOR).first
+
+            card.evaluate(_CENTER_CARD_JS, _DANGEROUS_BUTTON_PATTERN.pattern)
+
+            # Mechanism 1: Playwright's REAL click -- trusted pointerdown,
+            # mousedown, pointerup, mouseup, click, exactly what the
+            # proven-working original code sent -- but force=True skips the
+            # actionability wait that gave virtuoso time to recycle the card.
+            # The card is centered, so the sticky header isn't over it.
+            try:
+                card.click(force=True, timeout=MENU_CLICK_TIMEOUT_MS)
+            except Exception:
+                pass  # mechanism 2 below still gets its chance
+
+            page.wait_for_timeout(150)  # let React commit the open state
+            try:
+                expanded = card.evaluate(_MENU_EXPANDED_JS)
+            except Exception:
+                expanded = None
+
+            menu_item = page.get_by_role("menuitem").filter(has_text=USAGE_RIGHTS_MENU_TEXT).first
+            try:
+                already_open = menu_item.is_visible()
+            except Exception:
+                already_open = False
+
+            # Only fire mechanism 2 when the menu is confirmed NOT open. The
+            # menu-item check guards the case where the state read came back
+            # unknown (e.g. the node just re-rendered) -- firing a second
+            # click into an ALREADY-open menu would toggle it shut again.
+            if expanded != "true" and not already_open:
+                # Mechanism 2: the full pointer sequence dispatched straight
+                # to the element -- no coordinates, nothing can intercept.
+                card.evaluate(_POINTER_SEQUENCE_JS)
+
+            menu_item.wait_for(state="visible", timeout=MENU_OPEN_TIMEOUT_MS)
+            _safe_click(menu_item)
+            return grid_item
+        except Exception as e:
+            last_error = e
+            try:
+                page.keyboard.press("Escape")  # never stack a new open on a half-open menu
+            except Exception:
+                pass
+            if attempt < attempts - 1:
+                page.wait_for_timeout(150)
+    raise ExportError(
+        f"Card for media_id={media_id!r} was found, but its usage-rights menu didn't open "
+        f"after {attempts} attempts (real forced click, then full pointer sequence, each "
+        f"attempt). Not marked as 'no email' -- it will be retried on a future run. "
+        f"Original error: {last_error}"
+    ) from last_error
+
+
+def _find_card_for_media(page: Page, media_id: str, scroll_container_selector: str,
+                         media_row: Optional[dict] = None, skip_id_search: bool = False):
+    """Finds media_id's card: by id in the thumbnail URL first, then by
+    creator handle + displayed date for posts whose id never appears in
+    their thumbnail (some 32-char hex Instagram ids). The Drive upload
+    path already had this fallback; email scraping never did."""
+    grid_item = None
+    if not skip_id_search:
+        # skip_id_search: the caller already ran (and failed) this exact
+        # search -- repeating it would waste a full scroll pass per post.
+        grid_item, _ = _scroll_until_card_found(page, media_id, scroll_container_selector)
+    if grid_item is not None or not media_row:
+        return grid_item
+    fallback = card_selector_for_username_date(media_row.get("username", ""), media_row.get("created_at", ""))
+    if not fallback:
+        return None
+    scroll_to_top(page, scroll_container_selector)
+    grid_item, _ = _scroll_until_card_found(page, media_id, scroll_container_selector, card_selector=fallback)
+    if grid_item is not None:
+        try:
+            if page.locator(fallback).count() > 1:
+                return None  # same creator, same day -- ambiguous; never guess
+        except Exception:
+            pass
+    return grid_item
 
 
 def scrape_creator_emails(
@@ -1117,7 +1531,17 @@ def scrape_creator_emails(
 
     results: dict = {}
     empty_ids: set = set()
-    debug_snapshot_saved = False
+    # CONFIRMED REAL gap this replaces: a single shared boolean meant
+    # whichever failure type happened FIRST in a run "used up" the
+    # only debug snapshot for the entire run -- a live artifact showed
+    # only the "no email on file" case (correct, not a bug), while the
+    # separately ongoing "detached click" issue never got its own
+    # snapshot at all, because the empty-field case happened first and
+    # consumed the one slot. Tracked per DISTINCT failure category now
+    # (not per media_id -- still capped, just not collapsed to one
+    # total), so each kind of failure gets its own piece of evidence
+    # once per run.
+    debug_snapshots_saved: set = set()
     consecutive_failures = 0
     consecutive_empty_fields = 0
     # Materialized into a list (not left as a lazy iterable) specifically
@@ -1138,6 +1562,18 @@ def scrape_creator_emails(
     for media_id in target_ids:
         try:
             grid_item, diagnostics = _scroll_until_card_found(page, media_id, scroll_container_selector)
+            if grid_item is None and media_rows.get(media_id):
+                # Creator + date fallback for posts whose id never appears
+                # in their thumbnail URL. The Drive upload path had this;
+                # email scraping never did, so those posts could only ever
+                # fail with "couldn't locate" even while on the page.
+                # (_find_card_for_media resets scroll itself before searching.)
+                fallback_item = _find_card_for_media(
+                    page, media_id, scroll_container_selector, media_rows.get(media_id),
+                    skip_id_search=True,
+                )
+                if fallback_item is not None:
+                    grid_item = fallback_item
             if grid_item is None:
                 if _is_logged_out(page):
                     print(
@@ -1151,9 +1587,9 @@ def scrape_creator_emails(
                     break
                 print(f"scrape_creator_emails: couldn't locate media_id={media_id!r} on the page "
                       f"after scrolling through everything. Container state: {diagnostics}")
-                if debug_dir and not debug_snapshot_saved:
-                    _save_scrape_failure_snapshot(page, debug_dir, media_id)
-                    debug_snapshot_saved = True
+                if debug_dir and "couldnt_locate" not in debug_snapshots_saved:
+                    _save_scrape_failure_snapshot(page, debug_dir, media_id, category="couldnt_locate")
+                    debug_snapshots_saved.add("couldnt_locate")
 
                 # CONFIRMED REAL, root cause of a run where every id
                 # after roughly the second one failed identically for
@@ -1184,38 +1620,6 @@ def scrape_creator_emails(
                     )
                     break
                 continue
-
-            # CONFIRMED REAL from an actual saved HTML dump of the live
-            # page: the .usage-rights-request-card / -requested-card div
-            # is NOT the clickable element -- it's nested two levels
-            # INSIDE the element that actually carries the click
-            # handler, which is the ARIA disclosure wrapper:
-            #   <div class="pop-up-menu">
-            #     <div tabindex="-1" aria-controls="_r_c1_" aria-expanded="false">   <-- the real toggle
-            #       <div style="cursor: pointer;">
-            #         <div class="usage-rights-request-card">              <-- what we used to click
-            # Clicking the inner div could land on a child that React
-            # re-renders independently, which is very likely why clicks
-            # kept reporting "element detached" for the full 30s while
-            # the card itself resolved fine every time. The disclosure
-            # wrapper is the stable, interactive element -- same ARIA
-            # pattern already confirmed for the Campaign filter earlier
-            # in this project.
-            #
-            # Scoped to the wrapper CONTAINING a usage-rights card
-            # specifically -- confirmed real, genuine risk: each card
-            # has TWO sibling .pop-up-menu disclosures (the dump has 16
-            # across 8 cards, exactly 8 of each kind). The other one
-            # opens the dotted "..." menu -- the Upload to Google
-            # Drive / Attach to a campaign menu. Targeting the wrong
-            # one would open the Drive-upload menu instead of the
-            # usage-rights flow, which is exactly what the earlier
-            # stale debug screenshot appeared to show.
-            usage_rights_toggle_selector = (
-                ".pop-up-menu > [aria-controls]:has(.usage-rights-request-card), "
-                ".pop-up-menu > [aria-controls]:has(.usage-rights-requested-card)"
-            )
-            request_toggle = grid_item.locator(usage_rights_toggle_selector).first
 
             # CONFIRMED REAL, from live screenshots of BOTH menu types
             # plus the saved HTML: a post awaiting the brand's own
@@ -1272,47 +1676,16 @@ def scrape_creator_emails(
             # alone never wins. Re-running the full find-and-click
             # sequence gives it a genuinely fresh DOM reference each
             # time instead of hammering the same doomed one.
-            last_click_error = None
-            for click_attempt in range(3):
-                if click_attempt > 0:
-                    grid_item, _ = _scroll_until_card_found(page, media_id, scroll_container_selector)
-                    if grid_item is None:
-                        break  # genuinely gone now, not just detached -- let the outer handling deal with it
-                    request_toggle = grid_item.locator(usage_rights_toggle_selector).first
-                try:
-                    request_toggle.scroll_into_view_if_needed(timeout=4000)
-                    request_toggle.wait_for(state="visible", timeout=4000)
-                    # A brief settle pause before clicking -- confirmed
-                    # real: the detachment happens mid-click, meaning the
-                    # card was visible a moment ago but the list churned
-                    # again right as the click landed. This doesn't
-                    # eliminate the race, just gives a re-render that's
-                    # already in flight a chance to finish first.
-                    page.wait_for_timeout(300)
-                    _safe_click(request_toggle)
-                    last_click_error = None
-                    break
-                except Exception as e:
-                    last_click_error = e
-            if last_click_error is not None:
-                raise ExportError(
-                    f"Card for media_id={media_id!r} was found, but clicking its status "
-                    f"toggle kept failing (element detached / recycled by the virtualized "
-                    f"list) even after {click_attempt + 1} fresh attempts. "
-                    f"Original error: {last_click_error}"
-                ) from last_click_error
+            # Opens the menu via a centered DOM click on the card itself,
+            # retrying in place -- see _open_usage_rights_menu for the full
+            # evidence (sticky-header interception, 800px-vs-720px overshoot,
+            # and why the innermost card, not its wrapper, is clicked).
+            grid_item = _open_usage_rights_menu(
+                page, media_id, grid_item, scroll_container_selector,
+                media_row=media_rows.get(media_id),
+            )
             _pace(page)
 
-            # The popup's top item's TITLE differs by status ("Request
-            # usage-rights" vs "Usage-rights requested"), but its
-            # subtitle is identical either way -- matched on that
-            # instead, since it doesn't vary.
-            top_menu_item = page.get_by_role("menuitem").filter(
-                has_text="Request creator approval to use this content in your marketing"
-            ).first
-            top_menu_item.wait_for(state="visible", timeout=5000)
-            _safe_click(top_menu_item)
-            _pace(page)
 
             # Email tab is active by default, but click it explicitly in
             # case that ever changes.
@@ -1320,6 +1693,23 @@ def scrape_creator_emails(
             email_tab.wait_for(state="visible", timeout=5000)
             _safe_click(email_tab)
             _pace(page)
+
+            # Confirm the open modal is THIS post's before reading anything
+            # -- a click that landed on a shifted card would otherwise
+            # record another creator's email against this post. See
+            # modal_post_check for the confirmed-real evidence.
+            try:
+                modal_srcs = page.locator("[role=dialog] img").evaluate_all(
+                    "els => els.map(e => e.getAttribute('src') || '')"
+                )
+            except Exception:
+                modal_srcs = []
+            if modal_post_check(modal_srcs, media_id) == "mismatch":
+                raise ExportError(
+                    f"The open usage-rights modal belongs to a DIFFERENT post than "
+                    f"media_id={media_id!r} -- refusing to record its email against "
+                    f"the wrong creator."
+                )
 
             email_input = page.get_by_label(re.compile(r"Creator email address", re.I))
             email_input.wait_for(state="visible", timeout=5000)
@@ -1345,9 +1735,9 @@ def scrape_creator_emails(
                 # one-time debug snapshot (first occurrence only) for
                 # genuine diagnosis if this pattern ever turns out to
                 # be wrong.
-                if debug_dir and not debug_snapshot_saved:
-                    _save_scrape_failure_snapshot(page, debug_dir, media_id)
-                    debug_snapshot_saved = True
+                if debug_dir and "empty_field" not in debug_snapshots_saved:
+                    _save_scrape_failure_snapshot(page, debug_dir, media_id, category="empty_field")
+                    debug_snapshots_saved.add("empty_field")
                 empty_field_count += 1
                 empty_ids.add(media_id)
                 consecutive_empty_fields += 1
@@ -1363,9 +1753,10 @@ def scrape_creator_emails(
 
         except Exception as e:
             print(f"scrape_creator_emails: couldn't get email for media_id={media_id!r}: {e}")
-            if debug_dir and not debug_snapshot_saved:
-                _save_scrape_failure_snapshot(page, debug_dir, media_id)
-                debug_snapshot_saved = True
+            exception_category = f"exception:{type(e).__name__}"
+            if debug_dir and exception_category not in debug_snapshots_saved:
+                _save_scrape_failure_snapshot(page, debug_dir, media_id, category=exception_category)
+                debug_snapshots_saved.add(exception_category)
 
             # REMOVED a scroll_to_top() reset that used to be here --
             # confirmed real, harmful over-reach: a live run showed
