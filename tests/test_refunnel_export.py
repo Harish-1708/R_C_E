@@ -2131,3 +2131,93 @@ def test_sabotage_shared_flag_would_hide_a_different_failure_type(tmp_path):
     assert len(saved) == 2
     assert any("empty_field" in n for n in saved)
     assert any("exception_TimeoutError" in n for n in saved)
+
+
+# ---------- minimizing the found-to-click window (confirmed real: card recycled between them) ----------
+
+class _CallTrackingToggle:
+    """Records every method call made on it -- used to prove the click
+    path no longer does unnecessary work between "card found" and
+    "click attempted"."""
+
+    def __init__(self, calls, should_raise=False):
+        self._calls = calls
+        self._should_raise = should_raise
+
+    @property
+    def first(self):
+        return self
+
+    def scroll_into_view_if_needed(self, timeout=None):
+        self._calls.append("scroll_into_view_if_needed")
+
+    def wait_for(self, state=None, timeout=None):
+        self._calls.append("wait_for")
+
+    def inner_text(self, timeout=None):
+        return "Request usage-rights"
+
+    def click(self, timeout=None):
+        self._calls.append("click")
+        if self._should_raise:
+            raise RuntimeError("simulated click failure")
+
+
+class _TrackedClickPage(_MinimalScrapePage):
+    def __init__(self, should_raise=False):
+        super().__init__()
+        self.calls: list = []
+        self._should_raise = should_raise
+
+    def locator(self, selector):
+        toggle = _CallTrackingToggle(self.calls, should_raise=self._should_raise)
+
+        class _Row:
+            def hover(_s):
+                pass
+
+            def locator(_s, _sel):
+                return toggle
+
+        class _Found:
+            def count(_s):
+                return 1
+
+            @property
+            def first(_s):
+                return _Row()
+        return _Found()
+
+
+def test_click_goes_straight_from_found_to_attempted_no_extra_waits(monkeypatch):
+    # confirmed real from an actual debug snapshot: at the moment a
+    # click gave up, the target media_id was completely ABSENT from
+    # the page's own HTML -- found moments earlier, then recycled away
+    # before the click landed. The manual scroll_into_view_if_needed +
+    # wait_for(visible) + a 300ms pause each added to that exact
+    # window; removed so nothing but Playwright's own click-internal
+    # actionability wait sits between "found" and "clicked".
+    import refunnel_export as re_module
+    monkeypatch.setattr(re_module, "_is_logged_out", lambda page: False)
+    monkeypatch.setattr(re_module, "_pace", lambda *a, **kw: None)
+
+    page = _TrackedClickPage(should_raise=False)
+    media_rows = {"tk_1": {}}
+    re_module.scrape_creator_emails(page, media_rows=media_rows, media_ids=["tk_1"])
+
+    assert page.calls == ["click"]  # nothing else recorded before it
+
+
+def test_sabotage_reintroducing_the_manual_wait_would_be_caught(monkeypatch):
+    import refunnel_export as re_module
+    monkeypatch.setattr(re_module, "_is_logged_out", lambda page: False)
+    monkeypatch.setattr(re_module, "_pace", lambda *a, **kw: None)
+
+    page = _TrackedClickPage(should_raise=False)
+    re_module.scrape_creator_emails(page, media_rows={"tk_1": {}}, media_ids=["tk_1"])
+
+    with pytest.raises(AssertionError):
+        # wrong -- that's the old sequence that widened the exact
+        # window the card was observed getting recycled away in
+        assert page.calls == ["scroll_into_view_if_needed", "wait_for", "click"]
+    assert page.calls == ["click"]
