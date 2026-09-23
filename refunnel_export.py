@@ -499,7 +499,8 @@ CAMPAIGN_APPLY_BUTTON_SELECTOR = "button:has-text('Apply Changes')"
 CLEAR_ALL_FILTERS_SELECTOR = "text=Clear"
 
 
-def list_available_campaigns(page: Page, debug_dir: Optional[str] = None, timeout_ms: int = 15000) -> list:
+def list_available_campaigns(page: Page, debug_dir: Optional[str] = None, timeout_ms: int = 15000,
+                             max_scroll_rounds: int = 40) -> list:
     """Reads the full, current list of campaign names straight from the
     Campaign filter's own checklist -- confirmed real requirement: with
     22 campaigns today and more added over time, a hardcoded list would
@@ -551,12 +552,46 @@ def list_available_campaigns(page: Page, debug_dir: Optional[str] = None, timeou
         # captures a diagnostic either way (timed out waiting, or found
         # something that just yielded no usable text) -- both mean the
         # selector doesn't match what's really on the page.
-    count = rows.count()
-    names = []
-    for i in range(count):
-        text = rows.nth(i).inner_text().strip()
-        if text:
-            names.append(text)
+    # Scroll WITHIN the dropdown until no new campaigns appear --
+    # confirmed real: Swoveralls has 22+ campaigns but a single read
+    # found only the first 10, because the list lazy-loads more as it
+    # is scrolled. Scrolling the LAST currently-rendered row into view
+    # forces whichever ancestor actually scrolls to load the next batch,
+    # without having to guess that container's selector.
+    #
+    # Names are collected in first-seen order and de-duplicated, since
+    # the same rows stay rendered across rounds. Stops after two rounds
+    # in a row with nothing new -- one quiet round can just be the list
+    # still rendering.
+    names: list = []
+    seen: set = set()
+    quiet_rounds = 0
+    for _ in range(max_scroll_rounds):
+        count = rows.count()
+        before = len(names)
+        for i in range(count):
+            try:
+                text = rows.nth(i).inner_text().strip()
+            except Exception:
+                continue  # a row recycled mid-read; the next round catches it
+            if text and text not in seen:
+                seen.add(text)
+                names.append(text)
+
+        if len(names) == before:
+            quiet_rounds += 1
+            if quiet_rounds >= 2:
+                break
+        else:
+            quiet_rounds = 0
+
+        if count == 0:
+            break
+        try:
+            rows.nth(count - 1).scroll_into_view_if_needed(timeout=2000)
+        except Exception:
+            break  # nothing further to scroll to
+        page.wait_for_timeout(400)  # let the next batch render
 
     if not names and debug_dir:
         # Captured BEFORE the Escape below, while the panel (if it
@@ -949,7 +984,14 @@ def _format_progress_line(attempted: int, total: int, found: int, empty_fields: 
             f"{other_failed} other error(s)")
 
 
-DRIVE_CARD_MENU_BUTTON_SELECTOR = "[aria-label*='more' i], [aria-label*='options' i], button:has-text('⋯'), button:has-text('...')"
+# CONFIRMED REAL from a saved HTML dump of the live page, replacing an
+# earlier aria-label guess that matched ZERO elements (which is exactly
+# why a live run's Drive menu click timed out every time). The dotted
+# "..." menu is the ARIA disclosure wrapper containing the
+# dottedMenuIcon image -- the SIBLING of the usage-rights toggle inside
+# each card's footer. Verified against the real DOM: matches exactly one
+# element per card, and never the usage-rights toggle.
+DRIVE_CARD_MENU_BUTTON_SELECTOR = ".pop-up-menu > [aria-controls]:has(img[src*='dottedMenuIcon'])"
 DRIVE_UPLOAD_MENU_ITEM_SELECTOR = "text=Upload to Google Drive"
 DRIVE_MODAL_ALL_FOLDERS_TAB_SELECTOR = "button:has-text('All folders')"
 DRIVE_MODAL_SAVE_BUTTON_SELECTOR = "button:has-text('Save to Drive')"
@@ -995,6 +1037,13 @@ def trigger_native_drive_upload(
     card itself couldn't be located (same meaning as everywhere else
     in this file). Raises on any other failure in the flow.
     """
+    # Reset BEFORE searching -- confirmed real, the same bug class as
+    # email scraping: _scroll_until_card_found only scrolls FORWARD, and
+    # this function never reset, so every approved video sitting ABOVE
+    # wherever the previous one left the page was unreachable. A live run
+    # reported "couldn't locate" for 4 of 5 approved videos. Resetting
+    # makes each search independent of processing order.
+    scroll_to_top(page, scroll_container_selector)
     grid_item, _ = _scroll_until_card_found(page, media_id, scroll_container_selector)
     if grid_item is None:
         return False
