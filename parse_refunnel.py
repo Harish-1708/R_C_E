@@ -69,6 +69,13 @@ MASTER_COLUMNS = [
     "hashtags",
     "mentions",
     "collections",
+    # Placed beside "collections" deliberately -- both are grouping
+    # labels. Filled by sync_campaigns.py, NOT by the CSV (the export
+    # has no campaign field), and freeze-once-set: every sync_tab
+    # call writing this schema passes preserve_columns=["campaigns"]
+    # so the daily rewrite carries the sheet value forward instead of
+    # blanking it.
+    "campaigns",
     "created_at",
     "updated_at",
 ]
@@ -76,6 +83,10 @@ MASTER_COLUMNS = [
 # Usage-rights tabs reuse the master schema (same columns) so a row looks
 # identical whichever tab it's in -- just filtered by rights_status.
 USAGE_RIGHTS_COLUMNS = MASTER_COLUMNS
+
+# Columns in the Master schema whose values live in the sheet, not
+# the CSV export -- carried forward on every rewrite.
+SHEET_OWNED_COLUMNS = ["campaigns"]
 
 # Trimmed columns for the Human Review tab -- just enough to identify
 # and evaluate a post at a glance. The "Reviewed" (or whatever you name
