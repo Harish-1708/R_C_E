@@ -677,3 +677,98 @@ def test_sabotage_per_row_api_calls_would_be_caught():
     with pytest.raises(AssertionError):
         assert ws.batch_update_calls == 50  # wrong -- would mean no batching happened
     assert ws.batch_update_calls == 1  # confirms actual correct, quota-safe behavior
+
+
+# ---------- silent-no-op column bug (confirmed real: 59 campaign posts -> 0 written) ----------
+
+def test_update_cells_by_id_creates_a_missing_column_when_opted_in():
+    # confirmed real: a live run found 59 posts across 5 campaigns and
+    # wrote ZERO, because the "campaigns" column didn't exist and this
+    # method silently returned 0
+    ws = FakeWorksheet(rows=[["id", "platform"], ["tk_1", "TIKTOK"], ["tk_2", "TIKTOK"]])
+    client = GspreadSheetsClient(ws)
+    written = client.update_cells_by_id({"tk_1": "Campaign A", "tk_2": "Campaign B"},
+                                        "campaigns", create_if_missing=True)
+    assert written == 2
+    assert ws.rows[0][-1] == "campaigns"
+    idx = ws.rows[0].index("campaigns")
+    assert ws.rows[1][idx] == "Campaign A"
+    assert ws.rows[2][idx] == "Campaign B"
+
+
+def test_update_single_cell_creates_a_missing_column_when_opted_in():
+    # confirmed real risk: without this, "drive_uploaded_at" could never
+    # be written on a sheet lacking it -- every upload stays unmarked and
+    # is re-uploaded as a DUPLICATE on every run
+    ws = FakeWorksheet(rows=[["id", "platform"], ["tk_1", "TIKTOK"]])
+    client = GspreadSheetsClient(ws)
+    ok = client.update_single_cell("tk_1", "drive_uploaded_at", "2026-09-23T00:00:00Z",
+                                   create_if_missing=True)
+    assert ok is True
+    idx = ws.rows[0].index("drive_uploaded_at")
+    assert ws.rows[1][idx] == "2026-09-23T00:00:00Z"
+
+
+def test_default_does_not_invent_a_manual_column_but_warns(capsys):
+    # "Reviewed" is a MANUAL column the user adds themselves -- the
+    # default must NOT create it, but must also no longer stay silent
+    ws = FakeWorksheet(rows=[["id", "platform"], ["tk_1", "TIKTOK"]])
+    client = GspreadSheetsClient(ws)
+    written = client.update_cells_by_id({"tk_1": "Yes"}, "Reviewed")
+    assert written == 0
+    assert "Reviewed" not in ws.rows[0]
+    assert "WARNING" in capsys.readouterr().out
+
+
+def test_sabotage_silently_dropping_campaign_writes_would_be_caught():
+    ws = FakeWorksheet(rows=[["id", "platform"], ["tk_1", "TIKTOK"]])
+    client = GspreadSheetsClient(ws)
+    written = client.update_cells_by_id({"tk_1": "Campaign A"}, "campaigns", create_if_missing=True)
+    with pytest.raises(AssertionError):
+        assert written == 0  # wrong -- that's exactly the live bug
+    assert written == 1
+
+
+# ---------- preserve_columns: proper placement AND freeze-once-set survive a rewrite ----------
+
+def test_preserved_column_keeps_its_sheet_value_across_a_full_rewrite():
+    from sheets_sync import sync_tab
+    cols = ["id", "collections", "campaigns", "created_at"]
+    ws = FakeSheetsClient([cols, ["tk_1", "", "Campaign A", "2026-01-01"]])
+    client = ws
+    # the CSV export never contains campaigns -> target row has it blank
+    sync_tab(client, cols, {"tk_1": {"id": "tk_1", "created_at": "2026-01-01"}},
+             never_delete=True, preserve_columns=["campaigns"])
+    idx = ws.rows[0].index("campaigns")
+    assert ws.rows[1][idx] == "Campaign A"  # NOT wiped by the blank CSV value
+
+
+def test_preserved_column_stays_in_its_proper_position():
+    from sheets_sync import sync_tab
+    cols = ["id", "collections", "campaigns", "created_at"]
+    ws = FakeSheetsClient([cols, ["tk_1", "", "Campaign A", "2026-01-01"]])
+    client = ws
+    sync_tab(client, cols, {"tk_1": {"id": "tk_1"}}, never_delete=True, preserve_columns=["campaigns"])
+    # beside collections -- NOT shunted to the end like an extra column
+    assert ws.rows[0].index("campaigns") == ws.rows[0].index("collections") + 1
+
+
+def test_preserved_column_is_filled_from_target_when_sheet_is_blank():
+    from sheets_sync import sync_tab
+    cols = ["id", "campaigns"]
+    ws = FakeSheetsClient([cols, ["tk_1", ""]])
+    client = ws
+    sync_tab(client, cols, {"tk_1": {"id": "tk_1", "campaigns": "Campaign B"}},
+             never_delete=True, preserve_columns=["campaigns"])
+    assert ws.rows[1][ws.rows[0].index("campaigns")] == "Campaign B"
+
+
+def test_sabotage_rewrite_wiping_campaigns_would_be_caught():
+    from sheets_sync import sync_tab
+    cols = ["id", "campaigns"]
+    ws = FakeSheetsClient([cols, ["tk_1", "Campaign A"]])
+    client = ws
+    sync_tab(client, cols, {"tk_1": {"id": "tk_1"}}, never_delete=True, preserve_columns=["campaigns"])
+    with pytest.raises(AssertionError):
+        assert ws.rows[1][1] == ""  # wrong -- would mean the daily sync wiped real campaign data
+    assert ws.rows[1][1] == "Campaign A"
