@@ -1303,6 +1303,31 @@ _MENU_EXPANDED_JS = """(el) => {
     return w ? w.getAttribute('aria-expanded') : null;
 }"""
 
+# Diagnostic only, never used to decide anything -- read once, right before
+# giving up, so a FAILURE carries hard numbers instead of a bare timeout.
+# CONFIRMED REAL pattern this targets: a user's own manual audit of 6
+# failures across a 25-post run found EVERY SINGLE ONE was the 4th
+# (rightmost) card of a 4-column grid row, no exceptions -- not
+# scroll depth, not dataset size, a specific, consistent column. This
+# reads the toggle's actual on-screen geometry and readiness at the
+# exact moment we gave up, so the next failure tells us directly
+# whether it's a sizing/positioning problem (zero width, off-screen,
+# clipped by a container edge) or something else entirely, rather than
+# guessing again.
+_CARD_GEOMETRY_JS = """(el) => {
+    const r = el.getBoundingClientRect();
+    return {
+        connected: el.isConnected,
+        width: Math.round(r.width),
+        height: Math.round(r.height),
+        top: Math.round(r.top),
+        left: Math.round(r.left),
+        right: Math.round(r.right),
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight,
+    };
+}"""
+
 
 def _open_usage_rights_menu(page: Page, media_id: str, grid_item, scroll_container_selector: str,
                             media_row: Optional[dict] = None, attempts: int = 3):
@@ -1413,11 +1438,25 @@ def _open_usage_rights_menu(page: Page, media_id: str, grid_item, scroll_contain
                 pass
             if attempt < attempts - 1:
                 page.wait_for_timeout(150)
+
+    # Diagnostic-only: read the toggle's actual geometry right before
+    # giving up, so the failure message itself carries hard numbers
+    # instead of forcing another guess. Never affects control flow --
+    # if even this read fails (the card is now genuinely gone), that's
+    # itself informative and reported plainly.
+    geometry_note = ""
+    try:
+        card = grid_item.locator(USAGE_RIGHTS_CARD_SELECTOR).first
+        geometry = card.evaluate(_CARD_GEOMETRY_JS, timeout=EVALUATE_TIMEOUT_MS)
+        geometry_note = f" Toggle geometry at time of failure: {geometry}."
+    except Exception as geometry_error:
+        geometry_note = f" Couldn't read toggle geometry (likely genuinely gone by then): {geometry_error}."
+
     raise ExportError(
         f"Card for media_id={media_id!r} was found, but its usage-rights menu didn't open "
         f"after {attempts} attempts (real forced click, then full pointer sequence, each "
         f"attempt). Not marked as 'no email' -- it will be retried on a future run. "
-        f"Original error: {last_error}"
+        f"Original error: {last_error}.{geometry_note}"
     ) from last_error
 
 
