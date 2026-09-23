@@ -1250,35 +1250,45 @@ EVALUATE_TIMEOUT_MS = 4000
 # Runs INSIDE the page, in one synchronous turn, on the resolved card.
 # Every step happens before react-virtuoso can process a scroll event
 # and recycle the node -- so there is no gap for the card to vanish in.
-# Runs the send-button safety net and confirms the element is genuinely
-# connected, in one turn. It deliberately does NOT click: a live run
-# proved a synthetic click reaches the correct, connected card and
-# still doesn't open the menu.
+# Confirms the element is genuinely connected, runs the send-button
+# safety net, and scrolls it into view -- the MINIMUM amount needed,
+# not centered. It deliberately does NOT click: a live run proved a
+# synthetic click reaches the correct, connected card and still
+# doesn't open the menu.
 #
-# CONFIRMED REAL, and a genuine reversal of an earlier assumption: this
-# used to ALSO center the card first (scrollIntoView block:"center"),
-# reasoning that it would keep the sticky header off the click point.
-# A user's own screenshot showed a failing card sitting only 4th from
-# the very top of the feed -- almost no scrolling needed to reach it at
-# all -- yet the failure snapshot showed a COMPLETELY different set of
-# cards on screen, many rows further down. That's centering itself:
-# forcing a near-top card to the MIDDLE of the viewport can require
-# scrolling well past where it actually is, and doing that inside a
-# virtualized list is exactly the kind of scroll that churns it.
+# CONFIRMED REAL, and a two-part correction of an earlier assumption.
+# This used to scroll with block:"center", reasoning it would keep the
+# sticky header off the click point -- but a user's own screenshot
+# showed a near-top card's failure snapshot landing many rows further
+# down the list than it started, consistent with centering forcing it
+# to the screen's MIDDLE and over-scrolling past where it actually was.
 #
-# It's also no longer needed for its original purpose. Both click
-# mechanisms here bypass hit-testing entirely: locator.click(force=True)
-# explicitly skips the "receives events" check the sticky header used
-# to fail (and, per Playwright's own docs, also works on an element
-# that's outside the viewport), and the pointer-event sequence is
-# dispatched straight to the element object via JS, never through
-# screen coordinates. Neither one needs the element visually
-# positioned anywhere in particular.
+# That led to removing the scroll ENTIRELY, on the theory that
+# force=True and the pointer sequence below bypass hit-testing and so
+# don't need the element positioned anywhere in particular. That part
+# was wrong: force=True skips actionability checks like the sticky
+# header's hit-test, but does NOT make an off-screen element clickable
+# -- Playwright still needs real on-screen coordinates to click at, and
+# an element beyond the viewport has none. Confirmed directly: a user's
+# own run captured the geometry of 5 separate failing cards the moment
+# each was first found, before any click was attempted. All 5 had a
+# normal, non-zero size (185x46) and a horizontal position nowhere near
+# either edge (left 379, right 564 of a 1280px-wide viewport) -- but
+# EVERY one had top > 720, the viewport's own height. Not a column
+# problem, not a sizing problem: the card just wasn't scrolled into
+# view yet.
+#
+# block:"nearest" is the middle ground -- it scrolls only enough to
+# bring the element into view (nothing at all if it's already there),
+# never forcing it to the center, so it can't reproduce the earlier
+# over-scroll while still fixing this.
 _VERIFY_CARD_JS = """(el, dangerous) => {
     if (!el.isConnected) { throw new Error("card detached before click"); }
     if (new RegExp(dangerous, "i").test(el.innerText || "")) {
         throw new Error("refusing to click a send/submit-like element");
     }
+    el.scrollIntoView({block: "nearest", inline: "nearest"});
+    if (!el.isConnected) { throw new Error("card detached after scrolling into view"); }
 }"""
 
 # Second mechanism: the FULL pointer/mouse sequence dispatched straight to
@@ -1360,18 +1370,19 @@ def _open_usage_rights_menu(page: Page, media_id: str, grid_item, scroll_contain
        recycling race -- and only if that didn't open it, (b) the full
        pointer sequence dispatched directly to the element.
 
-    2. WHY THIS ISN'T FIXED BY SCROLLING EITHER. It's tempting to think
-       the sticky header meant a card just needed scrolling somewhere
-       safer -- centered, say. That was tried. A user's own screenshot
-       showed a failing card sitting 4th from the top of the whole feed
-       -- almost no scrolling needed -- yet its failure snapshot showed
-       a completely different, much-further-down set of cards on
-       screen. Forcing a near-top card to the MIDDLE of the viewport
-       can require scrolling well past where it actually is, and that
-       scroll is itself what churns a virtualized list. Removed
-       entirely rather than tuned: force=True and the pointer sequence
-       below don't need the element positioned anywhere in particular
-       to begin with (see _VERIFY_CARD_JS).
+    2. SCROLL THE MINIMUM AMOUNT, NEVER CENTER. Centering (block:
+       "center") over-scrolled near-top cards well past where they
+       actually were -- a user's own screenshot proved it directly.
+       Removing the scroll entirely fixed that, but broke something
+       else: force=True skips hit-testing, not the requirement that an
+       element have real on-screen coordinates to click at all. Direct
+       geometry captured from 5 separate live failures, each read the
+       moment its card was first found, confirmed exactly that -- a
+       normal, correctly-sized element (185x46, nowhere near a
+       horizontal edge) whose top sat below the viewport's own height
+       every single time. block:"nearest" (see _VERIFY_CARD_JS) is the
+       middle ground: scrolls only enough to bring the element into
+       view, nothing if it's already there, never forcing it to center.
 
     3. CLICK THE CARD ITSELF, NOT ITS WRAPPER. The real ancestor chain
        is card -> div[cursor:pointer] -> div[aria-controls]. The
