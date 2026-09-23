@@ -965,17 +965,26 @@ def _is_logged_out(page: Page) -> bool:
         return False
 
 
-def _save_scrape_failure_snapshot(page: Page, debug_dir: str, media_id: str) -> None:
-    """One-time diagnostic capture for scrape_creator_emails -- a
-    screenshot and the raw page HTML, saved once (not per-failure) so
-    we can actually see what's on screen when the scroll-search gives
-    up, instead of guessing from log lines alone."""
+def _save_scrape_failure_snapshot(page: Page, debug_dir: str, media_id: str, category: str = "unknown") -> None:
+    """Diagnostic capture for scrape_creator_emails -- a screenshot and
+    the raw page HTML.
+
+    category names WHICH kind of failure this is (e.g. "couldnt_locate",
+    "empty_field", "exception:TimeoutError") and is folded into the
+    filename, so each distinct failure type gets its own capture once
+    per run -- not one shared snapshot for the whole run. CONFIRMED
+    REAL gap this fixes: a live artifact only ever showed the "no email
+    on file" case (correct, not a bug), because it happened to occur
+    first and used up the single shared slot -- a genuinely different,
+    ongoing issue (detached clicks) never got its own evidence at all.
+    """
     try:
         out_dir = Path(debug_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        page.screenshot(path=str(out_dir / f"scrape_failure_{media_id}.png"), full_page=True)
-        (out_dir / f"scrape_failure_{media_id}.html").write_text(page.content(), encoding="utf-8")
-        print(f"Saved scrape-failure debug snapshot for media_id={media_id!r} to {out_dir}")
+        safe_category = re.sub(r"[^A-Za-z0-9_]+", "_", category)
+        page.screenshot(path=str(out_dir / f"scrape_failure_{safe_category}_{media_id}.png"), full_page=True)
+        (out_dir / f"scrape_failure_{safe_category}_{media_id}.html").write_text(page.content(), encoding="utf-8")
+        print(f"Saved scrape-failure debug snapshot ({category}) for media_id={media_id!r} to {out_dir}")
     except Exception as e:
         print(f"Couldn't save scrape-failure debug snapshot: {e}")
 
@@ -1303,7 +1312,17 @@ def scrape_creator_emails(
 
     results: dict = {}
     empty_ids: set = set()
-    debug_snapshot_saved = False
+    # CONFIRMED REAL gap this replaces: a single shared boolean meant
+    # whichever failure type happened FIRST in a run "used up" the
+    # only debug snapshot for the entire run -- a live artifact showed
+    # only the "no email on file" case (correct, not a bug), while the
+    # separately ongoing "detached click" issue never got its own
+    # snapshot at all, because the empty-field case happened first and
+    # consumed the one slot. Tracked per DISTINCT failure category now
+    # (not per media_id -- still capped, just not collapsed to one
+    # total), so each kind of failure gets its own piece of evidence
+    # once per run.
+    debug_snapshots_saved: set = set()
     consecutive_failures = 0
     consecutive_empty_fields = 0
     # Materialized into a list (not left as a lazy iterable) specifically
@@ -1337,9 +1356,9 @@ def scrape_creator_emails(
                     break
                 print(f"scrape_creator_emails: couldn't locate media_id={media_id!r} on the page "
                       f"after scrolling through everything. Container state: {diagnostics}")
-                if debug_dir and not debug_snapshot_saved:
-                    _save_scrape_failure_snapshot(page, debug_dir, media_id)
-                    debug_snapshot_saved = True
+                if debug_dir and "couldnt_locate" not in debug_snapshots_saved:
+                    _save_scrape_failure_snapshot(page, debug_dir, media_id, category="couldnt_locate")
+                    debug_snapshots_saved.add("couldnt_locate")
 
                 # CONFIRMED REAL, root cause of a run where every id
                 # after roughly the second one failed identically for
@@ -1557,9 +1576,9 @@ def scrape_creator_emails(
                 # one-time debug snapshot (first occurrence only) for
                 # genuine diagnosis if this pattern ever turns out to
                 # be wrong.
-                if debug_dir and not debug_snapshot_saved:
-                    _save_scrape_failure_snapshot(page, debug_dir, media_id)
-                    debug_snapshot_saved = True
+                if debug_dir and "empty_field" not in debug_snapshots_saved:
+                    _save_scrape_failure_snapshot(page, debug_dir, media_id, category="empty_field")
+                    debug_snapshots_saved.add("empty_field")
                 empty_field_count += 1
                 empty_ids.add(media_id)
                 consecutive_empty_fields += 1
@@ -1575,9 +1594,10 @@ def scrape_creator_emails(
 
         except Exception as e:
             print(f"scrape_creator_emails: couldn't get email for media_id={media_id!r}: {e}")
-            if debug_dir and not debug_snapshot_saved:
-                _save_scrape_failure_snapshot(page, debug_dir, media_id)
-                debug_snapshot_saved = True
+            exception_category = f"exception:{type(e).__name__}"
+            if debug_dir and exception_category not in debug_snapshots_saved:
+                _save_scrape_failure_snapshot(page, debug_dir, media_id, category=exception_category)
+                debug_snapshots_saved.add(exception_category)
 
             # REMOVED a scroll_to_top() reset that used to be here --
             # confirmed real, harmful over-reach: a live run showed
