@@ -94,7 +94,18 @@ _DANGEROUS_BUTTON_PATTERN = re.compile(r"send\s*request", re.I)
 # it faster/slower -- see README "Pacing and its time cost" for what
 # changing them does to total run time.
 EMAIL_SCRAPE_ACTION_PACE_MS = (400, 900)      # between clicks within one post's flow
-EMAIL_SCRAPE_ITEM_PACE_MS = (600, 1200)       # between finishing one post and starting the next
+# Between finishing one post and starting the next. CONFIRMED REAL, new
+# pattern this addresses: a live 25-post run showed post 1 succeeding
+# completely (menu, modal, email field all read), then EVERY post after
+# it failing at the very first step -- centering the card. Not random
+# flakiness; "works once, then stops." The one thing that genuinely
+# changes after a successful post is that a modal (with its own overlay)
+# was open and then closed via Escape -- the grid behind it plausibly
+# needs to re-settle its layout once that overlay goes away, and
+# 600-1200ms may not have been enough room for that. Widened as a
+# targeted, evidenced adjustment -- not a guess at an arbitrary bigger
+# number -- specifically for the transition this pattern points at.
+EMAIL_SCRAPE_ITEM_PACE_MS = (1500, 2500)
 SCROLL_SEARCH_PACE_MS = (200, 400)            # between scroll-search steps in _scroll_until_card_found
 
 
@@ -1228,7 +1239,13 @@ MENU_OPEN_TIMEOUT_MS = 2500
 # and every .evaluate() call was silently allowed to wait the full 30s
 # hoping it would reappear, instead of failing fast so the retry loop
 # could actually retry within a sane total budget.
-EVALUATE_TIMEOUT_MS = 2000
+# 2000 was tuned to escape the OLD problem (an unbounded 30s wait) --
+# not tested against whether it's long enough for a genuinely-present
+# element that's just momentarily settling. Loosened to 4000: still
+# nowhere near the 30s that caused the original "never ends" complaint
+# (3 attempts x 4s is a worst case of ~12s just for this piece, not
+# 90s), but gives real room for the grid to catch up.
+EVALUATE_TIMEOUT_MS = 4000
 
 # Runs INSIDE the page, in one synchronous turn, on the resolved card.
 # Every step happens before react-virtuoso can process a scroll event
