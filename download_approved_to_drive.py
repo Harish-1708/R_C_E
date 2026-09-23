@@ -145,7 +145,12 @@ def process_one_brand(
     p, browser, context = refunnel_auth.load_or_refresh_session(email=email)
     try:
         page = context.new_page()
-        refunnel_export.goto_social_listening_for_workspace(page, refunnel_workspace_name, known_workspace_names)
+        # Approved-only grid, confirmed real via the page URL -- far fewer
+        # cards to search, and every card is an Approved card, so the
+        # "Usage rights approved" toggle is always the one present.
+        refunnel_export.goto_social_listening_for_workspace(
+            page, refunnel_workspace_name, known_workspace_names, usage_rights="GRANTED"
+        )
 
         uploaded, not_yet_confirmed, failed = 0, 0, 0
         for media_id in target_ids:
@@ -154,7 +159,8 @@ def process_one_brand(
             try:
                 trigger_ts = _now_iso()
                 triggered = refunnel_export.trigger_native_drive_upload(
-                    page, media_id, drive_folder_name, debug_dir=debug_dir
+                    page, media_id, drive_folder_name, debug_dir=debug_dir,
+                    username=username, created_at=row.get("created_at", ""),
                 )
                 if not triggered:
                     print(f"{brand}: couldn't locate media_id={media_id!r} on the page -- "
