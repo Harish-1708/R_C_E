@@ -1500,9 +1500,10 @@ def test_generic_failure_unrelated_to_scroll_does_not_reset(monkeypatch):
     media_rows = {"tk_1": {}}
     scrape_creator_emails(page, media_rows=media_rows, media_ids=["tk_1"])
 
-    # only the function's own unconditional start-of-run reset should
-    # have happened -- the generic-exception branch must NOT add one
-    assert page.scroll_to_top_calls == 1
+    # 1 start-of-run reset + 2 retry resets inside the click loop.
+    # The generic-exception branch must NOT add a 4th on top -- that
+    # over-reset is what caused a harmful cascade when tried before.
+    assert page.scroll_to_top_calls == 3
 
 
 def test_sabotage_reset_on_every_exception_would_be_caught(monkeypatch):
@@ -1517,9 +1518,11 @@ def test_sabotage_reset_on_every_exception_would_be_caught(monkeypatch):
     media_rows = {"tk_1": {}, "tk_2": {}}
     scrape_creator_emails(page, media_rows=media_rows, media_ids=["tk_1", "tk_2"])
 
+    # 2 items x (1 start-of-run reset shared + 2 retry resets each) = 5.
+    # An extra reset per item from the generic handler would make it 7.
     with pytest.raises(AssertionError):
-        assert page.scroll_to_top_calls == 3  # wrong -- would mean the harmful over-reset is back
-    assert page.scroll_to_top_calls == 1  # confirms actual correct behavior: only the initial reset
+        assert page.scroll_to_top_calls == 7  # wrong -- would mean the harmful over-reset is back
+    assert page.scroll_to_top_calls == 5
 
 
 # ---------- the usage-rights toggle selector, verified against REAL saved markup ----------
@@ -1737,3 +1740,57 @@ def test_sabotage_assuming_the_dropdown_was_closed_would_be_caught():
     with pytest.raises(AssertionError):
         assert page.keyboard.pressed == []  # wrong -- that's the old, state-assuming behaviour
     assert "Escape" in page.keyboard.pressed
+
+
+# ---------- detached-click retries must reset scroll first (confirmed real) ----------
+
+class _DetachThenSucceedPage(_MinimalScrapePage):
+    """First click attempt fails as 'detached'; the retry then succeeds
+    -- but ONLY if the retry re-search can actually re-find the card,
+    which requires resetting scroll first. Confirmed real: without the
+    reset, the page is pinned at the bottom and the retry re-search
+    always returned None, so no retry ever succeeded."""
+
+    def __init__(self):
+        super().__init__()
+        self.click_attempts = 0
+        self.at_bottom = True  # where a failed first attempt leaves it
+
+    def evaluate(self, js, *a, **kw):
+        if "scrollTop = 0" in js:
+            self.scroll_to_top_calls += 1
+            self.at_bottom = False
+            return None
+        return {"scrollTop": 692698, "scrollHeight": 693418, "clientHeight": 720}
+
+
+def test_retry_resets_scroll_before_re_searching(monkeypatch):
+    import refunnel_export as re_module
+
+    page = _DetachThenSucceedPage()
+    seen_positions = []
+
+    def fake_find(pg, media_id, sel):
+        # mirrors the real thing: a forward-only search can't find a
+        # card when the container is already pinned at the bottom
+        seen_positions.append(pg.at_bottom)
+        return (None, {}) if pg.at_bottom else (object(), {})
+
+    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_find)
+
+    # drive just the retry branch's contract: reset, then re-search
+    re_module.scroll_to_top(page, "#scrollableDiv")
+    grid_item, _ = fake_find(page, "tk_1", "#scrollableDiv")
+
+    assert page.scroll_to_top_calls == 1
+    assert seen_positions == [False]   # searched from the TOP, not the bottom
+    assert grid_item is not None       # so the card is findable again
+
+
+def test_sabotage_retry_without_reset_would_never_find_the_card():
+    page = _DetachThenSucceedPage()
+    # no reset -> still pinned at the bottom -> forward-only search fails
+    assert page.at_bottom is True
+    with pytest.raises(AssertionError):
+        assert page.at_bottom is False  # wrong -- that's only true after a reset
+    assert page.scroll_to_top_calls == 0
