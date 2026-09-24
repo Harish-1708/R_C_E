@@ -553,3 +553,33 @@ def test_sabotage_single_attempt_would_be_caught(monkeypatch):
     with pytest.raises(AssertionError):
         assert send_button.click_count == 1  # wrong -- that's the old, unretried behaviour
     assert send_button.click_count == 2
+
+
+# ---------- Chromium launch args (source-inspection -- the actual launch isn't mockable) ----------
+
+def test_load_or_refresh_session_launches_with_disable_dev_shm_usage():
+    # CONFIRMED REAL gap this closes: the call every CI workflow
+    # actually uses had NO launch args at all. --disable-dev-shm-usage
+    # is a well-documented fix for exactly the observed crash pattern
+    # (crashes after a few hundred interactions, not at launch) --
+    # Chromium's shared memory usage exhausting GitHub's small default
+    # /dev/shm allocation under sustained load.
+    #
+    # Checked against the actual .launch(...) call line specifically,
+    # not the whole function's source -- a comment mentioning the flag
+    # would otherwise let this pass even if the real code lost it.
+    import inspect
+    import refunnel_auth
+    source = inspect.getsource(refunnel_auth.load_or_refresh_session)
+    launch_line = next(line for line in source.splitlines() if "chromium.launch(" in line)
+    assert "--disable-dev-shm-usage" in launch_line
+
+
+def test_sabotage_launching_with_no_args_would_be_caught():
+    import inspect
+    import refunnel_auth
+    source = inspect.getsource(refunnel_auth.load_or_refresh_session)
+    launch_line = next(line for line in source.splitlines() if "chromium.launch(" in line)
+    with pytest.raises(AssertionError):
+        assert launch_line.strip() == "browser = p.chromium.launch(headless=headless)"  # wrong -- the old, no-args call
+    assert "--disable-dev-shm-usage" in launch_line
