@@ -1228,31 +1228,57 @@ def test_sabotage_single_navigation_would_be_caught():
 
 # ---------- trigger_native_drive_upload: confirmed real UI flow ----------
 
-class _FakeMenuButton:
-    def __init__(self, owner):
-        self.owner = owner
-
-    def scroll_into_view_if_needed(self, timeout=None):
-        pass
-
-    def click(self):
-        self.owner.menu_clicked = True
-
-
 class _FakeGridItemForDrive:
-    def __init__(self, owner):
+    """Models a found grid_item whose .usage-rights-approved-card child
+    supports the SAME mechanism as the email-scraping flow: real
+    force-click, a pointer-sequence fallback, and JS-evaluated state
+    reads -- since _open_drive_upload_menu reuses those exact
+    primitives, not a separately-invented approach."""
+
+    def __init__(self, owner, opens_on="forced", fail_attempts=0, card_in_dom=True):
         self.owner = owner
+        self.opens_on = opens_on          # "forced" | "pointer" | "never"
+        self.fail_attempts = fail_attempts
+        self.card_in_dom = card_in_dom
+        self.attempt = 0
         self.hovered = False
 
     def hover(self):
         self.hovered = True
 
-    def locator(self, _selector):
-        class _L:
+    def _attempt_can_open(self):
+        return self.attempt > self.fail_attempts
+
+    def locator(self, selector):
+        item = self
+
+        class _Card:
             @property
-            def first(_self):
-                return _FakeMenuButton(self.owner)
-        return _L()
+            def first(_s):
+                return _s
+
+            def count(_s):
+                return 1 if item.card_in_dom else 0
+
+            def click(_s, force=False, timeout=None):
+                item.attempt += 1
+                item.owner.events.append("forced_click" if force else "physical_click")
+                if force and item.opens_on == "forced" and item._attempt_can_open():
+                    item.owner.menu_open = True
+
+            def evaluate(_s, js, arg=None, timeout=None):
+                if "scrollIntoView" in js:
+                    item.owner.events.append("scroll_into_view")
+                    return None
+                if "pointerdown" in js:
+                    item.owner.events.append("pointer_sequence")
+                    if item.opens_on == "pointer" and item._attempt_can_open():
+                        item.owner.menu_open = True
+                    return None
+                if "aria-expanded" in js:
+                    return "true" if item.owner.menu_open else "false"
+                return None
+        return _Card()
 
 
 class _ClickTrackingLocator:
@@ -1261,9 +1287,16 @@ class _ClickTrackingLocator:
         self.name = name
 
     def wait_for(self, state=None, timeout=None):
-        pass
+        if self.name == "upload_item" and not self.owner.menu_open:
+            raise RuntimeError("menu never opened (aria-expanded stayed false)")
 
-    def click(self):
+    def is_visible(self):
+        return self.name == "upload_item" and self.owner.menu_open
+
+    def inner_text(self, timeout=None):
+        return "Upload to Google Drive" if self.name == "upload_item" else ""
+
+    def click(self, timeout=None):
         self.owner.clicks.append(self.name)
 
     @property
@@ -1280,9 +1313,20 @@ class _DriveUploadPage:
 
     def __init__(self, folder_name_to_select="Refunnel - Swoveralls"):
         self.menu_clicked = False
+        self.menu_open = False
+        self.events = []
         self.clicks = []
         self._folder_name = folder_name_to_select
         self.scroll_resets = 0
+
+    def press(self, key):
+        self.events.append(f"key:{key}")
+        if key == "Escape":
+            self.menu_open = False
+
+    @property
+    def keyboard(self):
+        return self
 
     def evaluate(self, js, *a, **kw):
         if "scrollTop = 0" in js:
@@ -1911,27 +1955,37 @@ def _approved_soup():
     return BeautifulSoup(APPROVED_CARD_FIXTURE.read_text(), "html.parser")
 
 
-def test_approved_toggle_matches_exactly_once_on_a_real_approved_card():
-    from refunnel_export import DRIVE_APPROVED_TOGGLE_SELECTOR
-    assert len(_approved_soup().select(DRIVE_APPROVED_TOGGLE_SELECTOR)) == 1
+def test_approved_card_matches_exactly_once_on_a_real_approved_card():
+    # CONFIRMED REAL correction: this used to assert the ARIA wrapper
+    # (.pop-up-menu > [aria-controls]:has(...)) was the click target --
+    # the same design already disproven for the email-scraping flow. A
+    # live 527-video run showed hundreds of "scroll_into_view_if_needed
+    # Timeout 4000ms" failures clicking that wrapper once the grid got
+    # deep into a large batch. The card itself is clicked directly now.
+    soup = _approved_soup()
+    assert len(soup.select(".usage-rights-approved-card")) == 1
 
 
-def test_approved_toggle_is_not_the_dotted_menu():
+def test_approved_card_is_not_the_dotted_menu():
     # confirmed real: the dotted icon opens "Show content / Mute creator /
     # Delete from library" -- the wrong menu, where Upload to Drive never appears
-    from refunnel_export import DRIVE_APPROVED_TOGGLE_SELECTOR
     soup = _approved_soup()
-    toggle = soup.select_one(DRIVE_APPROVED_TOGGLE_SELECTOR)
+    card = soup.select_one(".usage-rights-approved-card")
     dotted = soup.select_one(".post_dotted_menu__cpgc")
-    assert toggle is not None and dotted is not None
-    assert dotted not in toggle.parents and toggle not in dotted.parents
+    assert card is not None and dotted is not None
+    assert dotted not in card.parents and card not in dotted.parents
 
 
-def test_sabotage_targeting_the_dotted_menu_would_be_caught():
-    from refunnel_export import DRIVE_APPROVED_TOGGLE_SELECTOR
+def test_sabotage_targeting_the_aria_wrapper_would_be_caught():
+    import refunnel_export
+    import inspect
+    source = inspect.getsource(refunnel_export._open_drive_upload_menu)
     with pytest.raises(AssertionError):
-        assert "dottedMenuIcon" in DRIVE_APPROVED_TOGGLE_SELECTOR  # wrong -- that opened the wrong menu live
-    assert "usage-rights-approved-card" in DRIVE_APPROVED_TOGGLE_SELECTOR
+        # wrong -- the design already disproven for email scraping (the
+        # docstring mentions it as history; the actual card_selector
+        # assigned and used for clicks must not be the wrapper)
+        assert 'card_selector = ".pop-up-menu > [aria-controls]' in source
+    assert 'card_selector = ".usage-rights-approved-card"' in source
 
 
 # ---------- the Approved filter is a URL param (confirmed from the live address bar) ----------
@@ -2984,3 +3038,73 @@ def test_sabotage_reintroducing_the_per_item_pending_message_would_be_caught(mon
     with pytest.raises(AssertionError):
         assert "skipping media_id='ig_1'" in out  # wrong -- the exact noise this removed
     assert "skipping media_id" not in out
+
+
+# ---------- Drive upload menu now retries in place, same as email scraping ----------
+
+def test_drive_menu_retries_by_re_clicking_the_card_not_just_re_waiting(monkeypatch):
+    import refunnel_export as re_module
+    grid_item_holder = {}
+
+    def fake_scroll_found(page, media_id, scroll_container_selector):
+        item = _FakeGridItemForDrive(page, opens_on="forced", fail_attempts=2)  # opens on 3rd try
+        grid_item_holder["item"] = item
+        return item, {}
+    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
+
+    page = _DriveUploadPage(folder_name_to_select="Refunnel - Swoveralls")
+    result = trigger_native_drive_upload(page, "tk_1", "Refunnel - Swoveralls")
+
+    assert result is True
+    item = grid_item_holder["item"]
+    assert item.attempt == 3  # the card was genuinely re-clicked each retry, not just re-waited-on
+
+
+def test_drive_menu_uses_pointer_sequence_when_the_forced_click_alone_does_not_open_it(monkeypatch):
+    import refunnel_export as re_module
+    grid_item_holder = {}
+
+    def fake_scroll_found(page, media_id, scroll_container_selector):
+        item = _FakeGridItemForDrive(page, opens_on="pointer")
+        grid_item_holder["item"] = item
+        return item, {}
+    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
+
+    page = _DriveUploadPage()
+    result = trigger_native_drive_upload(page, "tk_1", "Refunnel - Swoveralls")
+
+    assert result is True
+    assert "pointer_sequence" in page.events
+
+
+def test_drive_menu_that_never_opens_raises_after_three_attempts_not_hang(monkeypatch):
+    import refunnel_export as re_module
+
+    def fake_scroll_found(page, media_id, scroll_container_selector):
+        return _FakeGridItemForDrive(page, opens_on="never"), {}
+    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
+
+    page = _DriveUploadPage()
+    with pytest.raises(Exception):
+        trigger_native_drive_upload(page, "tk_1", "Refunnel - Swoveralls")
+
+
+def test_sabotage_the_drive_menu_giving_up_after_one_attempt_would_be_caught(monkeypatch):
+    # confirmed real bug this fixes: the OLD code had no retry loop at
+    # all here -- one attempt, straight to failure
+    import refunnel_export as re_module
+    grid_item_holder = {}
+
+    def fake_scroll_found(page, media_id, scroll_container_selector):
+        item = _FakeGridItemForDrive(page, opens_on="forced", fail_attempts=2)
+        grid_item_holder["item"] = item
+        return item, {}
+    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
+
+    page = _DriveUploadPage()
+    trigger_native_drive_upload(page, "tk_1", "Refunnel - Swoveralls")
+
+    item = grid_item_holder["item"]
+    with pytest.raises(AssertionError):
+        assert item.attempt == 1  # wrong -- that's the old, unretried behaviour
+    assert item.attempt == 3
