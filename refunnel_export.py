@@ -1123,6 +1123,7 @@ def trigger_native_drive_upload(
     timeout_ms: int = 15000,
     username: Optional[str] = None,
     created_at: Optional[str] = None,
+    reset_scroll: bool = True,
 ) -> bool:
     """Saves one Approved post's video to Google Drive using Refunnel's
     OWN native upload -- Refunnel does the file transfer server-side;
@@ -1155,7 +1156,21 @@ def trigger_native_drive_upload(
     """
     # Reset BEFORE searching -- confirmed real: the search only scrolls
     # FORWARD, so anything above the current position was unreachable.
-    scroll_to_top(page, scroll_container_selector)
+    #
+    # reset_scroll=False lets a caller processing a BATCH skip this for
+    # every individual item, matching the same proven pattern already
+    # used for email scraping: reset ONCE before the whole batch, then
+    # let each item's forward-only search continue from wherever the
+    # last one left off (targets are in the same newest-first feed
+    # order the search already moves through). CONFIRMED REAL gap this
+    # closes: this call used to run unconditionally, so a 50-item batch
+    # meant 50 full resets to the top and 50 full re-scrolls back down
+    # -- far more scrolling/DOM churn per item than email scraping ever
+    # does for a similarly-sized batch, on top of the same virtualized-
+    # list instability that's already been the root cause every other
+    # time it's shown up in this project.
+    if reset_scroll:
+        scroll_to_top(page, scroll_container_selector)
     grid_item, _ = _scroll_until_card_found(page, media_id, scroll_container_selector)
 
     if grid_item is None and username and created_at:
