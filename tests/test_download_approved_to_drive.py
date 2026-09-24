@@ -98,6 +98,14 @@ class _FakePage:
     def goto(self, *_a, **_kw):
         pass
 
+    def evaluate(self, *_a, **_kw):
+        # refunnel_export.scroll_to_top() calls this once per batch now
+        # -- see the reset_scroll change to trigger_native_drive_upload.
+        pass
+
+    def wait_for_timeout(self, *_a, **_kw):
+        pass
+
     def close(self):
         pass
 
@@ -379,3 +387,43 @@ def test_sabotage_re_triggering_when_an_upload_already_exists_would_be_caught(mo
     with pytest.raises(AssertionError):
         assert len(trigger_calls) == 1  # wrong -- that's the duplicate-upload bug
     assert len(trigger_calls) == 0
+
+
+def test_scroll_resets_once_per_batch_not_once_per_item(monkeypatch):
+    # CONFIRMED REAL gap this fixes: trigger_native_drive_upload used
+    # to reset scroll unconditionally on every call, so a batch of
+    # several videos meant a full reset-and-rescroll per item. Now
+    # reset happens ONCE for the whole batch, matching the same proven
+    # pattern already used for email scraping.
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
+    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1"), _row("tk_2"), _row("tk_3")])
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+
+    reset_calls = []
+    monkeypatch.setattr(dad.refunnel_export, "scroll_to_top", lambda *a, **kw: reset_calls.append(1))
+    trigger_calls = []
+    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload",
+                        lambda *a, **kw: trigger_calls.append(kw.get("reset_scroll")) or True)
+
+    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
+
+    assert len(reset_calls) == 1  # once for the whole 3-item batch, not 3 times
+    assert trigger_calls == [False, False, False]  # each item skips its own reset
+
+
+def test_sabotage_resetting_scroll_per_item_would_be_caught(monkeypatch):
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
+    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1"), _row("tk_2"), _row("tk_3")])
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+
+    reset_calls = []
+    monkeypatch.setattr(dad.refunnel_export, "scroll_to_top", lambda *a, **kw: reset_calls.append(1))
+    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", lambda *a, **kw: True)
+
+    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
+
+    with pytest.raises(AssertionError):
+        assert len(reset_calls) == 3  # wrong -- that's the old, per-item reset behaviour
+    assert len(reset_calls) == 1
