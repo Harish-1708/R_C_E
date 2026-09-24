@@ -370,7 +370,18 @@ def load_or_refresh_session(
     Raises LoginError if neither the saved session nor a fresh login works.
     """
     p = sync_playwright().start()
-    browser = p.chromium.launch(headless=headless)
+    # CONFIRMED REAL gap this closes: no launch args at all, on the
+    # ONE call every CI workflow actually uses. --disable-dev-shm-usage
+    # is a well-documented, widely-confirmed fix for exactly this crash
+    # pattern -- Chromium uses /dev/shm for shared memory between its
+    # renderer processes, GitHub's runners give it a small default
+    # (64MB), and a long CI session doing thousands of DOM interactions
+    # (opening/closing modals repeatedly) is exactly the kind of
+    # sustained load that exhausts it -- matching the observed pattern
+    # directly: crashes after a few hundred interactions, not
+    # immediately at launch. Deliberately just this one, well-justified
+    # flag, not a long list of speculative ones.
+    browser = p.chromium.launch(headless=headless, args=["--disable-dev-shm-usage"])
 
     def _cleanup():
         # Confirmed real leak this fixes: if _perform_login() raised
