@@ -1235,11 +1235,13 @@ class _FakeGridItemForDrive:
     reads -- since _open_drive_upload_menu reuses those exact
     primitives, not a separately-invented approach."""
 
-    def __init__(self, owner, opens_on="forced", fail_attempts=0, card_in_dom=True, geometry=None):
+    def __init__(self, owner, opens_on="forced", fail_attempts=0, card_in_dom=True, geometry=None,
+                 now_pending_review=False):
         self.owner = owner
         self.opens_on = opens_on          # "forced" | "pointer" | "never"
         self.fail_attempts = fail_attempts
         self.card_in_dom = card_in_dom
+        self.now_pending_review = now_pending_review
         self.geometry = geometry if geometry is not None else {
             "connected": True, "width": 185, "height": 46, "top": 300, "left": 379,
             "right": 564, "viewportWidth": 1280, "viewportHeight": 720,
@@ -1255,6 +1257,15 @@ class _FakeGridItemForDrive:
 
     def locator(self, selector):
         item = self
+
+        if "urq-title" in selector:
+            # The pre-check trigger_native_drive_upload runs BEFORE
+            # ever touching the card -- must be distinguishable from
+            # the .usage-rights-approved-card lookup below.
+            class _UrqTitle:
+                def count(_s):
+                    return 1 if item.now_pending_review else 0
+            return _UrqTitle()
 
         class _Card:
             @property
@@ -3192,3 +3203,87 @@ def test_sabotage_dropping_the_drive_geometry_note_would_be_caught(monkeypatch):
     with pytest.raises(AssertionError):
         assert "Toggle geometry" not in str(exc.value)  # wrong -- would mean dropping real evidence
     assert "Toggle geometry" in str(exc.value)
+
+
+# ---------- card genuinely no longer Approved on Refunnel's live page (confirmed real, from a saved snapshot) ----------
+#
+# Two media_ids failed identically across EVERY click-mechanism version
+# tried so far -- the original ARIA-wrapper approach and this rewrite's
+# direct-card-click -- because neither version was ever the actual
+# problem. A saved debug snapshot proved it directly: their card has no
+# .usage-rights-approved-card at all; it has .usage-rights-requested-card
+# with a .urq-title of "Pending review" instead. Their status changed on
+# Refunnel's live page sometime after Master Data was last exported.
+
+def test_card_no_longer_approved_returns_none_not_false_or_true(monkeypatch):
+    import refunnel_export as re_module
+
+    def fake_scroll_found(page, media_id, scroll_container_selector):
+        return _FakeGridItemForDrive(page, now_pending_review=True), {}
+    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
+
+    page = _DriveUploadPage()
+    result = trigger_native_drive_upload(page, "ig_0431480af70141eab24c76d9f2b5b40c", "Refunnel - Swoveralls")
+
+    assert result is None  # distinct from False (couldn't locate) and True (success)
+
+
+def test_card_no_longer_approved_never_attempts_the_menu_at_all(monkeypatch):
+    # checked BEFORE touching the card -- no wasted retries, no stray
+    # menu left open to interfere with the next item in the batch
+    import refunnel_export as re_module
+    grid_item_holder = {}
+
+    def fake_scroll_found(page, media_id, scroll_container_selector):
+        item = _FakeGridItemForDrive(page, now_pending_review=True)
+        grid_item_holder["item"] = item
+        return item, {}
+    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
+
+    page = _DriveUploadPage()
+    trigger_native_drive_upload(page, "ig_1", "Refunnel - Swoveralls")
+
+    assert grid_item_holder["item"].attempt == 0  # never even tried to click
+
+
+def test_card_no_longer_approved_prints_the_real_explanation(monkeypatch, capsys):
+    import refunnel_export as re_module
+
+    def fake_scroll_found(page, media_id, scroll_container_selector):
+        return _FakeGridItemForDrive(page, now_pending_review=True), {}
+    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
+
+    page = _DriveUploadPage()
+    trigger_native_drive_upload(page, "ig_1", "Refunnel - Swoveralls")
+
+    out = capsys.readouterr().out
+    assert "status changed since the last export" in out
+    assert "Pending review" in out
+
+
+def test_a_genuinely_approved_card_is_unaffected_by_this_check(monkeypatch):
+    import refunnel_export as re_module
+
+    def fake_scroll_found(page, media_id, scroll_container_selector):
+        return _FakeGridItemForDrive(page, now_pending_review=False, opens_on="forced"), {}
+    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
+
+    page = _DriveUploadPage(folder_name_to_select="Refunnel - Swoveralls")
+    result = trigger_native_drive_upload(page, "tk_1", "Refunnel - Swoveralls")
+
+    assert result is True
+
+
+def test_sabotage_treating_a_status_change_as_a_generic_failure_would_be_caught(monkeypatch):
+    import refunnel_export as re_module
+
+    def fake_scroll_found(page, media_id, scroll_container_selector):
+        return _FakeGridItemForDrive(page, now_pending_review=True), {}
+    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
+
+    page = _DriveUploadPage()
+    result = trigger_native_drive_upload(page, "ig_1", "Refunnel - Swoveralls")
+
+    with pytest.raises(AssertionError):
+        assert result is False  # wrong -- would misreport this as "couldn't locate the card"
+    assert result is None
