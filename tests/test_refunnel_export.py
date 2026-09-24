@@ -1235,11 +1235,15 @@ class _FakeGridItemForDrive:
     reads -- since _open_drive_upload_menu reuses those exact
     primitives, not a separately-invented approach."""
 
-    def __init__(self, owner, opens_on="forced", fail_attempts=0, card_in_dom=True):
+    def __init__(self, owner, opens_on="forced", fail_attempts=0, card_in_dom=True, geometry=None):
         self.owner = owner
         self.opens_on = opens_on          # "forced" | "pointer" | "never"
         self.fail_attempts = fail_attempts
         self.card_in_dom = card_in_dom
+        self.geometry = geometry if geometry is not None else {
+            "connected": True, "width": 185, "height": 46, "top": 300, "left": 379,
+            "right": 564, "viewportWidth": 1280, "viewportHeight": 720,
+        }
         self.attempt = 0
         self.hovered = False
 
@@ -1277,6 +1281,11 @@ class _FakeGridItemForDrive:
                     return None
                 if "aria-expanded" in js:
                     return "true" if item.owner.menu_open else "false"
+                if "getBoundingClientRect" in js:
+                    item.owner.events.append("geometry_read")
+                    if getattr(item, "geometry_read_fails", False):
+                        raise RuntimeError("card genuinely gone now")
+                    return item.geometry
                 return None
         return _Card()
 
@@ -3108,3 +3117,78 @@ def test_sabotage_the_drive_menu_giving_up_after_one_attempt_would_be_caught(mon
     with pytest.raises(AssertionError):
         assert item.attempt == 1  # wrong -- that's the old, unretried behaviour
     assert item.attempt == 3
+
+
+# ---------- Drive geometry diagnostic (same proven approach that resolved the email-flow mystery) ----------
+
+def test_drive_failure_message_includes_toggle_geometry(monkeypatch):
+    import refunnel_export as re_module
+    grid_item_holder = {}
+
+    def fake_scroll_found(page, media_id, scroll_container_selector):
+        item = _FakeGridItemForDrive(page, opens_on="never", geometry={
+            "connected": True, "width": 0, "height": 0, "top": 900, "left": 1250,
+            "right": 1250, "viewportWidth": 1280, "viewportHeight": 720,
+        })
+        grid_item_holder["item"] = item
+        return item, {}
+    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
+
+    page = _DriveUploadPage()
+    with pytest.raises(re_module.ExportError) as exc:
+        trigger_native_drive_upload(page, "tk_1", "Refunnel - Swoveralls")
+
+    assert "Toggle geometry when first found" in str(exc.value)
+    assert "'width': 0" in str(exc.value) and "'left': 1250" in str(exc.value)
+
+
+def test_drive_geometry_read_happens_once_early_not_after_giving_up(monkeypatch):
+    # CONFIRMED REAL correction already learned once from the email
+    # flow: reading geometry at the END (after every attempt already
+    # failed) only ever shows the card already gone -- unsurprising,
+    # since 3 attempts' worth of churn happened first. Read it once,
+    # on the FIRST attempt, before anything has a chance to disturb it.
+    import refunnel_export as re_module
+    grid_item_holder = {}
+
+    def fake_scroll_found(page, media_id, scroll_container_selector):
+        item = _FakeGridItemForDrive(page, opens_on="never")
+        grid_item_holder["item"] = item
+        return item, {}
+    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
+
+    page = _DriveUploadPage()
+    with pytest.raises(Exception):
+        trigger_native_drive_upload(page, "tk_1", "Refunnel - Swoveralls")
+
+    assert page.events.count("geometry_read") == 1
+
+
+def test_drive_geometry_read_costs_nothing_on_a_successful_upload(monkeypatch):
+    import refunnel_export as re_module
+
+    def fake_scroll_found(page, media_id, scroll_container_selector):
+        return _FakeGridItemForDrive(page, opens_on="forced"), {}
+    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
+
+    page = _DriveUploadPage()
+    result = trigger_native_drive_upload(page, "tk_1", "Refunnel - Swoveralls")
+
+    assert result is True
+    assert page.events.count("geometry_read") == 1  # read once, but doesn't block success
+
+
+def test_sabotage_dropping_the_drive_geometry_note_would_be_caught(monkeypatch):
+    import refunnel_export as re_module
+
+    def fake_scroll_found(page, media_id, scroll_container_selector):
+        return _FakeGridItemForDrive(page, opens_on="never"), {}
+    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
+
+    page = _DriveUploadPage()
+    with pytest.raises(re_module.ExportError) as exc:
+        trigger_native_drive_upload(page, "tk_1", "Refunnel - Swoveralls")
+
+    with pytest.raises(AssertionError):
+        assert "Toggle geometry" not in str(exc.value)  # wrong -- would mean dropping real evidence
+    assert "Toggle geometry" in str(exc.value)
