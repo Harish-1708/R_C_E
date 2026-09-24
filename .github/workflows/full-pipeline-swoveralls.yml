@@ -14,11 +14,20 @@ name: Full Pipeline - Swoveralls
 # the other starved. Each brand now gets its own full, independent
 # window -- Swoveralls here, the other brand 12 hours apart.
 #
-# Deliberately scoped to JUST the export-and-emails phase (export all
-# media, then scrape emails) -- the slow, brand-specific one. Campaign
-# tagging and Drive backfill already loop every brand internally on
-# their own schedules (campaign-sync.yml, drive-backfill.yml) and stay
-# there rather than being duplicated here.
+# Includes campaign tagging and Drive backfill too, same as the
+# original combined full-pipeline.yml -- Swoveralls is the brand that
+# actually uses Drive backfill (config/workspaces.yaml has no
+# drive_folder_id_secret for Duderobe, so it's skipped cleanly there
+# regardless of which workflow triggers it).
+#
+# HONEST CAVEAT: sync_campaigns.py and download_approved_to_drive.py
+# both loop over EVERY brand in config/workspaces.yaml themselves --
+# neither script currently supports narrowing to just one brand. So
+# this job processes every configured brand's campaigns/Drive, not
+# only Swoveralls's, the same way the original combined workflow did.
+# The standalone campaign-sync.yml and drive-backfill.yml workflows
+# still run on their own separate daily schedules too -- worth
+# disabling one set or the other if you don't want both running.
 on:
   schedule:
     - cron: "0 0 * * *"  # Swoveralls's own 12-hour window
@@ -33,6 +42,11 @@ on:
         description: "Minutes allowed for email scraping before handing off to later phases."
         required: false
         default: "150"
+        type: string
+      drive_batch_size:
+        description: "Max Approved videos to save to Drive this run."
+        required: false
+        default: "50"
         type: string
 
 jobs:
@@ -130,3 +144,74 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  # --- Phases 2 + 4: campaign tagging, then Approved videos to Drive ---
+  # One job, because both of these scripts iterate every brand in
+  # config/workspaces.yaml themselves. `if: always()` so a failure in an
+  # earlier phase never silently cancels these.
+  campaigns-and-drive:
+    needs: export-and-emails
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: python -m playwright install --with-deps chromium
+
+      - name: Restore saved Refunnel session
+        uses: actions/cache/restore@v4
+        with:
+          path: refunnel_session.json
+          key: refunnel-session-${{ github.run_id }}
+          restore-keys: |
+            refunnel-session-
+
+      - name: Write service account credentials
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: echo "$GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT" > service_account.json
+
+      - name: "Phase 2 - Tag posts with their campaign"
+        if: always()
+        env:
+          REFUNNEL_EMAIL: ${{ secrets.REFUNNEL_EMAIL }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: service_account.json
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          SPREADSHEET_ID_DUDEROBE: ${{ secrets.SPREADSHEET_ID_DUDEROBE }}
+          SPREADSHEET_ID_SWOVERALLS: ${{ secrets.SPREADSHEET_ID_SWOVERALLS }}
+          SPREADSHEET_ID_DEFI_SNACKS: ${{ secrets.SPREADSHEET_ID_DEFI_SNACKS }}
+          SPREADSHEET_ID_KELSON: ${{ secrets.SPREADSHEET_ID_KELSON }}
+        run: python -u sync_campaigns.py
+
+      - name: "Phase 4 - Save Approved videos to Google Drive"
+        if: always()
+        env:
+          REFUNNEL_EMAIL: ${{ secrets.REFUNNEL_EMAIL }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: service_account.json
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          SPREADSHEET_ID_DUDEROBE: ${{ secrets.SPREADSHEET_ID_DUDEROBE }}
+          SPREADSHEET_ID_SWOVERALLS: ${{ secrets.SPREADSHEET_ID_SWOVERALLS }}
+          DRIVE_FOLDER_ID_SWOVERALLS: ${{ secrets.DRIVE_FOLDER_ID_SWOVERALLS }}
+          DRIVE_BACKFILL_BATCH_SIZE: ${{ github.event.inputs.drive_batch_size || '50' }}
+        run: python -u download_approved_to_drive.py
+
+      - name: Save Refunnel session for the next run
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: refunnel_session.json
+          key: refunnel-session-${{ github.run_id }}-phase24
+
+      - name: Upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-campaigns-drive-${{ github.run_id }}
+          path: downloads/
+          retention-days: 7
+          if-no-files-found: ignore
