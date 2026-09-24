@@ -151,6 +151,16 @@ def process_one_brand(
         refunnel_export.goto_social_listening_for_workspace(
             page, refunnel_workspace_name, known_workspace_names, usage_rights="GRANTED"
         )
+        # Reset to the top ONCE for the whole batch, matching the same
+        # proven pattern already used for email scraping -- CONFIRMED
+        # REAL gap this closes: trigger_native_drive_upload used to
+        # reset scroll unconditionally on every call, so a 50-item
+        # batch meant 50 full resets and 50 full re-scrolls back down,
+        # far more DOM churn per item than necessary. target_ids is
+        # already in the same newest-first feed order the search moves
+        # through, so one reset here plus each item's own forward-only
+        # search (reset_scroll=False below) covers the whole batch.
+        refunnel_export.scroll_to_top(page)
 
         uploaded, not_yet_confirmed, failed = 0, 0, 0
         for media_id in target_ids:
@@ -180,6 +190,7 @@ def process_one_brand(
                 triggered = refunnel_export.trigger_native_drive_upload(
                     page, media_id, drive_folder_name, debug_dir=debug_dir,
                     username=username, created_at=row.get("created_at", ""),
+                    reset_scroll=False,
                 )
                 if not triggered:
                     print(f"{brand}: couldn't locate media_id={media_id!r} on the page -- "
