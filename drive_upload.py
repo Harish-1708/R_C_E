@@ -40,6 +40,40 @@ def build_drive_service(service_account_path: str):
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
+def find_existing_upload(drive_service, folder_id: str, match_fragment: str) -> Optional[dict]:
+    """A single, immediate check (no polling, no time filter) for a file
+    Refunnel already uploaded for this media_id, still under its raw
+    name. Returns {"id", "name"} if one exists, else None.
+
+    CONFIRMED REAL gap this fixes: find_and_rename_uploaded_file gives
+    up after max_wait_seconds if the file hasn't appeared yet -- but
+    Refunnel's server-side transfer can genuinely take longer than that
+    for a larger video, especially with several uploads queued in the
+    same run. When that happens, drive_uploaded_at is never set, so the
+    SAME media_id stays in next run's "needs upload" list -- which
+    would trigger Refunnel to upload it AGAIN, risking a real duplicate
+    file, while the FIRST upload sits in Drive forever under its raw
+    name, never renamed. Checking for an already-uploaded-but-unrenamed
+    file FIRST, before ever triggering a new upload, means a slow
+    transfer just gets renamed on the next run instead of duplicated.
+    """
+    query = f"'{folder_id}' in parents and name contains '{match_fragment}' and trashed = false"
+    results = drive_service.files().list(
+        q=query, fields="files(id, name, createdTime)",
+        orderBy="createdTime desc", pageSize=5,
+    ).execute()
+    files = results.get("files", [])
+    return files[0] if files else None
+
+
+def rename_file(drive_service, file_id: str, new_filename: str) -> None:
+    """Renames a Drive file already known by id -- the second half of
+    what find_and_rename_uploaded_file does in one step, split out so
+    a file found via find_existing_upload can be renamed the same way
+    without a second, redundant search."""
+    drive_service.files().update(fileId=file_id, body={"name": new_filename}).execute()
+
+
 def find_and_rename_uploaded_file(
     drive_service,
     folder_id: str,
@@ -84,7 +118,7 @@ def find_and_rename_uploaded_file(
         files = results.get("files", [])
         if files:
             newest = files[0]
-            drive_service.files().update(fileId=newest["id"], body={"name": new_filename}).execute()
+            rename_file(drive_service, newest["id"], new_filename)
             return newest["id"]
         if time.time() >= deadline:
             return None
