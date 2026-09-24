@@ -72,11 +72,11 @@ class FakeClient:
         return self._by_id[spreadsheet_id]
 
 
-MASTER_HEADER = ["id", "platform", "username", "rights_status", "drive_uploaded_at"]
+MASTER_HEADER = ["id", "platform", "username", "rights_status", "drive_uploaded_at", "updated_at"]
 
 
-def _row(media_id, status="GRANTED", uploaded=""):
-    return [media_id, "TIKTOK", "creatorname", status, uploaded]
+def _row(media_id, status="GRANTED", uploaded="", updated_at=""):
+    return [media_id, "TIKTOK", "creatorname", status, uploaded, updated_at]
 
 
 class _FakeBrowser:
@@ -464,3 +464,38 @@ def test_sabotage_counting_status_change_as_failed_would_be_caught(monkeypatch, 
     with pytest.raises(AssertionError):
         assert "failed 1" in out  # wrong -- would wrongly blame the scraper for stale Master Data
     assert "failed 0" in out
+
+
+def test_status_changed_message_shows_refunnels_own_updated_at(monkeypatch, capsys):
+    # CONFIRMED REAL need: when Master Data says GRANTED but the live
+    # page shows Pending review, the open question is how stale that
+    # specific row is. Refunnel's OWN updated_at timestamp for that
+    # post is the most direct evidence available -- not our export
+    # time, theirs.
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
+    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1", updated_at="2026-09-20T10:00:00Z")])
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+
+    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", lambda *a, **kw: None)
+
+    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
+
+    out = capsys.readouterr().out
+    assert "2026-09-20T10:00:00Z" in out
+
+
+def test_sabotage_dropping_the_updated_at_evidence_would_be_caught(monkeypatch, capsys):
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
+    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1", updated_at="2026-09-20T10:00:00Z")])
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+
+    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", lambda *a, **kw: None)
+
+    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
+
+    out = capsys.readouterr().out
+    with pytest.raises(AssertionError):
+        assert "2026-09-20T10:00:00Z" not in out  # wrong -- would mean dropping the actual evidence
+    assert "2026-09-20T10:00:00Z" in out
