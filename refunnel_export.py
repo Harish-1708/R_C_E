@@ -1124,7 +1124,7 @@ def trigger_native_drive_upload(
     username: Optional[str] = None,
     created_at: Optional[str] = None,
     reset_scroll: bool = True,
-) -> bool:
+) -> Optional[bool]:
     """Saves one Approved post's video to Google Drive using Refunnel's
     OWN native upload -- Refunnel does the file transfer server-side;
     this only drives the UI and picks the folder.
@@ -1151,8 +1151,17 @@ def trigger_native_drive_upload(
     skipping is always safer than uploading the wrong video.
 
     Returns True once Save to Drive is clicked, False if the card
-    couldn't be located (or was ambiguous). Raises on any other failure
-    in the flow, after saving a debug snapshot if debug_dir is given.
+    couldn't be located at all (or was ambiguous), or None if the card
+    WAS found but its actual current status on Refunnel's live page no
+    longer matches what triggered this call -- CONFIRMED REAL, found
+    via a saved debug snapshot: a media_id marked Approved in Master
+    Data can genuinely show as Pending review on the live page if its
+    status changed after the last export. None is a distinct, correct
+    outcome, not a failure -- callers should treat it the same way
+    Pending review is already treated for email scraping (skip
+    cleanly, don't count it as an error, a fresh export picks up the
+    real status). Raises on any other failure in the flow, after
+    saving a debug snapshot if debug_dir is given.
     """
     # Reset BEFORE searching -- confirmed real: the search only scrolls
     # FORWARD, so anything above the current position was unreachable.
@@ -1193,6 +1202,34 @@ def trigger_native_drive_upload(
 
     if grid_item is None:
         return False
+
+    # CONFIRMED REAL root cause, found via a saved debug snapshot: two
+    # media_ids failed identically across every version of this click
+    # mechanism tried so far (the original ARIA-wrapper approach, this
+    # rewrite's direct-card-click) -- because neither version was ever
+    # the problem. Their card genuinely has no .usage-rights-approved-
+    # card at all; it has .usage-rights-requested-card with a
+    # .urq-title of "Pending review" instead. Their status changed on
+    # Refunnel's live page sometime after Master Data was last
+    # exported -- our sheet still says GRANTED, but the real page
+    # disagrees. No click mechanism can open a menu that doesn't
+    # exist. Checked BEFORE attempting to open anything, same proven
+    # pattern already used for email scraping -- no wasted retries,
+    # no stray menu left open, and a genuinely different, correct
+    # outcome instead of a misleading "menu didn't open" error.
+    try:
+        is_now_pending_review = grid_item.locator(
+            f".urq-title:has-text('{PENDING_REVIEW_TITLE_TEXT}')"
+        ).count() > 0
+    except Exception:
+        is_now_pending_review = False
+    if is_now_pending_review:
+        print(f"drive upload: media_id={media_id!r} is marked Approved in Master Data, but "
+              f"Refunnel's live page now shows it as {PENDING_REVIEW_TITLE_TEXT!r} -- its status "
+              f"changed since the last export. Skipping rather than retrying against a menu that "
+              f"genuinely doesn't exist for this card; a fresh export will pick up its real "
+              f"current status.")
+        return None
 
     try:
         _open_drive_upload_menu(page, media_id, grid_item, scroll_container_selector)
