@@ -272,26 +272,28 @@ def scroll_to_load_all(
     page: Page,
     count_text_pattern: str = r"(\d+)\s+of\s+(\d+)\s+media",
     max_rounds: int = 400,
-    scroll_pause_ms: int = 2000,
-    idle_rounds_before_giving_up: int = 12,
+    scroll_pause_ms: int = 3000,
+    idle_rounds_before_giving_up: int = 20,
     scroll_container_selector: str = "#scrollableDiv",
 ) -> None:
     """Scroll until the page's own '<loaded> of <total> media' counter
     (visible in your screenshot) shows loaded == total, or growth stalls
     for idle_rounds_before_giving_up consecutive scrolls in a row.
 
-    Defaults widened from 1200ms/6 rounds to 2000ms/12 rounds --
-    confirmed real: switching to the "Last 12 months" filter genuinely
-    increased the total from ~2065 to 2771, and a run against that
-    larger total stalled out (hit the hard-fail safety net) at only
-    120/2771 loaded. The failure screenshot showed a perfectly healthy,
-    normally-loading page -- nothing broken, no obviously wrong
-    selector -- consistent with the larger dataset (more images across
-    a wider historical range) simply needing more time per batch to
-    render than the old, smaller dataset did. This isn't proven to be
-    the whole story, so if a real run still stalls early even with
-    these wider defaults, that would be real evidence pointing at
-    something else instead (e.g. a genuine selector/DOM change).
+    Defaults widened twice now, both times for the same reason:
+      - 1200ms/6 rounds -> 2000ms/12 rounds when the "Last 12 months"
+        filter increased the total from ~2065 to 2771 and a run
+        stalled at 120/2771. The failure screenshot showed a
+        perfectly healthy, normally-loading page.
+      - 2000ms/12 rounds -> 3000ms/20 rounds when the total grew
+        further to 5890 and a run stalled at 2620/5890 -- CONFIRMED
+        REAL, same signature exactly: a healthy-looking screenshot,
+        real varied content, the counter genuinely stuck. The dataset
+        just keeps growing over time; this isn't proven to be the
+        whole story, so if a run still stalls early even with these
+        wider defaults, that's real evidence pointing at something
+        else (e.g. a genuine selector/DOM change) rather than "needs
+        more patience" again.
 
     Scrolls `scroll_container_selector` directly via JS (setting its
     scrollTop), confirmed from a real HTML dump to be `#scrollableDiv`
@@ -345,6 +347,21 @@ def scroll_to_load_all(
         if loaded >= total:
             return
 
+        # CONFIRMED REAL gap this closes: setting scrollTop to the SAME
+        # value it already holds (which happens whenever scrollHeight
+        # hasn't grown since the last round) produces no actual
+        # position change -- no guarantee the underlying infinite-
+        # scroll listener treats that as a new "reached the bottom"
+        # event rather than a no-op. Nudging up first guarantees a
+        # real, measurable scroll delta every single round, whether or
+        # not scrollHeight has changed, before scrolling back to the
+        # (possibly still the same) bottom.
+        page.evaluate(
+            "(sel) => { const el = document.querySelector(sel); "
+            "if (el) { el.scrollTop = Math.max(0, el.scrollTop - 300); } }",
+            scroll_container_selector,
+        )
+        page.wait_for_timeout(150)
         page.evaluate(
             "(sel) => { const el = document.querySelector(sel); "
             "if (el) { el.scrollTop = el.scrollHeight; } }",
