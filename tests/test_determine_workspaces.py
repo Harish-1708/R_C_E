@@ -70,3 +70,42 @@ def test_sabotage_manual_disabled_workspace_blocked_would_be_caught():
     with pytest.raises(AssertionError):
         assert result == []
     assert [w["name"] for w in result] == ["Kelson"]
+
+
+# ---------- a schedule-triggered run can be pinned to one brand (dedicated per-brand workflows) ----------
+
+def test_scheduled_trigger_with_a_specific_workspace_input_returns_only_that_one():
+    # CONFIRMED REAL need: a dedicated, per-brand workflow (Swoveralls
+    # on its own scheduled window, Duderobe on another) is itself
+    # schedule-triggered, but must always resolve to that ONE brand --
+    # even though Swoveralls has schedule_enabled: False in this set.
+    result = select_workspaces(WORKSPACES, event_name="schedule", workspace_input="Swoveralls")
+    assert [w["name"] for w in result] == ["Swoveralls"]
+
+
+def test_scheduled_trigger_with_no_input_is_completely_unaffected():
+    # an ordinary scheduled run (the shared full-pipeline workflow)
+    # never sets this input -- must behave exactly as before
+    result = select_workspaces(WORKSPACES, event_name="schedule", workspace_input=None)
+    assert [w["name"] for w in result] == ["Duderobe"]
+
+
+def test_scheduled_trigger_with_all_enabled_input_matches_the_scheduled_set():
+    result = select_workspaces(WORKSPACES, event_name="schedule", workspace_input="all-enabled")
+    assert [w["name"] for w in result] == ["Duderobe"]
+
+
+def test_scheduled_trigger_with_unknown_workspace_input_raises():
+    with pytest.raises(UnknownWorkspaceError) as exc:
+        select_workspaces(WORKSPACES, event_name="schedule", workspace_input="Nonexistent")
+    assert "Duderobe" in str(exc.value)
+
+
+def test_sabotage_a_dedicated_scheduled_workflow_picking_up_every_brand_would_be_caught():
+    result = select_workspaces(WORKSPACES, event_name="schedule", workspace_input="Swoveralls")
+    with pytest.raises(AssertionError):
+        # wrong -- would mean the "Swoveralls-only" workflow silently
+        # ran every enabled brand instead, defeating the whole point
+        # of a dedicated per-brand schedule
+        assert [w["name"] for w in result] == ["Duderobe"]
+    assert [w["name"] for w in result] == ["Swoveralls"]
