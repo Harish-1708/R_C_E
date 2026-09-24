@@ -44,7 +44,24 @@ def select_workspaces(
 ) -> List[dict]:
     scheduled_set = [w for w in workspaces if w.get("schedule_enabled")]
 
+    # CONFIRMED REAL need this addition covers: a dedicated, per-brand
+    # workflow (e.g. Swoveralls on its own 12-hour window, Duderobe on
+    # the other) is itself schedule-triggered, but must always resolve
+    # to that ONE brand, never the full scheduled_set. Previously
+    # workspace_input was read only for workflow_dispatch, so a
+    # schedule-triggered run had no way to narrow itself at all.
+    # Scoped narrowly: only when a specific, non-"all"/"all-enabled"
+    # name is explicitly given does this apply to a scheduled run --
+    # an ordinary scheduled run (no input set) is completely unaffected
+    # and keeps returning the full scheduled_set exactly as before.
     if event_name == "schedule":
+        choice = (workspace_input or "").strip()
+        if choice and choice.lower() not in ("all", "all-enabled"):
+            for w in workspaces:
+                if w.get("name", "").lower() == choice.lower():
+                    return [w]
+            known = ", ".join(w.get("name", "") for w in workspaces)
+            raise UnknownWorkspaceError(f"'{choice}' doesn't match any configured workspace. Known: {known}")
         return scheduled_set
 
     # workflow_dispatch (or anything else -- treated the same as manual)
