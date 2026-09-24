@@ -1244,6 +1244,7 @@ def _open_drive_upload_menu(page: Page, media_id: str, grid_item, scroll_contain
     """
     card_selector = ".usage-rights-approved-card"
     last_error: Optional[Exception] = None
+    early_geometry_note = ""
     for attempt in range(attempts):
         try:
             card = grid_item.locator(card_selector).first
@@ -1253,6 +1254,26 @@ def _open_drive_upload_menu(page: Page, media_id: str, grid_item, scroll_contain
                 if grid_item is None:
                     raise ExportError(f"card for media_id={media_id!r} left the page and couldn't be re-found")
                 card = grid_item.locator(card_selector).first
+
+            if attempt == 0:
+                # Diagnostic-only, read ONCE, right here -- the same
+                # approach that turned out to be decisive for the
+                # email-scraping flow after several rounds of guessing
+                # at the cause. CONFIRMED REAL need: the SAME two
+                # media_ids failed identically, with the exact same
+                # 4000ms timing, across multiple independent runs with
+                # different batch sizes -- not random timing variance,
+                # something specific and repeatable about these two
+                # posts. This is the only way to see it directly
+                # instead of continuing to guess.
+                try:
+                    geometry = card.evaluate(_CARD_GEOMETRY_JS, timeout=EVALUATE_TIMEOUT_MS)
+                    early_geometry_note = f" Toggle geometry when first found: {geometry}."
+                except Exception as geometry_error:
+                    early_geometry_note = (
+                        f" Couldn't read toggle geometry even on the first attempt "
+                        f"(gone before we could even measure it): {geometry_error}."
+                    )
 
             card.evaluate(_VERIFY_CARD_JS, _DANGEROUS_BUTTON_PATTERN.pattern, timeout=EVALUATE_TIMEOUT_MS)
 
@@ -1290,7 +1311,7 @@ def _open_drive_upload_menu(page: Page, media_id: str, grid_item, scroll_contain
     raise ExportError(
         f"Card for media_id={media_id!r} was found, but its Drive-upload menu didn't open "
         f"after {attempts} attempts (real forced click, then full pointer sequence, each "
-        f"attempt). Original error: {last_error}"
+        f"attempt). Original error: {last_error}.{early_geometry_note}"
     ) from last_error
 
 _MEDIA_ID_IN_SRC = re.compile(r"(tk_\d+|ig_[0-9a-f]{32}|ig_\d+)")
