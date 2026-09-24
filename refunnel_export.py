@@ -1057,11 +1057,17 @@ def _format_progress_line(attempted: int, total: int, found: int, empty_fields: 
 
 # CONFIRMED REAL from a saved page with the Approved filter applied: an
 # Approved card's footer holds ONLY the usage-rights toggle -- the ARIA
-# disclosure wrapping .usage-rights-approved-card -- and "Upload to
-# Google Drive" is in THAT toggle's dropdown. An earlier selector
-# targeted a dotted "..." icon; on the live page that opened the card's
+# disclosure wrapping .usage-rights-approved-card. Upload to Google
+# Drive is in that toggle's dropdown. An earlier selector targeted a
+# dotted "..." icon instead; on the live page that opened the card's
 # other menu (Show content / Mute creator / Delete from library).
-DRIVE_APPROVED_TOGGLE_SELECTOR = ".pop-up-menu > [aria-controls]:has(.usage-rights-approved-card)"
+#
+# The toggle is clicked on the CARD ITSELF (.usage-rights-approved-card,
+# see _open_drive_upload_menu), not this wrapper -- the same reversal
+# already confirmed for the email-scraping flow: a live run showed
+# hundreds of failures clicking the wrapper once the grid was deep into
+# a large batch, while clicking the card directly (matched by a
+# proven-working prior version of the email-scraping code) held up.
 DRIVE_UPLOAD_MENU_ITEM_SELECTOR = "text=Upload to Google Drive"
 DRIVE_MODAL_ALL_FOLDERS_TAB_SELECTOR = "button:has-text('All folders')"
 DRIVE_MODAL_SAVE_BUTTON_SELECTOR = "button:has-text('Save to Drive')"
@@ -1174,13 +1180,7 @@ def trigger_native_drive_upload(
         return False
 
     try:
-        toggle = grid_item.locator(DRIVE_APPROVED_TOGGLE_SELECTOR).first
-        toggle.scroll_into_view_if_needed(timeout=4000)
-        toggle.click()
-
-        upload_item = page.locator(DRIVE_UPLOAD_MENU_ITEM_SELECTOR).first
-        upload_item.wait_for(state="visible", timeout=timeout_ms)
-        upload_item.click()
+        _open_drive_upload_menu(page, media_id, grid_item, scroll_container_selector)
 
         all_folders_tab = page.locator(DRIVE_MODAL_ALL_FOLDERS_TAB_SELECTOR).first
         all_folders_tab.wait_for(state="visible", timeout=timeout_ms)
@@ -1204,6 +1204,79 @@ def trigger_native_drive_upload(
             except Exception:
                 pass
         raise
+
+
+def _open_drive_upload_menu(page: Page, media_id: str, grid_item, scroll_container_selector: str,
+                            attempts: int = 3) -> None:
+    """Opens an Approved card's status-toggle dropdown and clicks
+    "Upload to Google Drive". Modeled directly on _open_usage_rights_menu
+    (email scraping) -- reusing the exact same proven mechanisms, not a
+    new, separately-guessed approach.
+
+    CONFIRMED REAL bug this fixes: this Drive flow was never updated
+    with ANY of the fixes built for the email-scraping flow across many
+    rounds. It still clicked the ARIA wrapper (.pop-up-menu >
+    [aria-controls]:has(.usage-rights-approved-card)) instead of the
+    card itself, used a bare scroll_into_view_if_needed(timeout=4000)
+    that doesn't even scroll (it only WAITS for the element to already
+    be in view), a plain, unforced click, and no retry loop at all --
+    one attempt, then straight to failure. A live 527-video run showed
+    exactly the errors this predicts: hundreds of consecutive
+    "Locator.scroll_into_view_if_needed: Timeout 4000ms exceeded" and
+    "aria-controls]:has(.usage-rights-approved-card)" failures once the
+    run reached deeper into the grid, the same virtualized-list
+    instability the email flow already had this fixed for.
+    """
+    card_selector = ".usage-rights-approved-card"
+    last_error: Optional[Exception] = None
+    for attempt in range(attempts):
+        try:
+            card = grid_item.locator(card_selector).first
+            if card.count() == 0:
+                scroll_to_top(page, scroll_container_selector)
+                grid_item, _ = _scroll_until_card_found(page, media_id, scroll_container_selector)
+                if grid_item is None:
+                    raise ExportError(f"card for media_id={media_id!r} left the page and couldn't be re-found")
+                card = grid_item.locator(card_selector).first
+
+            card.evaluate(_VERIFY_CARD_JS, _DANGEROUS_BUTTON_PATTERN.pattern, timeout=EVALUATE_TIMEOUT_MS)
+
+            try:
+                card.click(force=True, timeout=MENU_CLICK_TIMEOUT_MS)
+            except Exception:
+                pass
+
+            page.wait_for_timeout(150)
+            try:
+                expanded = card.evaluate(_MENU_EXPANDED_JS, timeout=EVALUATE_TIMEOUT_MS)
+            except Exception:
+                expanded = None
+
+            upload_item = page.locator(DRIVE_UPLOAD_MENU_ITEM_SELECTOR).first
+            try:
+                already_open = upload_item.is_visible()
+            except Exception:
+                already_open = False
+
+            if expanded != "true" and not already_open:
+                card.evaluate(_POINTER_SEQUENCE_JS, timeout=EVALUATE_TIMEOUT_MS)
+
+            upload_item.wait_for(state="visible", timeout=MENU_OPEN_TIMEOUT_MS)
+            _safe_click(upload_item, timeout_ms=MENU_CLICK_TIMEOUT_MS)
+            return
+        except Exception as e:
+            last_error = e
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+            if attempt < attempts - 1:
+                page.wait_for_timeout(150)
+    raise ExportError(
+        f"Card for media_id={media_id!r} was found, but its Drive-upload menu didn't open "
+        f"after {attempts} attempts (real forced click, then full pointer sequence, each "
+        f"attempt). Original error: {last_error}"
+    ) from last_error
 
 _MEDIA_ID_IN_SRC = re.compile(r"(tk_\d+|ig_[0-9a-f]{32}|ig_\d+)")
 
