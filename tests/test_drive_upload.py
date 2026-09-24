@@ -143,3 +143,88 @@ def test_sabotage_renaming_before_confirming_a_match_would_be_caught():
         assert file_id is not None  # wrong -- nothing was ever found
     assert file_id is None  # confirms actual correct behavior
     assert service._files.update_calls == []  # and definitely never renamed anything imaginary
+
+
+# ---------- find_existing_upload / rename_file (confirmed real gap this closes) ----------
+#
+# find_and_rename_uploaded_file gives up after max_wait_seconds if the
+# file hasn't appeared yet -- but Refunnel's server-side transfer can
+# genuinely take longer than that. When that happens, the caller would
+# otherwise trigger ANOTHER upload for the same media_id next run,
+# risking a real duplicate, while the FIRST upload sits in Drive
+# forever under its raw, unrenamed name. find_existing_upload is the
+# immediate, no-wait check a caller runs FIRST, so a slow-but-real
+# upload gets found and renamed instead of duplicated.
+
+from drive_upload import find_existing_upload, rename_file
+
+
+def test_find_existing_upload_returns_none_when_nothing_matches():
+    service = _FakeDriveService(list_responses=[[]])
+    result = find_existing_upload(service, "folder1", "12345678")
+    assert result is None
+
+
+def test_find_existing_upload_finds_a_file_from_a_slow_earlier_run():
+    service = _FakeDriveService(list_responses=[
+        [{"id": "file_1", "name": "TIKTOK_VIDEO_raw_name_12345678.mp4", "createdTime": "2026-09-01T00:00:00Z"}],
+    ])
+    result = find_existing_upload(service, "folder1", "12345678")
+    assert result == {"id": "file_1", "name": "TIKTOK_VIDEO_raw_name_12345678.mp4",
+                      "createdTime": "2026-09-01T00:00:00Z"}
+
+
+def test_find_existing_upload_does_not_rename_by_itself():
+    # it only LOOKS -- the caller decides whether and how to rename
+    service = _FakeDriveService(list_responses=[
+        [{"id": "file_1", "name": "raw.mp4", "createdTime": "2026-09-01T00:00:00Z"}],
+    ])
+    find_existing_upload(service, "folder1", "12345678")
+    assert service._files.update_calls == []
+
+
+def test_find_existing_upload_never_waits_or_polls():
+    # a single .list() call, no retry loop -- confirmed real: this is
+    # meant to be a cheap check run before every trigger, not another
+    # slow poll
+    service = _FakeDriveService(list_responses=[[]])
+    find_existing_upload(service, "folder1", "12345678")
+    assert len(service._files.list_calls) == 1
+
+
+def test_find_existing_upload_search_query_has_no_createdtime_filter():
+    # deliberately unscoped by time -- it's looking for something that
+    # may have been uploaded on a PREVIOUS run, possibly hours ago
+    service = _FakeDriveService(list_responses=[[]])
+    find_existing_upload(service, "folder1", "12345678")
+    query = service._files.list_calls[0]
+    assert "createdTime" not in query
+    assert "folder1" in query and "12345678" in query
+
+
+def test_rename_file_calls_update_with_the_given_id_and_name():
+    service = _FakeDriveService(list_responses=[])
+    rename_file(service, "file_1", "Swoveralls | @user | tk_1.mp4")
+    assert service._files.update_calls == [("file_1", {"name": "Swoveralls | @user | tk_1.mp4"})]
+
+
+def test_sabotage_a_slow_upload_getting_silently_duplicated_would_be_caught():
+    # models the full, correct caller flow: check first, rename if
+    # found, only trigger a new upload if genuinely nothing exists yet
+    service = _FakeDriveService(list_responses=[
+        [{"id": "file_1", "name": "raw.mp4", "createdTime": "2026-09-01T00:00:00Z"}],
+    ])
+    trigger_calls = []
+
+    def caller_flow():
+        existing = find_existing_upload(service, "folder1", "12345678")
+        if existing is not None:
+            rename_file(service, existing["id"], "Swoveralls | @user | tk_1.mp4")
+            return
+        trigger_calls.append("triggered")  # would mean a duplicate upload
+
+    caller_flow()
+    with pytest.raises(AssertionError):
+        assert trigger_calls == ["triggered"]  # wrong -- that's the duplicate-upload bug
+    assert trigger_calls == []
+    assert service._files.update_calls == [("file_1", {"name": "Swoveralls | @user | tk_1.mp4"})]
