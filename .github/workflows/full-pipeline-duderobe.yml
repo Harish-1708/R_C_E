@@ -1,0 +1,132 @@
+name: Full Pipeline - Duderobe
+
+# Duderobe's own dedicated export-and-emails run, on its own
+# schedule window -- separate from the OTHER brand's window and from
+# the combined full-pipeline.yml, which handles campaign sync and
+# Drive backfill for every brand on their own separate schedules
+# already (campaign-sync.yml, drive-backfill.yml).
+#
+# CONFIRMED REAL need for this split: Swoveralls alone -- ~5,900
+# posts, a browser crash roughly every 150-475 items during email
+# scraping -- can take longer than GitHub's 6-hour hard job cap to get
+# through in one pass. Sharing one combined schedule with Duderobe
+# meant whichever brand ran first could eat the whole window, leaving
+# the other starved. Each brand now gets its own full, independent
+# window -- Duderobe here, the other brand 12 hours apart.
+#
+# Deliberately scoped to JUST the export-and-emails phase (export all
+# media, then scrape emails) -- the slow, brand-specific one. Campaign
+# tagging and Drive backfill already loop every brand internally on
+# their own schedules (campaign-sync.yml, drive-backfill.yml) and stay
+# there rather than being duplicated here.
+on:
+  schedule:
+    - cron: "0 12 * * *"  # Duderobe's own 12-hour window
+  workflow_dispatch:
+    inputs:
+      workspace:
+        description: "Always Duderobe -- this workflow is pinned to it (see WORKSPACE_INPUT below)."
+        required: false
+        default: "Duderobe"
+        type: string
+      scrape_budget_minutes:
+        description: "Minutes allowed for email scraping before handing off to later phases."
+        required: false
+        default: "150"
+        type: string
+
+jobs:
+  determine-workspaces:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml
+      - id: set-matrix
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          WORKSPACE_INPUT: "Duderobe"  # pinned -- always this one brand, scheduled or manual
+        run: |
+          MATRIX=$(python scripts/determine_workspaces.py)
+          echo "Selected workspaces: $MATRIX"
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+  # --- Phases 1 + 3: export everything, then scrape emails ---
+  export-and-emails:
+    needs: determine-workspaces
+    if: needs.determine-workspaces.outputs.matrix != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      # Load-bearing, not a perf setting: all workspaces share ONE
+      # Refunnel login and an OTP code is single-use.
+      max-parallel: 1
+      matrix:
+        workspace: ${{ fromJson(needs.determine-workspaces.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: python -m playwright install --with-deps chromium
+
+      - name: Restore saved Refunnel session
+        uses: actions/cache/restore@v4
+        with:
+          path: refunnel_session.json
+          key: refunnel-session-${{ github.run_id }}
+          restore-keys: |
+            refunnel-session-
+
+      - name: Seed session from bootstrap secret if there is no cached one
+        env:
+          INITIAL_REFUNNEL_SESSION_B64: ${{ secrets.INITIAL_REFUNNEL_SESSION_B64 }}
+        run: |
+          if [ -f refunnel_session.json ]; then
+            echo "Using the cached session."
+          elif [ -n "$INITIAL_REFUNNEL_SESSION_B64" ]; then
+            echo "$INITIAL_REFUNNEL_SESSION_B64" | base64 -d > refunnel_session.json
+            echo "Seeded session from INITIAL_REFUNNEL_SESSION_B64 secret."
+          else
+            echo "No cached session and no bootstrap secret -- will fall back to a fresh Gmail-OTP login."
+          fi
+
+      - name: "Phases 1+3 - Export all media, then scrape emails (${{ matrix.workspace.name }})"
+        env:
+          REFUNNEL_EMAIL: ${{ secrets.REFUNNEL_EMAIL }}
+          WORKSPACE_NAME: ${{ matrix.workspace.name }}
+          REFUNNEL_WORKSPACE_NAME: ${{ matrix.workspace.refunnel_workspace_name }}
+          KNOWN_WORKSPACE_NAMES: "Duderobe,Swoveralls,Defi Snacks,Kelson"
+          SPREADSHEET_ID: ${{ secrets[matrix.workspace.spreadsheet_id_secret] }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: service_account.json
+          GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SCRAPE_TIME_BUDGET_MINUTES: ${{ github.event.inputs.scrape_budget_minutes || '150' }}
+        run: |
+          echo "$GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT" > service_account.json
+          python -u run_daily_sync.py
+
+      - name: Save Refunnel session for the next run
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: refunnel_session.json
+          key: refunnel-session-${{ github.run_id }}
+
+      - name: Upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-export-emails-${{ matrix.workspace.name }}-${{ github.run_id }}
+          path: downloads/
+          retention-days: 7
+          if-no-files-found: ignore
+
