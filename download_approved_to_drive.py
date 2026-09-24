@@ -162,7 +162,7 @@ def process_one_brand(
         # search (reset_scroll=False below) covers the whole batch.
         refunnel_export.scroll_to_top(page)
 
-        uploaded, not_yet_confirmed, failed = 0, 0, 0
+        uploaded, not_yet_confirmed, failed, status_changed = 0, 0, 0, 0
         for media_id in target_ids:
             row = master_rows[media_id]
             username = row.get("username", "") or "unknown"
@@ -192,6 +192,16 @@ def process_one_brand(
                     username=username, created_at=row.get("created_at", ""),
                     reset_scroll=False,
                 )
+                # CONFIRMED REAL distinction this makes: None means the
+                # card WAS found, but its real current status on
+                # Refunnel's live page no longer matches what our
+                # Master Data says -- trigger_native_drive_upload
+                # already printed the full explanation. Not a failure,
+                # same as Pending review is already treated for email
+                # scraping -- a fresh export corrects this on its own.
+                if triggered is None:
+                    status_changed += 1
+                    continue
                 if not triggered:
                     print(f"{brand}: couldn't locate media_id={media_id!r} on the page -- "
                           f"leaving it unmarked, will retry on a future run.")
@@ -222,7 +232,8 @@ def process_one_brand(
                 failed += 1
 
         print(f"{brand}: confirmed {uploaded}, not yet confirmed {not_yet_confirmed}, "
-              f"failed {failed}, {len(to_upload) - len(target_ids)} still pending for a future run.")
+              f"failed {failed}, status changed since export {status_changed}, "
+              f"{len(to_upload) - len(target_ids)} still pending for a future run.")
     finally:
         try:
             page.close()
