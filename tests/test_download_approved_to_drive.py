@@ -115,6 +115,7 @@ def _stub_browser_and_workspace(monkeypatch):
     # exercise the not-triggered / not-yet-confirmed paths.
     monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", lambda *a, **kw: True)
     monkeypatch.setattr(dad.drive_upload, "find_and_rename_uploaded_file", lambda *a, **kw: "fake_file_id")
+    monkeypatch.setattr(dad.drive_upload, "find_existing_upload", lambda *a, **kw: None)
 
 
 def _brand_config(name="Swoveralls", spreadsheet_secret="SPREADSHEET_ID_SWOVERALLS", drive_secret="DRIVE_FOLDER_ID_SWOVERALLS"):
@@ -218,6 +219,7 @@ def test_not_triggered_leaves_row_unmarked_for_retry(monkeypatch):
     gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
 
     monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", lambda *a, **kw: False)
+    monkeypatch.setattr(dad.drive_upload, "find_existing_upload", lambda *a, **kw: None)
 
     dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
 
@@ -237,6 +239,7 @@ def test_not_yet_confirmed_in_drive_leaves_row_unmarked_for_retry(monkeypatch):
 
     monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", lambda *a, **kw: True)
     monkeypatch.setattr(dad.drive_upload, "find_and_rename_uploaded_file", lambda *a, **kw: None)
+    monkeypatch.setattr(dad.drive_upload, "find_existing_upload", lambda *a, **kw: None)
 
     dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
 
@@ -329,3 +332,50 @@ def test_read_column_values_helper_used_correctly(monkeypatch):
     master_client = sheets_sync.GspreadSheetsClient(master_ws)
     existing = sheets_sync.read_column_values(master_client, "drive_uploaded_at")
     assert existing == {"tk_1": "already"}
+
+
+def test_a_slow_prior_run_gets_renamed_instead_of_re_triggered(monkeypatch):
+    # end-to-end: media_id was uploaded by a PREVIOUS run that missed
+    # the confirmation window, so drive_uploaded_at is still blank --
+    # this run must find and rename it, NOT trigger Refunnel again
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
+    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1")])
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+
+    trigger_calls = []
+    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload",
+                        lambda *a, **kw: trigger_calls.append(1) or True)
+    monkeypatch.setattr(dad.drive_upload, "find_existing_upload",
+                        lambda service, folder_id, fragment: {"id": "file_1", "name": "raw.mp4"})
+    rename_calls = []
+    monkeypatch.setattr(dad.drive_upload, "rename_file",
+                        lambda service, file_id, name: rename_calls.append((file_id, name)))
+
+    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
+
+    assert trigger_calls == []  # never triggered a new upload
+    assert rename_calls == [("file_1", "Swoveralls | @creatorname | tk_1.mp4")]
+    header = master_ws.rows[0]
+    upload_idx = header.index("drive_uploaded_at")
+    assert master_ws.rows[1][upload_idx]  # marked
+
+
+def test_sabotage_re_triggering_when_an_upload_already_exists_would_be_caught(monkeypatch):
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
+    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1")])
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+
+    trigger_calls = []
+    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload",
+                        lambda *a, **kw: trigger_calls.append(1) or True)
+    monkeypatch.setattr(dad.drive_upload, "find_existing_upload",
+                        lambda service, folder_id, fragment: {"id": "file_1", "name": "raw.mp4"})
+    monkeypatch.setattr(dad.drive_upload, "rename_file", lambda *a, **kw: None)
+
+    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
+
+    with pytest.raises(AssertionError):
+        assert len(trigger_calls) == 1  # wrong -- that's the duplicate-upload bug
+    assert len(trigger_calls) == 0
