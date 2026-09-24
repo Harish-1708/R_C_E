@@ -31,6 +31,16 @@ on:
 jobs:
   drive-backfill:
     runs-on: ubuntu-latest
+    # CONFIRMED REAL gap this closes: no timeout-minutes here at all,
+    # unlike full-pipeline.yml's explicit 330. Without one, this job
+    # falls back to GitHub's own default job timeout (360 minutes) as
+    # its only backstop -- so if cancellation genuinely doesn't take
+    # effect for some reason, the run sits there for up to 6 hours
+    # regardless. 60 minutes is generous for a real batch (each
+    # video now costs single-digit seconds, not the unbounded waits
+    # the old click flow could hit) while still giving a much shorter
+    # worst case than relying on GitHub's own default alone.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
