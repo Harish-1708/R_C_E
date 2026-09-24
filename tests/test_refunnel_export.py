@@ -30,8 +30,13 @@ from refunnel_export import (
 
 
 class FakePage:
-    """Simulates a page where each scroll (evaluate() call) reveals
-    more items, up to a schedule the test controls."""
+    """Simulates a page where each "scroll to bottom" evaluate() call
+    reveals more items, up to a schedule the test controls. The
+    scroll-delta nudge (a separate, smaller "scroll up a bit" call
+    scroll_to_load_all now makes every round) is counted in
+    scroll_calls but does NOT advance the load schedule -- only the
+    "scrollHeight" call does, matching what actually triggers loading
+    on the real page."""
 
     def __init__(self, load_schedule, total):
         # load_schedule: list of "loaded" counts over successive reads,
@@ -40,15 +45,19 @@ class FakePage:
         self.total = total
         self._read_index = 0
         self.scroll_calls = 0
+        self.nudge_calls = 0
 
     def inner_text(self, _selector):
         idx = min(self._read_index, len(self.load_schedule) - 1)
         loaded = self.load_schedule[idx]
         return f"{loaded} of {self.total} media"
 
-    def evaluate(self, _script, _arg=None):
+    def evaluate(self, script, _arg=None):
         self.scroll_calls += 1
-        self._read_index += 1
+        if "scrollHeight" in script:
+            self._read_index += 1
+        else:
+            self.nudge_calls += 1
 
     def wait_for_timeout(self, _ms):
         pass
@@ -343,8 +352,10 @@ def test_sabotage_idle_threshold_ignored_would_be_caught():
     with pytest.raises(ExportError):
         scroll_to_load_all(page, scroll_pause_ms=0, idle_rounds_before_giving_up=3)
     # with a working idle check, it gives up after 3 idle rounds past the
-    # last growth (index ~5), not after exhausting the whole schedule
-    assert page.scroll_calls < 8
+    # last growth (index 5 exactly -- confirmed via the fake's own
+    # tracking), not after exhausting the whole 10-entry schedule.
+    assert page._read_index == 5
+    assert page.scroll_calls < 16
 
 
 # ---------- _order_ids_for_scraping tests ----------
@@ -3287,3 +3298,39 @@ def test_sabotage_treating_a_status_change_as_a_generic_failure_would_be_caught(
     with pytest.raises(AssertionError):
         assert result is False  # wrong -- would misreport this as "couldn't locate the card"
     assert result is None
+
+
+# ---------- scroll_to_load_all: widened defaults and scroll-delta nudge ----------
+
+def test_defaults_widened_again_for_the_now_larger_dataset():
+    # CONFIRMED REAL: same pattern as the PRIOR widening (1200ms/6 ->
+    # 2000ms/12, when the total grew to 2771) recurring at an even
+    # larger scale -- a real run stalled at 2620/5890, healthy-looking
+    # screenshot, growth genuinely stuck for the full idle window.
+    import inspect
+    import refunnel_export as re_module
+    sig = inspect.signature(re_module.scroll_to_load_all)
+    assert sig.parameters["scroll_pause_ms"].default == 3000
+    assert sig.parameters["idle_rounds_before_giving_up"].default == 20
+
+
+def test_every_round_nudges_up_before_scrolling_to_bottom():
+    # CONFIRMED REAL gap this closes: setting scrollTop to the exact
+    # same value it already holds (whenever scrollHeight hasn't grown
+    # since the last round) produces no real scroll delta -- no
+    # guarantee that counts as a new "reached the bottom" event to
+    # whatever listener triggers loading more.
+    page = FakePage(load_schedule=[80, 160, 240, 240, 240, 240, 240], total=2078)
+    with pytest.raises(ExportError):
+        scroll_to_load_all(page, scroll_pause_ms=0, idle_rounds_before_giving_up=3)
+    assert page.nudge_calls > 0
+    assert page.nudge_calls == page._read_index  # exactly once per real scroll round
+
+
+def test_sabotage_dropping_the_nudge_would_be_caught():
+    import inspect
+    import refunnel_export as re_module
+    source = inspect.getsource(re_module.scroll_to_load_all)
+    with pytest.raises(AssertionError):
+        assert "scrollTop - 300" not in source  # wrong -- would mean losing the nudge entirely
+    assert "scrollTop - 300" in source
