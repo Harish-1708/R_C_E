@@ -18,6 +18,10 @@ on:
 jobs:
   campaign-sync:
     runs-on: ubuntu-latest
+    # Same gap, same fix as drive-backfill.yml -- this job also drives
+    # a real browser (Playwright/chromium below) with no explicit
+    # backstop of its own, relying only on GitHub's 360-minute default.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
