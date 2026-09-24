@@ -156,7 +156,26 @@ def process_one_brand(
         for media_id in target_ids:
             row = master_rows[media_id]
             username = row.get("username", "") or "unknown"
+            filename = parse_refunnel.build_drive_filename(brand, username, media_id)
+            fragment = parse_refunnel.drive_match_fragment(media_id)
             try:
+                # CONFIRMED REAL gap this closes: a slow Refunnel
+                # transfer that missed the previous run's 30s window
+                # left drive_uploaded_at blank, so this SAME media_id
+                # would otherwise trigger ANOTHER upload here -- a real
+                # duplicate, while the first upload sat in Drive
+                # forever under its raw, unrenamed name. Check for it
+                # first; if it's already there, just rename it.
+                existing = drive_upload.find_existing_upload(drive_service, folder_id, fragment)
+                if existing is not None:
+                    drive_upload.rename_file(drive_service, existing["id"], filename)
+                    master_client.update_single_cell(media_id, "drive_uploaded_at", _now_iso(),
+                                                     create_if_missing=True)
+                    uploaded += 1
+                    print(f"{brand}: media_id={media_id!r} was already uploaded by a slower-than-"
+                          f"expected earlier run -- renamed it instead of triggering a duplicate.")
+                    continue
+
                 trigger_ts = _now_iso()
                 triggered = refunnel_export.trigger_native_drive_upload(
                     page, media_id, drive_folder_name, debug_dir=debug_dir,
@@ -168,8 +187,6 @@ def process_one_brand(
                     failed += 1
                     continue
 
-                filename = parse_refunnel.build_drive_filename(brand, username, media_id)
-                fragment = parse_refunnel.drive_match_fragment(media_id)
                 file_id = drive_upload.find_and_rename_uploaded_file(
                     drive_service, folder_id, fragment, filename,
                     uploaded_after=trigger_ts, max_wait_seconds=DRIVE_UPLOAD_WAIT_SECONDS,
