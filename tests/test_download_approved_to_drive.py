@@ -427,3 +427,40 @@ def test_sabotage_resetting_scroll_per_item_would_be_caught(monkeypatch):
     with pytest.raises(AssertionError):
         assert len(reset_calls) == 3  # wrong -- that's the old, per-item reset behaviour
     assert len(reset_calls) == 1
+
+
+def test_status_changed_since_export_is_counted_separately_not_as_failed(monkeypatch, capsys):
+    # CONFIRMED REAL distinction: None means trigger_native_drive_upload
+    # found the card but its real status on Refunnel's live page no
+    # longer matches Master Data -- not a failure, and it already
+    # printed its own full explanation, so the caller must not print a
+    # confusing second "couldn't locate" message on top of it.
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
+    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1")])
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+
+    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", lambda *a, **kw: None)
+
+    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
+
+    out = capsys.readouterr().out
+    assert "couldn't locate media_id" not in out  # no confusing second message
+    assert "status changed since export 1" in out
+    assert "failed 0" in out  # NOT counted as a failure
+
+
+def test_sabotage_counting_status_change_as_failed_would_be_caught(monkeypatch, capsys):
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
+    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1")])
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+
+    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", lambda *a, **kw: None)
+
+    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
+
+    out = capsys.readouterr().out
+    with pytest.raises(AssertionError):
+        assert "failed 1" in out  # wrong -- would wrongly blame the scraper for stale Master Data
+    assert "failed 0" in out
