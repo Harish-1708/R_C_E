@@ -609,3 +609,18 @@ def test_sabotage_ignoring_the_time_budget_would_be_caught(monkeypatch):
     with pytest.raises(AssertionError):
         assert len(attempted) == 10  # wrong -- would mean ignoring an already-expired budget
     assert len(attempted) == 0
+
+
+def test_drive_upload_wait_default_widened_to_90_seconds():
+    # CONFIRMED REAL: 30s was consistently too short -- a live run
+    # showed the exact same media_ids, freshly triggered with nothing
+    # pre-existing in Drive to find, still not landing within 30s,
+    # requiring a second separate run before find_existing_upload()
+    # could finally catch and confirm them.
+    assert dad.DRIVE_UPLOAD_WAIT_SECONDS == 90.0
+
+
+def test_sabotage_reverting_to_30_seconds_would_be_caught():
+    with pytest.raises(AssertionError):
+        assert dad.DRIVE_UPLOAD_WAIT_SECONDS == 30.0  # wrong -- the old, confirmed-too-short default
+    assert dad.DRIVE_UPLOAD_WAIT_SECONDS == 90.0
