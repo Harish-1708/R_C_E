@@ -3285,7 +3285,9 @@ def test_card_no_longer_approved_never_attempts_the_menu_at_all(monkeypatch):
     assert grid_item_holder["item"].attempt == 0  # never even tried to click
 
 
-def test_card_no_longer_approved_prints_the_real_explanation(monkeypatch, capsys):
+def test_card_no_longer_approved_prints_nothing_per_item(monkeypatch, capsys):
+    # CONFIRMED REAL feedback: not an error, no per-item narration
+    # needed -- the caller counts this once for its final summary line.
     import refunnel_export as re_module
 
     def fake_scroll_found(page, media_id, scroll_container_selector):
@@ -3296,8 +3298,8 @@ def test_card_no_longer_approved_prints_the_real_explanation(monkeypatch, capsys
     trigger_native_drive_upload(page, "ig_1", "Refunnel - Swoveralls")
 
     out = capsys.readouterr().out
-    assert "status changed since the last export" in out
-    assert "Pending review" in out
+    assert out == ""
+
 
 
 def test_a_genuinely_approved_card_is_unaffected_by_this_check(monkeypatch):
