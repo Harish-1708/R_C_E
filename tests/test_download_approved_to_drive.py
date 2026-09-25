@@ -676,3 +676,75 @@ def test_sabotage_adding_a_wait_back_in_would_be_caught(monkeypatch):
     with pytest.raises(AssertionError):
         assert len(sleep_calls) > 0  # wrong -- would mean the old waiting complexity came back
     assert sleep_calls == []
+
+
+# ---------- folder id / folder name mismatch diagnostic ----------
+
+class _FakeDriveServiceForFolderCheck:
+    """Minimal fake supporting drive_service.files().get(fileId=...,
+    fields=...).execute() -- the exact chain the folder-name diagnostic
+    calls. Configurable name so tests can cover both match and mismatch."""
+
+    def __init__(self, actual_name):
+        self._actual_name = actual_name
+
+    def files(self):
+        return self
+
+    def get(self, fileId, fields, supportsAllDrives=None):
+        return self
+
+    def execute(self):
+        return {"name": self._actual_name}
+
+
+def test_folder_diagnostic_reports_a_match(monkeypatch, capsys):
+    # CONFIRMED REAL, checkable hypothesis this verifies: folder_id
+    # (used to search Drive) and drive_folder_name (clicked in
+    # Refunnel's own picker) are two independent values nothing
+    # verifies match. Printing folder_id itself doesn't work --
+    # GitHub Actions masks any log output matching a configured
+    # secret, so querying Drive for that id's own NAME (not a secret)
+    # is the only way to surface a real, readable answer.
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
+    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER])
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+    fake_service = _FakeDriveServiceForFolderCheck(actual_name="Refunnel - Swoveralls")
+
+    dad.process_one_brand(gc, _brand_config(), fake_service, "x@example.com", ["Swoveralls"])
+
+    out = capsys.readouterr().out
+    assert "MATCHES the name clicked" in out
+    assert "DOES NOT MATCH" not in out
+
+
+def test_folder_diagnostic_reports_a_mismatch(monkeypatch, capsys):
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
+    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER])
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+    # a completely different folder -- the exact scenario that would
+    # explain uploads genuinely landing while never being found
+    fake_service = _FakeDriveServiceForFolderCheck(actual_name="Some Other Folder")
+
+    dad.process_one_brand(gc, _brand_config(), fake_service, "x@example.com", ["Swoveralls"])
+
+    out = capsys.readouterr().out
+    assert "DOES NOT MATCH the name clicked" in out
+    assert "'Some Other Folder'" in out
+
+
+def test_sabotage_hiding_a_real_mismatch_would_be_caught(monkeypatch, capsys):
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
+    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER])
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+    fake_service = _FakeDriveServiceForFolderCheck(actual_name="Some Other Folder")
+
+    dad.process_one_brand(gc, _brand_config(), fake_service, "x@example.com", ["Swoveralls"])
+
+    out = capsys.readouterr().out
+    with pytest.raises(AssertionError):
+        assert "MATCHES the name clicked" in out and "DOES NOT" not in out  # wrong -- would hide a real mismatch
+    assert "DOES NOT MATCH" in out
