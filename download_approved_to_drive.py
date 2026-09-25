@@ -135,6 +135,22 @@ def process_one_brand(
         return
 
     drive_folder_name = brand_config.get("drive_folder_name") or f"Refunnel - {brand}"
+    # CONFIRMED REAL, checkable hypothesis: folder_id (used to SEARCH
+    # Drive for a landed upload) and drive_folder_name (the text
+    # clicked in Refunnel's OWN folder picker) are two completely
+    # separate, independently-configured values -- nothing anywhere
+    # verifies they point at the SAME actual Drive folder. If they
+    # don't, uploads can genuinely succeed, landing somewhere real in
+    # Drive, while this script's own check would never find them --
+    # not slow, never, on every single run, which is exactly what a
+    # live run of many attempts and zero landed uploads looks like.
+    # Printed plainly so this can be verified directly: open
+    # https://drive.google.com/drive/folders/<the id below> and
+    # confirm it's the SAME folder Refunnel's own "Save to Drive" ->
+    # "All folders" -> <the name below> leads to.
+    print(f"{brand}: uploads will be searched for in Drive folder id {folder_id!r} "
+          f"(https://drive.google.com/drive/folders/{folder_id}) -- clicked in Refunnel's own "
+          f"folder picker as {drive_folder_name!r}. Confirm these are the SAME folder.")
 
     sh = sheets_sync.retry_on_transient_error(gc.open_by_key, spreadsheet_id)
     try:
