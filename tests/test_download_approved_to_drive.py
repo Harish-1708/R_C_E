@@ -560,3 +560,52 @@ def test_sabotage_stopping_at_a_fixed_slice_would_be_caught(monkeypatch):
     with pytest.raises(AssertionError):
         assert "tk_5" not in attempted  # wrong -- that's the old, permanently-stuck behavior
     assert "tk_5" in attempted and "tk_6" in attempted
+
+
+def test_time_budget_stops_a_run_where_everything_is_slow_not_stuck(monkeypatch):
+    # CONFIRMED REAL risk this closes: "not yet confirmed" (a slow
+    # Drive transfer missing the 30s window) is transient, not a
+    # permanent failure -- but if MANY items in one run hit this same
+    # slow pattern, the "keep going past failures" logic could burn
+    # through attempts one 30s wait at a time well past a single run's
+    # reasonable length. This bounds it, same proven pattern as email
+    # scraping's own time budget.
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
+    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
+    monkeypatch.setattr(dad, "BATCH_SIZE", 50)
+    monkeypatch.setattr(dad, "MAX_ATTEMPTS_PER_RUN", 400)
+    monkeypatch.setattr(dad, "DRIVE_BACKFILL_TIME_BUDGET_MINUTES", 0.0)  # already expired
+
+    rows = [MASTER_HEADER] + [_row(f"tk_{i}") for i in range(10)]
+    master_ws = FakeWorksheet(rows=rows)
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+
+    attempted = []
+    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload",
+                        lambda page, media_id, folder_name, **kw: attempted.append(media_id) or True)
+
+    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
+
+    assert len(attempted) == 0  # deadline already passed -- stopped before trying anything
+
+
+def test_sabotage_ignoring_the_time_budget_would_be_caught(monkeypatch):
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
+    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
+    monkeypatch.setattr(dad, "BATCH_SIZE", 50)
+    monkeypatch.setattr(dad, "MAX_ATTEMPTS_PER_RUN", 400)
+    monkeypatch.setattr(dad, "DRIVE_BACKFILL_TIME_BUDGET_MINUTES", 0.0)
+
+    rows = [MASTER_HEADER] + [_row(f"tk_{i}") for i in range(10)]
+    master_ws = FakeWorksheet(rows=rows)
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+
+    attempted = []
+    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload",
+                        lambda page, media_id, folder_name, **kw: attempted.append(media_id) or True)
+
+    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
+
+    with pytest.raises(AssertionError):
+        assert len(attempted) == 10  # wrong -- would mean ignoring an already-expired budget
+    assert len(attempted) == 0
