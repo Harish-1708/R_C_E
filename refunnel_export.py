@@ -1187,6 +1187,7 @@ def trigger_native_drive_upload(
     username: Optional[str] = None,
     created_at: Optional[str] = None,
     reset_scroll: bool = True,
+    capture_evidence: bool = False,
 ) -> Optional[bool]:
     """Saves one Approved post's video to Google Drive using Refunnel's
     OWN native upload -- Refunnel does the file transfer server-side;
@@ -1309,6 +1310,29 @@ def trigger_native_drive_upload(
         save_button = page.locator(DRIVE_MODAL_SAVE_BUTTON_SELECTOR).first
         page.wait_for_selector(f"{DRIVE_MODAL_SAVE_BUTTON_SELECTOR}:not([disabled])", timeout=timeout_ms)
         save_button.click()
+
+        # CONFIRMED REAL gap this closes: a click completing without a
+        # Playwright exception only proves the BUTTON was clicked -- it
+        # says nothing about whether Refunnel's own backend actually
+        # accepted the request. If Refunnel's connected Google account
+        # has lost permission, or its own "Save to Drive" integration
+        # is broken, this click could still complete cleanly with
+        # nothing ever actually transferring, and nothing about that
+        # would ever surface as an exception here. capture_evidence
+        # (set by the caller for a small sample each run, not every
+        # item) saves what the page genuinely shows right after the
+        # click -- whether the modal closed normally or an error
+        # appeared -- direct evidence instead of another guess.
+        if capture_evidence and debug_dir:
+            try:
+                page.wait_for_timeout(1000)
+                out_dir = Path(debug_dir)
+                out_dir.mkdir(parents=True, exist_ok=True)
+                page.screenshot(path=str(out_dir / f"drive_upload_post_click_{media_id}.png"), full_page=True)
+                (out_dir / f"drive_upload_post_click_{media_id}.html").write_text(page.content(), encoding="utf-8")
+            except Exception:
+                pass
+
         return True
     except Exception:
         if debug_dir:
