@@ -118,12 +118,25 @@ def _stub_browser_and_workspace(monkeypatch):
     )
     monkeypatch.setattr(dad.refunnel_auth, "refunnel_social_listening_url", lambda *a, **kw: "https://x")
     monkeypatch.setattr(dad.refunnel_export, "goto_social_listening_for_workspace", lambda *a, **kw: None)
-    # Default: the native upload trigger succeeds and the file is
-    # "found" immediately -- individual tests override either half to
-    # exercise the not-triggered / not-yet-confirmed paths.
+    # No test in this file should ever need a REAL sleep -- the
+    # confirm phase's between-round wait is stubbed out unconditionally.
+    monkeypatch.setattr(dad.time, "sleep", lambda *a: None)
+    # Default: the native upload trigger succeeds, and find_existing_upload
+    # returns nothing on the FIRST call (the pre-check, before triggering --
+    # nothing uploaded yet) but a match on every call after that (the
+    # confirm phase finding it immediately on its first check). Individual
+    # tests override either half to exercise other paths.
     monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", lambda *a, **kw: True)
-    monkeypatch.setattr(dad.drive_upload, "find_and_rename_uploaded_file", lambda *a, **kw: "fake_file_id")
-    monkeypatch.setattr(dad.drive_upload, "find_existing_upload", lambda *a, **kw: None)
+    _find_calls = {}  # keyed by fragment -- each item's OWN first call (its pre-check) must be
+    # None, independent of other items already triggered earlier in the same batch.
+
+    def _default_find_existing_upload(drive_service, folder_id, fragment):
+        _find_calls[fragment] = _find_calls.get(fragment, 0) + 1
+        if _find_calls[fragment] == 1:
+            return None
+        return {"id": "fake_file_id", "name": "raw_refunnel_name.mp4"}
+    monkeypatch.setattr(dad.drive_upload, "find_existing_upload", _default_find_existing_upload)
+    monkeypatch.setattr(dad.drive_upload, "rename_file", lambda *a, **kw: None)
 
 
 def _brand_config(name="Swoveralls", spreadsheet_secret="SPREADSHEET_ID_SWOVERALLS", drive_secret="DRIVE_FOLDER_ID_SWOVERALLS"):
@@ -185,16 +198,27 @@ def test_happy_path_triggers_native_upload_and_marks_the_row(monkeypatch):
         dad.refunnel_export, "trigger_native_drive_upload",
         lambda page, media_id, folder_name, **kw: trigger_calls.append((media_id, folder_name)) or True
     )
+    # Two-phase flow: find_existing_upload's FIRST call per fragment is
+    # the pre-check (nothing there yet); the confirm phase's own call
+    # right after is what actually finds it -- both go through this
+    # one function now, not a separate find_and_rename_uploaded_file.
+    find_calls = []
+
+    def _find(service, folder_id, fragment):
+        find_calls.append((folder_id, fragment))
+        return None if len(find_calls) == 1 else {"id": "file_123", "name": "raw.mp4"}
+    monkeypatch.setattr(dad.drive_upload, "find_existing_upload", _find)
     rename_calls = []
     monkeypatch.setattr(
-        dad.drive_upload, "find_and_rename_uploaded_file",
-        lambda service, folder_id, fragment, filename, **kw: rename_calls.append((folder_id, fragment, filename)) or "file_123"
+        dad.drive_upload, "rename_file",
+        lambda service, file_id, filename: rename_calls.append((file_id, filename))
     )
 
     dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
 
     assert trigger_calls == [("tk_1", "Refunnel - Swoveralls")]
-    assert rename_calls == [("folder1", "1", "Swoveralls | @creatorname | tk_1.mp4")]
+    assert find_calls == [("folder1", "1"), ("folder1", "1")]  # pre-check, then confirm
+    assert rename_calls == [("file_123", "Swoveralls | @creatorname | tk_1.mp4")]
     header = master_ws.rows[0]
     upload_idx = header.index("drive_uploaded_at")
     assert master_ws.rows[1][upload_idx]  # non-blank -- marked
@@ -246,7 +270,6 @@ def test_not_yet_confirmed_in_drive_leaves_row_unmarked_for_retry(monkeypatch):
     gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
 
     monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", lambda *a, **kw: True)
-    monkeypatch.setattr(dad.drive_upload, "find_and_rename_uploaded_file", lambda *a, **kw: None)
     monkeypatch.setattr(dad.drive_upload, "find_existing_upload", lambda *a, **kw: None)
 
     dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
@@ -526,8 +549,6 @@ def test_run_keeps_going_past_failures_to_reach_real_successes(monkeypatch):
     def fake_trigger(page, media_id, folder_name, **kw):
         return media_id in ("tk_5", "tk_6")
     monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", fake_trigger)
-    monkeypatch.setattr(dad.drive_upload, "find_and_rename_uploaded_file",
-                         lambda *a, **kw: "fake_file_id")
 
     dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
 
@@ -552,8 +573,6 @@ def test_sabotage_stopping_at_a_fixed_slice_would_be_caught(monkeypatch):
         attempted.append(media_id)
         return media_id in ("tk_5", "tk_6")
     monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", fake_trigger)
-    monkeypatch.setattr(dad.drive_upload, "find_and_rename_uploaded_file",
-                         lambda *a, **kw: "fake_file_id")
 
     dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
 
@@ -624,3 +643,56 @@ def test_sabotage_reverting_to_30_seconds_would_be_caught():
     with pytest.raises(AssertionError):
         assert dad.DRIVE_UPLOAD_WAIT_SECONDS == 30.0  # wrong -- the old, confirmed-too-short default
     assert dad.DRIVE_UPLOAD_WAIT_SECONDS == 90.0
+
+
+# ---------- two-phase trigger/confirm design (scales past sequential per-item waiting) ----------
+
+def test_confirm_phase_checks_every_pending_item_each_round(monkeypatch):
+    # the wait between rounds is shared -- every still-pending item is
+    # checked together each round, not one at a time with its own wait
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
+    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
+    rows = [MASTER_HEADER] + [_row(f"tk_{i}") for i in range(3)]
+    master_ws = FakeWorksheet(rows=rows)
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+
+    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", lambda *a, **kw: True)
+    sleep_calls = []
+    monkeypatch.setattr(dad.time, "sleep", lambda s: sleep_calls.append(s))
+    find_calls = []
+
+    def _find(service, folder_id, fragment):
+        find_calls.append(fragment)
+        return None  # never found -- every round checks all 3, every time
+    monkeypatch.setattr(dad.drive_upload, "find_existing_upload", _find)
+
+    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
+
+    # 3 pre-checks (one per item, trigger phase) + 3 items * 4 confirm rounds
+    assert len(find_calls) == 3 + (3 * dad.DRIVE_CONFIRM_ROUNDS)
+    # exactly one shared sleep between each pair of rounds, not one per item
+    assert len(sleep_calls) == dad.DRIVE_CONFIRM_ROUNDS - 1
+    # the TOTAL wait across all rounds equals the configured budget --
+    # spread across rounds, not the full budget repeated every round
+    assert sum(sleep_calls) == pytest.approx(dad.DRIVE_UPLOAD_WAIT_SECONDS)
+
+
+def test_sabotage_waiting_per_item_instead_of_per_round_would_be_caught(monkeypatch):
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
+    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
+    rows = [MASTER_HEADER] + [_row(f"tk_{i}") for i in range(3)]
+    master_ws = FakeWorksheet(rows=rows)
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+
+    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", lambda *a, **kw: True)
+    sleep_calls = []
+    monkeypatch.setattr(dad.time, "sleep", lambda s: sleep_calls.append(s))
+    monkeypatch.setattr(dad.drive_upload, "find_existing_upload", lambda *a, **kw: None)
+
+    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
+
+    with pytest.raises(AssertionError):
+        # wrong -- 3 items * (DRIVE_CONFIRM_ROUNDS - 1) would mean a
+        # separate wait PER ITEM, the old, non-scaling design
+        assert len(sleep_calls) == 3 * (dad.DRIVE_CONFIRM_ROUNDS - 1)
+    assert len(sleep_calls) == dad.DRIVE_CONFIRM_ROUNDS - 1
