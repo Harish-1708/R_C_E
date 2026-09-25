@@ -25,7 +25,7 @@ from refunnel_export import (
     _is_target_crashed,
     _scroll_until_card_found,
     _is_logged_out,
-    trigger_native_drive_upload,
+    download_approved_video,
 )
 
 
@@ -1265,239 +1265,6 @@ def test_sabotage_single_navigation_would_be_caught():
     assert len(page.goto_calls) == 2  # confirms actual correct behavior
 
 
-# ---------- trigger_native_drive_upload: confirmed real UI flow ----------
-
-class _FakeGridItemForDrive:
-    """Models a found grid_item whose .usage-rights-approved-card child
-    supports the SAME mechanism as the email-scraping flow: real
-    force-click, a pointer-sequence fallback, and JS-evaluated state
-    reads -- since _open_drive_upload_menu reuses those exact
-    primitives, not a separately-invented approach."""
-
-    def __init__(self, owner, opens_on="forced", fail_attempts=0, card_in_dom=True, geometry=None,
-                 now_pending_review=False):
-        self.owner = owner
-        self.opens_on = opens_on          # "forced" | "pointer" | "never"
-        self.fail_attempts = fail_attempts
-        self.card_in_dom = card_in_dom
-        self.now_pending_review = now_pending_review
-        self.geometry = geometry if geometry is not None else {
-            "connected": True, "width": 185, "height": 46, "top": 300, "left": 379,
-            "right": 564, "viewportWidth": 1280, "viewportHeight": 720,
-        }
-        self.attempt = 0
-        self.hovered = False
-
-    def hover(self):
-        self.hovered = True
-
-    def _attempt_can_open(self):
-        return self.attempt > self.fail_attempts
-
-    def locator(self, selector):
-        item = self
-
-        if "urq-title" in selector:
-            # The pre-check trigger_native_drive_upload runs BEFORE
-            # ever touching the card -- must be distinguishable from
-            # the .usage-rights-approved-card lookup below.
-            class _UrqTitle:
-                def count(_s):
-                    return 1 if item.now_pending_review else 0
-            return _UrqTitle()
-
-        class _Card:
-            @property
-            def first(_s):
-                return _s
-
-            def count(_s):
-                return 1 if item.card_in_dom else 0
-
-            def click(_s, force=False, timeout=None):
-                item.attempt += 1
-                item.owner.events.append("forced_click" if force else "physical_click")
-                if force and item.opens_on == "forced" and item._attempt_can_open():
-                    item.owner.menu_open = True
-
-            def evaluate(_s, js, arg=None, timeout=None):
-                if "scrollIntoView" in js:
-                    item.owner.events.append("scroll_into_view")
-                    return None
-                if "pointerdown" in js:
-                    item.owner.events.append("pointer_sequence")
-                    if item.opens_on == "pointer" and item._attempt_can_open():
-                        item.owner.menu_open = True
-                    return None
-                if "aria-expanded" in js:
-                    return "true" if item.owner.menu_open else "false"
-                if "getBoundingClientRect" in js:
-                    item.owner.events.append("geometry_read")
-                    if getattr(item, "geometry_read_fails", False):
-                        raise RuntimeError("card genuinely gone now")
-                    return item.geometry
-                return None
-        return _Card()
-
-
-class _ClickTrackingLocator:
-    def __init__(self, owner, name):
-        self.owner = owner
-        self.name = name
-
-    def wait_for(self, state=None, timeout=None):
-        if self.name == "upload_item" and not self.owner.menu_open:
-            raise RuntimeError("menu never opened (aria-expanded stayed false)")
-
-    def is_visible(self):
-        return self.name == "upload_item" and self.owner.menu_open
-
-    def inner_text(self, timeout=None):
-        return "Upload to Google Drive" if self.name == "upload_item" else ""
-
-    def click(self, timeout=None):
-        self.owner.clicks.append(self.name)
-
-    @property
-    def first(self):
-        return self
-
-
-class _DriveUploadPage:
-    """Page fake wired so _scroll_until_card_found (monkeypatched)
-    immediately returns a usable card -- isolates testing to
-    trigger_native_drive_upload's OWN flow (menu -> upload item -> All
-    folders tab -> folder row -> Save to Drive), not the scroll-search
-    logic, which already has its own tests."""
-
-    def __init__(self, folder_name_to_select="Refunnel - Swoveralls"):
-        self.menu_clicked = False
-        self.menu_open = False
-        self.events = []
-        self.clicks = []
-        self._folder_name = folder_name_to_select
-        self.scroll_resets = 0
-        self.screenshots = []
-
-    def screenshot(self, path, full_page=True):
-        self.screenshots.append(path)
-
-    def content(self):
-        return "<html></html>"
-
-    def press(self, key):
-        self.events.append(f"key:{key}")
-        if key == "Escape":
-            self.menu_open = False
-
-    @property
-    def keyboard(self):
-        return self
-
-    def evaluate(self, js, *a, **kw):
-        if "scrollTop = 0" in js:
-            self.scroll_resets += 1
-
-    def wait_for_timeout(self, ms):
-        pass
-
-    def wait_for_selector(self, selector, timeout=None):
-        # Save to Drive enables once a folder is picked; the fake always
-        # picks one, so it's enabled.
-        return None
-
-    def locator(self, selector):
-        from refunnel_export import (
-            DRIVE_UPLOAD_MENU_ITEM_SELECTOR,
-            DRIVE_MODAL_ALL_FOLDERS_TAB_SELECTOR,
-            DRIVE_MODAL_SAVE_BUTTON_SELECTOR,
-        )
-        if selector == DRIVE_UPLOAD_MENU_ITEM_SELECTOR:
-            return _ClickTrackingLocator(self, "upload_item")
-        if selector == DRIVE_MODAL_ALL_FOLDERS_TAB_SELECTOR:
-            return _ClickTrackingLocator(self, "all_folders_tab")
-        if selector == DRIVE_MODAL_SAVE_BUTTON_SELECTOR:
-            return _ClickTrackingLocator(self, "save_button")
-        return _ClickTrackingLocator(self, selector)
-
-    def get_by_text(self, text, exact=False):
-        class _L:
-            def __init__(_self, owner, matched):
-                _self.owner = owner
-                _self.matched = matched
-
-            def wait_for(_self, state=None, timeout=None):
-                pass
-
-            def click(_self):
-                if _self.matched:
-                    _self.owner.clicks.append(f"folder:{text}")
-
-            @property
-            def first(_self):
-                return _self
-        return _L(self, text == self._folder_name)
-
-    @property
-    def first(self):
-        return self
-
-
-@pytest.fixture
-def _stub_scroll_found(monkeypatch):
-    import refunnel_export as re_module
-    grid_item_holder = {}
-
-    def fake_scroll_found(page, media_id, scroll_container_selector):
-        item = _FakeGridItemForDrive(page)
-        grid_item_holder["item"] = item
-        return item, {}
-
-    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
-    return grid_item_holder
-
-
-def test_trigger_native_drive_upload_completes_the_full_flow(_stub_scroll_found):
-    page = _DriveUploadPage(folder_name_to_select="Refunnel - Swoveralls")
-    result = trigger_native_drive_upload(page, "tk_1", "Refunnel - Swoveralls")
-    assert result is True
-    assert page.clicks == ["upload_item", "all_folders_tab", "folder:Refunnel - Swoveralls", "save_button"]
-
-
-def test_trigger_native_drive_upload_returns_false_if_card_not_found(monkeypatch):
-    import refunnel_export as re_module
-    monkeypatch.setattr(re_module, "_scroll_until_card_found", lambda *a, **kw: (None, {}))
-    page = _DriveUploadPage()
-    result = trigger_native_drive_upload(page, "tk_missing", "Refunnel - Swoveralls")
-    assert result is False
-
-
-def test_trigger_native_drive_upload_saves_debug_snapshot_on_failure(_stub_scroll_found, tmp_path):
-    class _FailingPage(_DriveUploadPage):
-        def locator(self, selector):
-            raise RuntimeError("simulated UI failure")
-
-        def screenshot(self, path, full_page=True):
-            Path(path).write_bytes(b"fake")
-
-        def content(self):
-            return "<html>failure state</html>"
-
-    page = _FailingPage()
-    with pytest.raises(RuntimeError):
-        trigger_native_drive_upload(page, "tk_1", "Refunnel - Swoveralls", debug_dir=str(tmp_path))
-    saved = list(tmp_path.glob("drive_upload_failure_*.html"))
-    assert len(saved) == 1
-
-
-def test_sabotage_wrong_folder_selected_would_be_caught(_stub_scroll_found):
-    page = _DriveUploadPage(folder_name_to_select="Refunnel - Duderobe")  # only Duderobe row is "real"
-    trigger_native_drive_upload(page, "tk_1", "Refunnel - Swoveralls")  # but we asked for Swoveralls
-    with pytest.raises(AssertionError):
-        assert "folder:Refunnel - Swoveralls" in page.clicks  # wrong -- that row was never actually clicked
-    assert "folder:Refunnel - Swoveralls" not in page.clicks  # confirms it correctly never matched
-
-
 # ---------- scroll_to_top: the "stuck at the bottom" bug ----------
 
 class _ScrollTopTrackingPage:
@@ -1921,18 +1688,8 @@ def test_sabotage_retry_without_reset_would_never_find_the_card():
 
 
 
-def test_drive_upload_resets_scroll_before_searching(_stub_scroll_found):
-    page = _DriveUploadPage()
-    trigger_native_drive_upload(page, "tk_1", "Refunnel - Swoveralls")
-    assert page.scroll_resets == 1
 
 
-def test_sabotage_drive_search_without_reset_would_be_caught(_stub_scroll_found):
-    page = _DriveUploadPage()
-    trigger_native_drive_upload(page, "tk_1", "Refunnel - Swoveralls")
-    with pytest.raises(AssertionError):
-        assert page.scroll_resets == 0  # wrong -- that's the bug that stranded 4 of 5 videos
-    assert page.scroll_resets == 1
 
 
 # ---------- campaign discovery must scroll the dropdown (confirmed real: 10 of 22+) ----------
@@ -2021,37 +1778,10 @@ def _approved_soup():
     return BeautifulSoup(APPROVED_CARD_FIXTURE.read_text(), "html.parser")
 
 
-def test_approved_card_matches_exactly_once_on_a_real_approved_card():
-    # CONFIRMED REAL correction: this used to assert the ARIA wrapper
-    # (.pop-up-menu > [aria-controls]:has(...)) was the click target --
-    # the same design already disproven for the email-scraping flow. A
-    # live 527-video run showed hundreds of "scroll_into_view_if_needed
-    # Timeout 4000ms" failures clicking that wrapper once the grid got
-    # deep into a large batch. The card itself is clicked directly now.
-    soup = _approved_soup()
-    assert len(soup.select(".usage-rights-approved-card")) == 1
 
 
-def test_approved_card_is_not_the_dotted_menu():
-    # confirmed real: the dotted icon opens "Show content / Mute creator /
-    # Delete from library" -- the wrong menu, where Upload to Drive never appears
-    soup = _approved_soup()
-    card = soup.select_one(".usage-rights-approved-card")
-    dotted = soup.select_one(".post_dotted_menu__cpgc")
-    assert card is not None and dotted is not None
-    assert dotted not in card.parents and card not in dotted.parents
 
 
-def test_sabotage_targeting_the_aria_wrapper_would_be_caught():
-    import refunnel_export
-    import inspect
-    source = inspect.getsource(refunnel_export._open_drive_upload_menu)
-    with pytest.raises(AssertionError):
-        # wrong -- the design already disproven for email scraping (the
-        # docstring mentions it as history; the actual card_selector
-        # assigned and used for clicks must not be the wrapper)
-        assert 'card_selector = ".pop-up-menu > [aria-controls]' in source
-    assert 'card_selector = ".usage-rights-approved-card"' in source
 
 
 # ---------- the Approved filter is a URL param (confirmed from the live address bar) ----------
@@ -2095,54 +1825,8 @@ def test_fallback_uses_exact_match_so_a_longer_handle_cannot_collide():
     assert ":text-is(" in sel and ":has-text(" not in sel
 
 
-def test_ambiguous_fallback_skips_rather_than_uploading_the_wrong_video(monkeypatch):
-    import refunnel_export as re_module
-    calls = {"n": 0}
-
-    def fake_find(page, media_id, sel, card_selector=None):
-        calls["n"] += 1
-        return (None, {}) if card_selector is None else (object(), {})
-
-    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_find)
-
-    class _TwoMatches(_DriveUploadPage):
-        def locator(self, selector):
-            if "post-header-uname" in selector:
-                class _C:
-                    def count(_s):
-                        return 2   # same creator, same day
-                return _C()
-            return super().locator(selector)
-
-    page = _TwoMatches()
-    ok = re_module.trigger_native_drive_upload(
-        page, "ig_0431480af70141eab24c76d9f2b5b40c", "Refunnel - Swoveralls",
-        username="indycub9", created_at="2026-09-11T00:00:00Z",
-    )
-    assert ok is False
-    assert page.clicks == []   # never opened any menu
 
 
-def test_sabotage_uploading_on_an_ambiguous_match_would_be_caught(monkeypatch):
-    import refunnel_export as re_module
-    monkeypatch.setattr(re_module, "_scroll_until_card_found",
-                        lambda p, m, s, card_selector=None: (None, {}) if card_selector is None else (object(), {}))
-
-    class _TwoMatches(_DriveUploadPage):
-        def locator(self, selector):
-            if "post-header-uname" in selector:
-                class _C:
-                    def count(_s):
-                        return 2
-                return _C()
-            return super().locator(selector)
-
-    page = _TwoMatches()
-    re_module.trigger_native_drive_upload(page, "ig_x", "Refunnel - Swoveralls",
-                                          username="a", created_at="2026-09-11T00:00:00Z")
-    with pytest.raises(AssertionError):
-        assert "save_button" in page.clicks  # wrong -- would mean it uploaded a guessed video
-    assert "save_button" not in page.clicks
 
 
 # ---------- click-attempt timeout (confirmed real regression: up to 90s per stuck card) ----------
@@ -3108,147 +2792,22 @@ def test_sabotage_reintroducing_the_per_item_pending_message_would_be_caught(mon
 
 # ---------- Drive upload menu now retries in place, same as email scraping ----------
 
-def test_drive_menu_retries_by_re_clicking_the_card_not_just_re_waiting(monkeypatch):
-    import refunnel_export as re_module
-    grid_item_holder = {}
-
-    def fake_scroll_found(page, media_id, scroll_container_selector):
-        item = _FakeGridItemForDrive(page, opens_on="forced", fail_attempts=2)  # opens on 3rd try
-        grid_item_holder["item"] = item
-        return item, {}
-    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
-
-    page = _DriveUploadPage(folder_name_to_select="Refunnel - Swoveralls")
-    result = trigger_native_drive_upload(page, "tk_1", "Refunnel - Swoveralls")
-
-    assert result is True
-    item = grid_item_holder["item"]
-    assert item.attempt == 3  # the card was genuinely re-clicked each retry, not just re-waited-on
 
 
-def test_drive_menu_uses_pointer_sequence_when_the_forced_click_alone_does_not_open_it(monkeypatch):
-    import refunnel_export as re_module
-    grid_item_holder = {}
-
-    def fake_scroll_found(page, media_id, scroll_container_selector):
-        item = _FakeGridItemForDrive(page, opens_on="pointer")
-        grid_item_holder["item"] = item
-        return item, {}
-    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
-
-    page = _DriveUploadPage()
-    result = trigger_native_drive_upload(page, "tk_1", "Refunnel - Swoveralls")
-
-    assert result is True
-    assert "pointer_sequence" in page.events
 
 
-def test_drive_menu_that_never_opens_raises_after_three_attempts_not_hang(monkeypatch):
-    import refunnel_export as re_module
-
-    def fake_scroll_found(page, media_id, scroll_container_selector):
-        return _FakeGridItemForDrive(page, opens_on="never"), {}
-    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
-
-    page = _DriveUploadPage()
-    with pytest.raises(Exception):
-        trigger_native_drive_upload(page, "tk_1", "Refunnel - Swoveralls")
 
 
-def test_sabotage_the_drive_menu_giving_up_after_one_attempt_would_be_caught(monkeypatch):
-    # confirmed real bug this fixes: the OLD code had no retry loop at
-    # all here -- one attempt, straight to failure
-    import refunnel_export as re_module
-    grid_item_holder = {}
-
-    def fake_scroll_found(page, media_id, scroll_container_selector):
-        item = _FakeGridItemForDrive(page, opens_on="forced", fail_attempts=2)
-        grid_item_holder["item"] = item
-        return item, {}
-    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
-
-    page = _DriveUploadPage()
-    trigger_native_drive_upload(page, "tk_1", "Refunnel - Swoveralls")
-
-    item = grid_item_holder["item"]
-    with pytest.raises(AssertionError):
-        assert item.attempt == 1  # wrong -- that's the old, unretried behaviour
-    assert item.attempt == 3
 
 
 # ---------- Drive geometry diagnostic (same proven approach that resolved the email-flow mystery) ----------
 
-def test_drive_failure_message_includes_toggle_geometry(monkeypatch):
-    import refunnel_export as re_module
-    grid_item_holder = {}
-
-    def fake_scroll_found(page, media_id, scroll_container_selector):
-        item = _FakeGridItemForDrive(page, opens_on="never", geometry={
-            "connected": True, "width": 0, "height": 0, "top": 900, "left": 1250,
-            "right": 1250, "viewportWidth": 1280, "viewportHeight": 720,
-        })
-        grid_item_holder["item"] = item
-        return item, {}
-    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
-
-    page = _DriveUploadPage()
-    with pytest.raises(re_module.ExportError) as exc:
-        trigger_native_drive_upload(page, "tk_1", "Refunnel - Swoveralls")
-
-    assert "Toggle geometry when first found" in str(exc.value)
-    assert "'width': 0" in str(exc.value) and "'left': 1250" in str(exc.value)
 
 
-def test_drive_geometry_read_happens_once_early_not_after_giving_up(monkeypatch):
-    # CONFIRMED REAL correction already learned once from the email
-    # flow: reading geometry at the END (after every attempt already
-    # failed) only ever shows the card already gone -- unsurprising,
-    # since 3 attempts' worth of churn happened first. Read it once,
-    # on the FIRST attempt, before anything has a chance to disturb it.
-    import refunnel_export as re_module
-    grid_item_holder = {}
-
-    def fake_scroll_found(page, media_id, scroll_container_selector):
-        item = _FakeGridItemForDrive(page, opens_on="never")
-        grid_item_holder["item"] = item
-        return item, {}
-    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
-
-    page = _DriveUploadPage()
-    with pytest.raises(Exception):
-        trigger_native_drive_upload(page, "tk_1", "Refunnel - Swoveralls")
-
-    assert page.events.count("geometry_read") == 1
 
 
-def test_drive_geometry_read_costs_nothing_on_a_successful_upload(monkeypatch):
-    import refunnel_export as re_module
-
-    def fake_scroll_found(page, media_id, scroll_container_selector):
-        return _FakeGridItemForDrive(page, opens_on="forced"), {}
-    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
-
-    page = _DriveUploadPage()
-    result = trigger_native_drive_upload(page, "tk_1", "Refunnel - Swoveralls")
-
-    assert result is True
-    assert page.events.count("geometry_read") == 1  # read once, but doesn't block success
 
 
-def test_sabotage_dropping_the_drive_geometry_note_would_be_caught(monkeypatch):
-    import refunnel_export as re_module
-
-    def fake_scroll_found(page, media_id, scroll_container_selector):
-        return _FakeGridItemForDrive(page, opens_on="never"), {}
-    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
-
-    page = _DriveUploadPage()
-    with pytest.raises(re_module.ExportError) as exc:
-        trigger_native_drive_upload(page, "tk_1", "Refunnel - Swoveralls")
-
-    with pytest.raises(AssertionError):
-        assert "Toggle geometry" not in str(exc.value)  # wrong -- would mean dropping real evidence
-    assert "Toggle geometry" in str(exc.value)
 
 
 # ---------- card genuinely no longer Approved on Refunnel's live page (confirmed real, from a saved snapshot) ----------
@@ -3261,80 +2820,15 @@ def test_sabotage_dropping_the_drive_geometry_note_would_be_caught(monkeypatch):
 # with a .urq-title of "Pending review" instead. Their status changed on
 # Refunnel's live page sometime after Master Data was last exported.
 
-def test_card_no_longer_approved_returns_none_not_false_or_true(monkeypatch):
-    import refunnel_export as re_module
-
-    def fake_scroll_found(page, media_id, scroll_container_selector):
-        return _FakeGridItemForDrive(page, now_pending_review=True), {}
-    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
-
-    page = _DriveUploadPage()
-    result = trigger_native_drive_upload(page, "ig_0431480af70141eab24c76d9f2b5b40c", "Refunnel - Swoveralls")
-
-    assert result is None  # distinct from False (couldn't locate) and True (success)
-
-
-def test_card_no_longer_approved_never_attempts_the_menu_at_all(monkeypatch):
-    # checked BEFORE touching the card -- no wasted retries, no stray
-    # menu left open to interfere with the next item in the batch
-    import refunnel_export as re_module
-    grid_item_holder = {}
-
-    def fake_scroll_found(page, media_id, scroll_container_selector):
-        item = _FakeGridItemForDrive(page, now_pending_review=True)
-        grid_item_holder["item"] = item
-        return item, {}
-    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
-
-    page = _DriveUploadPage()
-    trigger_native_drive_upload(page, "ig_1", "Refunnel - Swoveralls")
-
-    assert grid_item_holder["item"].attempt == 0  # never even tried to click
-
-
-def test_card_no_longer_approved_prints_nothing_per_item(monkeypatch, capsys):
-    # CONFIRMED REAL feedback: not an error, no per-item narration
-    # needed -- the caller counts this once for its final summary line.
-    import refunnel_export as re_module
-
-    def fake_scroll_found(page, media_id, scroll_container_selector):
-        return _FakeGridItemForDrive(page, now_pending_review=True), {}
-    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
-
-    page = _DriveUploadPage()
-    trigger_native_drive_upload(page, "ig_1", "Refunnel - Swoveralls")
-
-    out = capsys.readouterr().out
-    assert out == ""
 
 
 
-def test_a_genuinely_approved_card_is_unaffected_by_this_check(monkeypatch):
-    import refunnel_export as re_module
-
-    def fake_scroll_found(page, media_id, scroll_container_selector):
-        return _FakeGridItemForDrive(page, now_pending_review=False, opens_on="forced"), {}
-    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
-
-    page = _DriveUploadPage(folder_name_to_select="Refunnel - Swoveralls")
-    result = trigger_native_drive_upload(page, "tk_1", "Refunnel - Swoveralls")
-
-    assert result is True
 
 
-def test_sabotage_treating_a_status_change_as_a_generic_failure_would_be_caught(monkeypatch):
-    import refunnel_export as re_module
 
-    def fake_scroll_found(page, media_id, scroll_container_selector):
-        return _FakeGridItemForDrive(page, now_pending_review=True), {}
-    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
 
-    page = _DriveUploadPage()
-    result = trigger_native_drive_upload(page, "ig_1", "Refunnel - Swoveralls")
 
-    with pytest.raises(AssertionError):
-        assert result is False  # wrong -- would misreport this as "couldn't locate the card"
-    assert result is None
+
 
 
 # ---------- scroll_to_load_all: widened defaults and scroll-delta nudge ----------
@@ -3433,37 +2927,278 @@ def test_sabotage_clicking_unconditionally_would_be_caught():
 
 # ---------- post-click evidence capture (does a click completing mean Refunnel actually accepted it?) ----------
 
-def test_capture_evidence_saves_a_post_click_screenshot(_stub_scroll_found, tmp_path):
-    page = _DriveUploadPage(folder_name_to_select="Refunnel - Swoveralls")
-    result = trigger_native_drive_upload(
-        page, "tk_1", "Refunnel - Swoveralls",
-        debug_dir=str(tmp_path), capture_evidence=True,
-    )
-    assert result is True
+
+
+
+
+
+
+# ---------- download_approved_video: restored, direct-download design ----------
+#
+# CONFIRMED REAL, direct decision from live evidence: this project spent
+# a long stretch on Refunnel's own native "Save to Drive" feature
+# instead of downloading directly. Every piece of that click-through
+# was eventually proven correct -- confirmed byte-identical to a
+# version that once worked, confirmed against the right Drive folder,
+# confirmed accepted by Refunnel's own "Uploading to Google Drive --
+# it will appear shortly" toast -- and the file still never landed,
+# across many separate runs, on a transfer that happens entirely on
+# Refunnel's own servers once that toast appears. Direct download puts
+# the whole pipeline back in code this project actually owns.
+
+class _FakeDownload:
+    def __init__(self, suggested_filename="video.mp4"):
+        self.suggested_filename = suggested_filename
+        self.saved_to = None
+
+    def save_as(self, path):
+        self.saved_to = path
+
+
+class _FakeDownloadInfo:
+    """Models the EventInfo Playwright's real expect_download() returns:
+    .value is resolved lazily, after the `with` block's click has
+    already happened -- not captured at __enter__ time, before
+    anything was triggered."""
+
+    def __init__(self, page):
+        self._page = page
+
+    @property
+    def value(self):
+        return self._page._triggered_download
+
+
+class _FakeExpectDownloadCM:
+    """Models page.expect_download() -- a context manager whose .value
+    resolves to whatever download the click inside the `with` block
+    triggered, matching the real Playwright API this reuses."""
+
+    def __init__(self, page):
+        self.page = page
+
+    def __enter__(self):
+        return _FakeDownloadInfo(self.page)
+
+    def __exit__(self, *a):
+        return False
+
+
+class _FakeDownloadButton:
+    def __init__(self, card, should_click_succeed=True):
+        self.card = card
+        self.should_click_succeed = should_click_succeed
+
+    @property
+    def first(self):
+        return self
+
+    def wait_for(self, state=None, timeout=None):
+        if not self.card.button_visible:
+            raise RuntimeError("download button never became visible")
+
+    def click(self):
+        if not self.should_click_succeed:
+            raise RuntimeError("simulated click failure")
+        self.card.page._triggered_download = _FakeDownload(self.card.suggested_filename)
+
+
+class _FakeDownloadCard:
+    """Models a found grid_item card: hover(), and a .locator() for the
+    download button whose visibility/click-success is configurable per
+    test, matching the real function's own hover -> find button ->
+    expect_download flow. page is assigned when _scroll_until_card_found
+    hands this card back (the fixture creates the card before the page
+    exists, so a test can configure it before calling the function)."""
+
+    def __init__(self, button_visible=True, click_succeeds=True, suggested_filename="video.mp4"):
+        self.page = None
+        self.hovered = False
+        self.button_visible = button_visible
+        self.click_succeeds = click_succeeds
+        self.suggested_filename = suggested_filename
+        self.now_pending_review = False
+
+    def hover(self):
+        self.hovered = True
+
+    def locator(self, selector):
+        if "urq-title" in selector:
+            class _UrqTitle:
+                def count(_s):
+                    return 1 if self.now_pending_review else 0
+            return _UrqTitle()
+        return _FakeDownloadButton(self, should_click_succeed=self.click_succeeds)
+
+
+class _FakeDownloadPage:
+    def __init__(self):
+        self._triggered_download = None
+        self.screenshots = []
+        self.evaluate_calls = []
+
+    def expect_download(self, timeout=None):
+        return _FakeExpectDownloadCM(self)
+
+    def evaluate(self, js, *a, **kw):
+        self.evaluate_calls.append(js)
+
+    def wait_for_timeout(self, ms):
+        pass
+
+    def screenshot(self, path, full_page=True):
+        self.screenshots.append(path)
+
+    def content(self):
+        return "<html></html>"
+
+    def locator(self, selector):
+        class _L:
+            def count(_s):
+                return 0
+        return _L()
+
+
+@pytest.fixture
+def _stub_scroll_found_for_download(monkeypatch):
+    import refunnel_export as re_module
+    holder = {"card": _FakeDownloadCard()}
+
+    def fake_scroll_found(page, media_id, scroll_container_selector, **kw):
+        holder["card"].page = page
+        return holder["card"], {}
+
+    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
+    return holder
+
+
+def test_download_approved_video_saves_the_file_with_the_real_extension(_stub_scroll_found_for_download, tmp_path):
+    holder = _stub_scroll_found_for_download
+    holder["card"].suggested_filename = "some_video.webm"
+    page = _FakeDownloadPage()
+
+    result = download_approved_video(page, "tk_1", str(tmp_path))
+
+    assert result == tmp_path / "tk_1.webm"
+    assert page._triggered_download.saved_to == str(tmp_path / "tk_1.webm")
+
+
+def test_download_approved_video_returns_false_if_card_not_found(monkeypatch, tmp_path):
+    import refunnel_export as re_module
+    monkeypatch.setattr(re_module, "_scroll_until_card_found", lambda *a, **kw: (None, {}))
+    page = _FakeDownloadPage()
+    result = download_approved_video(page, "tk_missing", str(tmp_path))
+    assert result is False
+
+
+def test_download_approved_video_returns_none_if_genuinely_pending_review(monkeypatch, tmp_path):
+    # CONFIRMED REAL: Refunnel's own team confirmed their Approved
+    # filter can include Pending review posts -- the same mismatch
+    # already confirmed for the native-upload flow before it was
+    # removed, carried over here since the underlying data issue is
+    # unrelated to which download mechanism is used.
+    import refunnel_export as re_module
+
+    def fake_scroll_found(page, media_id, scroll_container_selector, **kw):
+        card = _FakeDownloadCard()
+        card.page = page
+        card.now_pending_review = True
+        return card, {}
+    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
+
+    page = _FakeDownloadPage()
+    result = download_approved_video(page, "ig_1", str(tmp_path))
+    assert result is None
+
+
+def test_download_approved_video_retries_and_can_still_succeed(monkeypatch, tmp_path):
+    import refunnel_export as re_module
+    attempts_made = []
+
+    def fake_scroll_found(page, media_id, scroll_container_selector, **kw):
+        attempts_made.append(1)
+        # first two attempts hand back a card whose button never
+        # becomes visible; the third attempt's card works fine
+        card = _FakeDownloadCard(button_visible=(len(attempts_made) >= 3))
+        card.page = page
+        return card, {}
+    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
+
+    page = _FakeDownloadPage()
+    result = download_approved_video(page, "tk_1", str(tmp_path))
+
+    assert result == tmp_path / "tk_1.mp4"
+    assert len(attempts_made) == 3
+
+
+def test_download_approved_video_raises_and_saves_debug_snapshot_after_all_attempts_fail(
+    _stub_scroll_found_for_download, tmp_path
+):
+    holder = _stub_scroll_found_for_download
+    holder["card"].button_visible = False
+    page = _FakeDownloadPage()
+
+    with pytest.raises(ExportError):
+        download_approved_video(page, "tk_1", str(tmp_path), debug_dir=str(tmp_path / "debug"), attempts=2)
+
     assert len(page.screenshots) == 1
-    assert "drive_upload_post_click_tk_1" in page.screenshots[0]
+    assert "drive_download_failure_tk_1" in page.screenshots[0]
 
 
-def test_no_evidence_capture_when_not_requested(_stub_scroll_found, tmp_path):
-    # CONFIRMED REAL cost this avoids: capturing this for every single
-    # triggered item, not just a sample, would be needless overhead at
-    # real volume -- the caller only asks for it on the first trigger
-    # each run.
-    page = _DriveUploadPage(folder_name_to_select="Refunnel - Swoveralls")
-    result = trigger_native_drive_upload(
-        page, "tk_1", "Refunnel - Swoveralls",
-        debug_dir=str(tmp_path), capture_evidence=False,
+def test_download_approved_video_ambiguous_fallback_match_skips(monkeypatch, tmp_path):
+    # CONFIRMED REAL: same "skipping is always safer" principle already
+    # proven for the native-upload flow -- more than one card matching
+    # the same creator + date means downloading the wrong video is a
+    # real risk, not a hypothetical one.
+    import refunnel_export as re_module
+    call_count = {"n": 0}
+
+    def fake_scroll_found(page, media_id, scroll_container_selector, card_selector=None, **kw):
+        call_count["n"] += 1
+        if card_selector is None:
+            return None, {}  # id-based search never matches (hex id)
+        card = _FakeDownloadCard()
+        card.page = page
+        return card, {}  # fallback finds a card
+    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
+
+    class _TwoMatchesPage(_FakeDownloadPage):
+        def locator(self, selector):
+            class _L:
+                def count(_s):
+                    return 2  # two cards match the same handle+date
+            return _L()
+
+    page = _TwoMatchesPage()
+    result = download_approved_video(
+        page, "ig_hexid", str(tmp_path), username="@same_creator", created_at="2026-03-10T00:00:00Z"
     )
-    assert result is True
-    assert page.screenshots == []
+    assert result is False
 
 
-def test_sabotage_never_capturing_evidence_would_be_caught(_stub_scroll_found, tmp_path):
-    page = _DriveUploadPage(folder_name_to_select="Refunnel - Swoveralls")
-    trigger_native_drive_upload(
-        page, "tk_1", "Refunnel - Swoveralls",
-        debug_dir=str(tmp_path), capture_evidence=True,
+def test_sabotage_downloading_an_ambiguous_match_would_be_caught(monkeypatch, tmp_path, capsys):
+    import refunnel_export as re_module
+
+    def fake_scroll_found(page, media_id, scroll_container_selector, card_selector=None, **kw):
+        if card_selector is None:
+            return None, {}
+        card = _FakeDownloadCard()
+        card.page = page
+        return card, {}
+    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
+
+    class _TwoMatchesPage(_FakeDownloadPage):
+        def locator(self, selector):
+            class _L:
+                def count(_s):
+                    return 2
+            return _L()
+
+    page = _TwoMatchesPage()
+    result = download_approved_video(
+        page, "ig_hexid", str(tmp_path), username="@same_creator", created_at="2026-03-10T00:00:00Z"
     )
     with pytest.raises(AssertionError):
-        assert page.screenshots == []  # wrong -- would mean losing the only real evidence of a silent failure
-    assert len(page.screenshots) == 1
+        assert result is not False  # wrong -- would mean risking the wrong video
+    assert result is False
+    assert "skipping media_id" in capsys.readouterr().out
