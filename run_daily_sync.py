@@ -195,9 +195,36 @@ def _setup_and_parse_media(config: dict, state: dict):
     page = context.new_page()
     state["page"] = page
 
-    # --- 2. select the right workspace, then export media ---
+    # --- 2. select the right workspace, then load and export media ---
     refunnel_export.goto_social_listening_for_workspace(page, refunnel_workspace_name, known_workspace_names)
-    refunnel_export.scroll_to_load_all(page)
+
+    # CONFIRMED REAL, recurring problem: scroll_to_load_all has stalled
+    # early on a genuinely healthy-looking page multiple times as this
+    # dataset has grown (already widened twice: 1200ms/6 rounds ->
+    # 2000ms/12 -> 3000ms/20). A live Phase 1 failure showed it
+    # stopping at 2460/5895 after 20 idle rounds -- a full minute of
+    # literally zero growth, on a screenshot with normal, varied
+    # content and no visible error anywhere on the page. Unlike Phase
+    # 3's mid-scraping re-scroll (which already retries with a fresh
+    # navigation on exactly this kind of stall), this initial call had
+    # no retry at all -- one stall meant the whole phase aborted
+    # immediately, writing nothing to the sheet. Same fresh-navigation
+    # retry pattern already proven to work there, applied here too.
+    scroll_retries = 3
+    for attempt in range(scroll_retries):
+        try:
+            refunnel_export.scroll_to_load_all(page)
+            break
+        except refunnel_export.ExportError as e:
+            if attempt >= scroll_retries - 1:
+                raise
+            print(f"WARNING: scroll_to_load_all stalled (attempt {attempt + 1} of "
+                  f"{scroll_retries}) -- {e}. Retrying with a fresh page navigation "
+                  f"rather than giving up immediately.")
+            refunnel_export.goto_social_listening_for_workspace(
+                page, refunnel_workspace_name, known_workspace_names
+            )
+
     media_csv_path = refunnel_export.export_media_csv(page, download_dir)
 
     # --- 3. parse media, connect to sheets ---
