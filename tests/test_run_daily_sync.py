@@ -149,3 +149,36 @@ def test_sabotage_running_phase3_after_a_failed_phase1_would_be_caught(monkeypat
     with pytest.raises(AssertionError):
         assert "phase3" in calls  # wrong -- would mean scraping ran despite a failed export
     assert calls == ["phase1"]
+
+
+# ---------- initial scroll_to_load_all retries on a stall (confirmed real gap) ----------
+#
+# CONFIRMED REAL, direct evidence: a live Phase 1 failure showed
+# scroll_to_load_all stopping at 2460/5895 after 20 idle rounds -- a
+# full minute of zero growth, on a screenshot with normal, varied
+# content and no visible error anywhere on the page. Phase 3's
+# mid-scraping re-scroll already retries with a fresh navigation on
+# exactly this kind of stall; this initial call, used by both phases
+# via _setup_and_parse_media, had none at all -- one stall meant the
+# whole phase aborted immediately, writing nothing to the sheet.
+
+def test_setup_and_parse_media_retries_scroll_to_load_all_on_a_stall():
+    source = inspect.getsource(run_daily_sync._setup_and_parse_media)
+    # the retry loop must wrap scroll_to_load_all specifically, and
+    # catch the same ExportError type it actually raises on a stall
+    assert "for attempt in range(scroll_retries)" in source
+    assert "refunnel_export.ExportError" in source
+    assert "goto_social_listening_for_workspace" in source[source.index("scroll_retries"):]
+
+
+def test_sabotage_a_single_unretried_scroll_call_would_be_caught():
+    fake_source_no_retry = (
+        "def _setup_and_parse_media(config, state):\n"
+        "    refunnel_export.goto_social_listening_for_workspace(page, name, known)\n"
+        "    refunnel_export.scroll_to_load_all(page)\n"
+        "    media_csv_path = refunnel_export.export_media_csv(page, download_dir)\n"
+    )
+    with pytest.raises(AssertionError):
+        assert "for attempt in range(scroll_retries)" in fake_source_no_retry  # wrong -- no retry at all
+    real_source = inspect.getsource(run_daily_sync._setup_and_parse_media)
+    assert "for attempt in range(scroll_retries)" in real_source
