@@ -190,9 +190,21 @@ def main() -> int:
             # lost. The final full sync pass at the end (all 6 tabs,
             # including Master Data again) reconciles everything
             # regardless, so this is a safety net, not the only write.
+            #
+            # CONFIRMED REAL gap this closes: this early write didn't
+            # pass sort_key at all, unlike the final full sync pass
+            # (which correctly sorts Master Data by created_at,
+            # newest first). If a run crashes during scraping --
+            # confirmed to happen repeatedly in this project (browser
+            # crashes, scroll_to_load_all failures) -- the sheet is
+            # left stuck with only this early write's order until the
+            # next successful, complete run. A live comparison against
+            # the actual Refunnel page (sorted newest-to-oldest)
+            # showed the sheet's order not matching it at all.
             print("Writing Master Data once before scraping starts, so progress can be saved incrementally...")
             sheets_sync.sync_tab(master_client, parse_refunnel.MASTER_COLUMNS, result.master, never_delete=True,
-                                 preserve_columns=parse_refunnel.SHEET_OWNED_COLUMNS)
+                                 preserve_columns=parse_refunnel.SHEET_OWNED_COLUMNS,
+                                 sort_key="created_at", sort_reverse=True)
 
             # scrape_creator_emails() now owns its own scroll reset
             # entirely (both at its own start and after every failed
