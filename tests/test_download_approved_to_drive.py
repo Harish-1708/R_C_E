@@ -748,3 +748,43 @@ def test_sabotage_hiding_a_real_mismatch_would_be_caught(monkeypatch, capsys):
     with pytest.raises(AssertionError):
         assert "MATCHES the name clicked" in out and "DOES NOT" not in out  # wrong -- would hide a real mismatch
     assert "DOES NOT MATCH" in out
+
+
+def test_evidence_is_captured_only_for_the_first_trigger_each_run(monkeypatch):
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
+    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
+    rows = [MASTER_HEADER] + [_row(f"tk_{i}") for i in range(4)]
+    master_ws = FakeWorksheet(rows=rows)
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+
+    evidence_flags = []
+    monkeypatch.setattr(
+        dad.refunnel_export, "trigger_native_drive_upload",
+        lambda page, media_id, folder_name, **kw: evidence_flags.append(kw.get("capture_evidence")) or True
+    )
+    monkeypatch.setattr(dad.drive_upload, "find_existing_upload", lambda *a, **kw: None)
+
+    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
+
+    assert evidence_flags == [True, False, False, False]
+
+
+def test_sabotage_capturing_evidence_for_every_item_would_be_caught(monkeypatch):
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
+    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
+    rows = [MASTER_HEADER] + [_row(f"tk_{i}") for i in range(4)]
+    master_ws = FakeWorksheet(rows=rows)
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+
+    evidence_flags = []
+    monkeypatch.setattr(
+        dad.refunnel_export, "trigger_native_drive_upload",
+        lambda page, media_id, folder_name, **kw: evidence_flags.append(kw.get("capture_evidence")) or True
+    )
+    monkeypatch.setattr(dad.drive_upload, "find_existing_upload", lambda *a, **kw: None)
+
+    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
+
+    with pytest.raises(AssertionError):
+        assert all(evidence_flags)  # wrong -- would mean needless overhead on every single item
+    assert evidence_flags == [True, False, False, False]
