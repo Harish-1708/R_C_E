@@ -502,3 +502,61 @@ def test_sabotage_a_per_item_message_reappearing_would_be_caught(monkeypatch, ca
     with pytest.raises(AssertionError):
         assert "media_id='tk_1'" in out  # wrong -- would mean the removed noise came back
     assert "media_id='tk_1'" not in out
+
+
+def test_run_keeps_going_past_failures_to_reach_real_successes(monkeypatch):
+    # CONFIRMED REAL bug this fixes: a live run showed the exact same
+    # 50 media_ids, same order, same 0 successes, across multiple
+    # separate runs and days -- because target_ids used to be a fixed
+    # slice of the FIRST BATCH_SIZE ids, taken once. Any id that fails
+    # never gets drive_uploaded_at set, so it's still first in line
+    # next time -- the queue was permanently stuck on the same
+    # persistently-failing front, never reaching ids further down that
+    # might actually succeed.
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
+    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
+    monkeypatch.setattr(dad, "BATCH_SIZE", 2)
+    monkeypatch.setattr(dad, "MAX_ATTEMPTS_PER_RUN", 10)
+
+    # first 5 are permanently un-locatable; ids 5 and 6 would actually succeed
+    rows = [MASTER_HEADER] + [_row(f"tk_{i}") for i in range(8)]
+    master_ws = FakeWorksheet(rows=rows)
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+
+    def fake_trigger(page, media_id, folder_name, **kw):
+        return media_id in ("tk_5", "tk_6")
+    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", fake_trigger)
+    monkeypatch.setattr(dad.drive_upload, "find_and_rename_uploaded_file",
+                         lambda *a, **kw: "fake_file_id")
+
+    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
+
+    # both real successes reached and marked uploaded, despite 5 failures in front of them
+    assert master_ws.rows[6][MASTER_HEADER.index("drive_uploaded_at")] != ""  # tk_5
+    assert master_ws.rows[7][MASTER_HEADER.index("drive_uploaded_at")] != ""  # tk_6
+
+
+def test_sabotage_stopping_at_a_fixed_slice_would_be_caught(monkeypatch):
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
+    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
+    monkeypatch.setattr(dad, "BATCH_SIZE", 2)
+    monkeypatch.setattr(dad, "MAX_ATTEMPTS_PER_RUN", 10)
+
+    rows = [MASTER_HEADER] + [_row(f"tk_{i}") for i in range(8)]
+    master_ws = FakeWorksheet(rows=rows)
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+
+    attempted = []
+
+    def fake_trigger(page, media_id, folder_name, **kw):
+        attempted.append(media_id)
+        return media_id in ("tk_5", "tk_6")
+    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", fake_trigger)
+    monkeypatch.setattr(dad.drive_upload, "find_and_rename_uploaded_file",
+                         lambda *a, **kw: "fake_file_id")
+
+    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
+
+    with pytest.raises(AssertionError):
+        assert "tk_5" not in attempted  # wrong -- that's the old, permanently-stuck behavior
+    assert "tk_5" in attempted and "tk_6" in attempted
