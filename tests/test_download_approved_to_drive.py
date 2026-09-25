@@ -187,7 +187,12 @@ def test_nothing_to_upload_when_no_approved_rows(monkeypatch, capsys):
     assert "nothing new to upload" in capsys.readouterr().out
 
 
-def test_happy_path_triggers_native_upload_and_marks_the_row(monkeypatch):
+def test_happy_path_triggers_the_upload_and_leaves_it_for_a_future_run_to_confirm(monkeypatch):
+    # CONFIRMED REAL simplification: no waiting or confirming within a
+    # run at all now. Triggering is the only thing this run does for a
+    # genuinely new upload -- the row stays unmarked until a FUTURE
+    # run's pre-check (find_existing_upload) finds it landed and
+    # renames it, whenever that turns out to be.
     monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
     monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
     master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1")])
@@ -198,16 +203,11 @@ def test_happy_path_triggers_native_upload_and_marks_the_row(monkeypatch):
         dad.refunnel_export, "trigger_native_drive_upload",
         lambda page, media_id, folder_name, **kw: trigger_calls.append((media_id, folder_name)) or True
     )
-    # Two-phase flow: find_existing_upload's FIRST call per fragment is
-    # the pre-check (nothing there yet); the confirm phase's own call
-    # right after is what actually finds it -- both go through this
-    # one function now, not a separate find_and_rename_uploaded_file.
     find_calls = []
-
-    def _find(service, folder_id, fragment):
-        find_calls.append((folder_id, fragment))
-        return None if len(find_calls) == 1 else {"id": "file_123", "name": "raw.mp4"}
-    monkeypatch.setattr(dad.drive_upload, "find_existing_upload", _find)
+    monkeypatch.setattr(
+        dad.drive_upload, "find_existing_upload",
+        lambda service, folder_id, fragment: find_calls.append((folder_id, fragment)) or None
+    )
     rename_calls = []
     monkeypatch.setattr(
         dad.drive_upload, "rename_file",
@@ -217,11 +217,11 @@ def test_happy_path_triggers_native_upload_and_marks_the_row(monkeypatch):
     dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
 
     assert trigger_calls == [("tk_1", "Refunnel - Swoveralls")]
-    assert find_calls == [("folder1", "1"), ("folder1", "1")]  # pre-check, then confirm
-    assert rename_calls == [("file_123", "Swoveralls | @creatorname | tk_1.mp4")]
+    assert find_calls == [("folder1", "1")]  # exactly one pre-check, nothing more
+    assert rename_calls == []  # nothing to rename yet -- it hasn't landed
     header = master_ws.rows[0]
     upload_idx = header.index("drive_uploaded_at")
-    assert master_ws.rows[1][upload_idx]  # non-blank -- marked
+    assert not master_ws.rows[1][upload_idx]  # still blank -- confirmed on a future run instead
 
 
 def test_uses_the_configured_drive_folder_name_not_the_default(monkeypatch):
@@ -260,10 +260,12 @@ def test_not_triggered_leaves_row_unmarked_for_retry(monkeypatch):
     assert not master_ws.rows[1][upload_idx]  # left unmarked
 
 
-def test_not_yet_confirmed_in_drive_leaves_row_unmarked_for_retry(monkeypatch):
-    # confirmed real, deliberate design: Refunnel's upload happens on
-    # its own servers, not instantly -- if it hasn't shown up in Drive
-    # within the wait, that's "not yet", not "failed"
+def test_a_new_trigger_leaves_the_row_unmarked_until_a_future_run_confirms_it(monkeypatch):
+    # CONFIRMED REAL, deliberate design: Refunnel's upload happens on
+    # its own servers, not instantly, and this run doesn't wait or
+    # check for it at all -- triggering is all it does. The row stays
+    # unmarked; that's the correct, expected state until some future
+    # run's pre-check finds it landed, not a failure to react to now.
     monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
     monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
     master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1")])
@@ -319,21 +321,23 @@ def test_one_failed_video_does_not_stop_the_rest(monkeypatch, capsys):
     master_ws = FakeWorksheet(rows=rows)
     gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
 
+    triggered = []
+
     def fake_trigger(page, media_id, folder_name, **kw):
         if media_id == "tk_bad":
             raise RuntimeError("simulated upload-trigger failure")
+        triggered.append(media_id)
         return True
 
     monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", fake_trigger)
+    monkeypatch.setattr(dad.drive_upload, "find_existing_upload", lambda *a, **kw: None)
 
     dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
 
-    header = master_ws.rows[0]
-    upload_idx = header.index("drive_uploaded_at")
-    id_idx = header.index("id")
-    by_id = {row[id_idx]: row[upload_idx] for row in master_ws.rows[1:]}
-    assert by_id["tk_good"]       # succeeded, marked
-    assert not by_id["tk_bad"]    # failed, left unmarked for retry
+    assert triggered == ["tk_good"]  # tk_bad's failure didn't stop tk_good from being tried
+    out = capsys.readouterr().out
+    assert "failed 1" in out
+    assert "triggered 1 new upload" in out
 
 
 def test_sabotage_reprocessing_an_uploaded_row_would_be_caught(monkeypatch):
@@ -546,15 +550,19 @@ def test_run_keeps_going_past_failures_to_reach_real_successes(monkeypatch):
     master_ws = FakeWorksheet(rows=rows)
     gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
 
+    triggered = []
+
     def fake_trigger(page, media_id, folder_name, **kw):
-        return media_id in ("tk_5", "tk_6")
+        succeeds = media_id in ("tk_5", "tk_6")
+        if succeeds:
+            triggered.append(media_id)
+        return succeeds
     monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", fake_trigger)
 
     dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
 
-    # both real successes reached and marked uploaded, despite 5 failures in front of them
-    assert master_ws.rows[6][MASTER_HEADER.index("drive_uploaded_at")] != ""  # tk_5
-    assert master_ws.rows[7][MASTER_HEADER.index("drive_uploaded_at")] != ""  # tk_6
+    # both real successes reached and triggered, despite 5 failures in front of them
+    assert triggered == ["tk_5", "tk_6"]
 
 
 def test_sabotage_stopping_at_a_fixed_slice_would_be_caught(monkeypatch):
@@ -630,69 +638,41 @@ def test_sabotage_ignoring_the_time_budget_would_be_caught(monkeypatch):
     assert len(attempted) == 0
 
 
-def test_drive_upload_wait_default_widened_to_90_seconds():
-    # CONFIRMED REAL: 30s was consistently too short -- a live run
-    # showed the exact same media_ids, freshly triggered with nothing
-    # pre-existing in Drive to find, still not landing within 30s,
-    # requiring a second separate run before find_existing_upload()
-    # could finally catch and confirm them.
-    assert dad.DRIVE_UPLOAD_WAIT_SECONDS == 90.0
 
-
-def test_sabotage_reverting_to_30_seconds_would_be_caught():
-    with pytest.raises(AssertionError):
-        assert dad.DRIVE_UPLOAD_WAIT_SECONDS == 30.0  # wrong -- the old, confirmed-too-short default
-    assert dad.DRIVE_UPLOAD_WAIT_SECONDS == 90.0
-
-
-# ---------- two-phase trigger/confirm design (scales past sequential per-item waiting) ----------
-
-def test_confirm_phase_checks_every_pending_item_each_round(monkeypatch):
-    # the wait between rounds is shared -- every still-pending item is
-    # checked together each round, not one at a time with its own wait
+def test_no_sleep_is_ever_called_anywhere_in_a_run(monkeypatch):
+    # CONFIRMED REAL simplification, direct feedback: no waiting or
+    # checking for confirmation within a run at all, at any point.
+    # Trigger, and move on -- a future run's pre-check handles
+    # confirming and renaming whenever it actually lands.
     monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
     monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
-    rows = [MASTER_HEADER] + [_row(f"tk_{i}") for i in range(3)]
+    rows = [MASTER_HEADER] + [_row(f"tk_{i}") for i in range(10)]
     master_ws = FakeWorksheet(rows=rows)
     gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
 
     monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", lambda *a, **kw: True)
-    sleep_calls = []
-    monkeypatch.setattr(dad.time, "sleep", lambda s: sleep_calls.append(s))
-    find_calls = []
-
-    def _find(service, folder_id, fragment):
-        find_calls.append(fragment)
-        return None  # never found -- every round checks all 3, every time
-    monkeypatch.setattr(dad.drive_upload, "find_existing_upload", _find)
-
-    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
-
-    # 3 pre-checks (one per item, trigger phase) + 3 items * 4 confirm rounds
-    assert len(find_calls) == 3 + (3 * dad.DRIVE_CONFIRM_ROUNDS)
-    # exactly one shared sleep between each pair of rounds, not one per item
-    assert len(sleep_calls) == dad.DRIVE_CONFIRM_ROUNDS - 1
-    # the TOTAL wait across all rounds equals the configured budget --
-    # spread across rounds, not the full budget repeated every round
-    assert sum(sleep_calls) == pytest.approx(dad.DRIVE_UPLOAD_WAIT_SECONDS)
-
-
-def test_sabotage_waiting_per_item_instead_of_per_round_would_be_caught(monkeypatch):
-    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
-    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
-    rows = [MASTER_HEADER] + [_row(f"tk_{i}") for i in range(3)]
-    master_ws = FakeWorksheet(rows=rows)
-    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
-
-    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", lambda *a, **kw: True)
-    sleep_calls = []
-    monkeypatch.setattr(dad.time, "sleep", lambda s: sleep_calls.append(s))
     monkeypatch.setattr(dad.drive_upload, "find_existing_upload", lambda *a, **kw: None)
+    sleep_calls = []
+    monkeypatch.setattr(dad.time, "sleep", lambda *a: sleep_calls.append(a))
+
+    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
+
+    assert sleep_calls == []
+
+
+def test_sabotage_adding_a_wait_back_in_would_be_caught(monkeypatch):
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
+    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1")])
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+
+    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", lambda *a, **kw: True)
+    monkeypatch.setattr(dad.drive_upload, "find_existing_upload", lambda *a, **kw: None)
+    sleep_calls = []
+    monkeypatch.setattr(dad.time, "sleep", lambda *a: sleep_calls.append(a))
 
     dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
 
     with pytest.raises(AssertionError):
-        # wrong -- 3 items * (DRIVE_CONFIRM_ROUNDS - 1) would mean a
-        # separate wait PER ITEM, the old, non-scaling design
-        assert len(sleep_calls) == 3 * (dad.DRIVE_CONFIRM_ROUNDS - 1)
-    assert len(sleep_calls) == dad.DRIVE_CONFIRM_ROUNDS - 1
+        assert len(sleep_calls) > 0  # wrong -- would mean the old waiting complexity came back
+    assert sleep_calls == []
