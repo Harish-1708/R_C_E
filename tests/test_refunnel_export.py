@@ -1377,6 +1377,13 @@ class _DriveUploadPage:
         self.clicks = []
         self._folder_name = folder_name_to_select
         self.scroll_resets = 0
+        self.screenshots = []
+
+    def screenshot(self, path, full_page=True):
+        self.screenshots.append(path)
+
+    def content(self):
+        return "<html></html>"
 
     def press(self, key):
         self.events.append(f"key:{key}")
@@ -3422,3 +3429,41 @@ def test_sabotage_clicking_unconditionally_would_be_caught():
     with pytest.raises(AssertionError):
         assert page.content_tab_clicked is True  # wrong -- the regression this exact fix caused
     assert page.content_tab_clicked is False
+
+
+# ---------- post-click evidence capture (does a click completing mean Refunnel actually accepted it?) ----------
+
+def test_capture_evidence_saves_a_post_click_screenshot(_stub_scroll_found, tmp_path):
+    page = _DriveUploadPage(folder_name_to_select="Refunnel - Swoveralls")
+    result = trigger_native_drive_upload(
+        page, "tk_1", "Refunnel - Swoveralls",
+        debug_dir=str(tmp_path), capture_evidence=True,
+    )
+    assert result is True
+    assert len(page.screenshots) == 1
+    assert "drive_upload_post_click_tk_1" in page.screenshots[0]
+
+
+def test_no_evidence_capture_when_not_requested(_stub_scroll_found, tmp_path):
+    # CONFIRMED REAL cost this avoids: capturing this for every single
+    # triggered item, not just a sample, would be needless overhead at
+    # real volume -- the caller only asks for it on the first trigger
+    # each run.
+    page = _DriveUploadPage(folder_name_to_select="Refunnel - Swoveralls")
+    result = trigger_native_drive_upload(
+        page, "tk_1", "Refunnel - Swoveralls",
+        debug_dir=str(tmp_path), capture_evidence=False,
+    )
+    assert result is True
+    assert page.screenshots == []
+
+
+def test_sabotage_never_capturing_evidence_would_be_caught(_stub_scroll_found, tmp_path):
+    page = _DriveUploadPage(folder_name_to_select="Refunnel - Swoveralls")
+    trigger_native_drive_upload(
+        page, "tk_1", "Refunnel - Swoveralls",
+        debug_dir=str(tmp_path), capture_evidence=True,
+    )
+    with pytest.raises(AssertionError):
+        assert page.screenshots == []  # wrong -- would mean losing the only real evidence of a silent failure
+    assert len(page.screenshots) == 1
