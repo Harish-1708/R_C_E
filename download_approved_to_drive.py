@@ -87,6 +87,13 @@ BATCH_SIZE = int(os.environ.get("DRIVE_BACKFILL_BATCH_SIZE", "50"))
 # own DRIVE_BACKFILL_TIME_BUDGET_MINUTES already bounds the whole run
 # regardless, so a longer per-item wait here is safe, not a new risk.
 DRIVE_UPLOAD_WAIT_SECONDS = float(os.environ.get("DRIVE_UPLOAD_WAIT_SECONDS", "90"))
+# CONFIRMED REAL scaling problem this fixes: waiting this long PER ITEM
+# doesn't work at real volume -- 2000+ videos at up to 90s each,
+# sequentially, is not workable. DRIVE_UPLOAD_WAIT_SECONDS is now the
+# TOTAL time budget spread across this many confirm rounds, checking
+# every still-pending item together each round, with the wait between
+# rounds paid ONCE and shared across all of them -- not once per item.
+DRIVE_CONFIRM_ROUNDS = int(os.environ.get("DRIVE_CONFIRM_ROUNDS", "4"))
 # CONFIRMED REAL bug this fixes: target_ids used to be a single, fixed
 # slice of the first BATCH_SIZE ids in the queue, taken once. Any id
 # that fails (couldn't locate, status changed since export) never gets
@@ -198,21 +205,35 @@ def process_one_brand(
         # search (reset_scroll=False below) covers the whole batch.
         refunnel_export.scroll_to_top(page)
 
-        uploaded, not_yet_confirmed, failed, status_changed, attempted = 0, 0, 0, 0, 0
+        # CONFIRMED REAL scaling problem this fixes: waiting per item
+        # (even the widened 90s) means N triggered uploads cost N *
+        # up-to-90s sequentially -- at 2000+ videos that is not
+        # workable. Restructured into two phases: TRIGGER everything
+        # first, fast, with no per-item wait at all; then CONFIRM in a
+        # few rounds where the wait between rounds is paid ONCE, shared
+        # across every still-pending item, not once per item. For 50
+        # triggered items this is the difference between up to 75
+        # minutes (50 * 90s, worst case, sequential) and about a
+        # minute (a couple of shared 30s waits total) -- and the gap
+        # only grows at real scale, since Refunnel's own transfers
+        # keep running in the background while later items are still
+        # being triggered.
+        uploaded, not_yet_confirmed, failed, status_changed, attempted, triggered_count = 0, 0, 0, 0, 0, 0
         deadline = time.monotonic() + DRIVE_BACKFILL_TIME_BUDGET_MINUTES * 60
+        pending_confirmation = []  # (media_id, filename, fragment)
         for media_id in target_ids:
-            if uploaded >= BATCH_SIZE:
+            if triggered_count >= BATCH_SIZE:
                 break
             if attempted >= MAX_ATTEMPTS_PER_RUN:
                 print(f"{brand}: reached the {MAX_ATTEMPTS_PER_RUN}-attempt safety cap for this "
-                      f"run with only {uploaded} confirmed -- stopping here rather than risking "
-                      f"an unbounded run; the rest of the queue is picked up on a future run.")
+                      f"run with {triggered_count} triggered so far -- stopping here rather than "
+                      f"risking an unbounded run; the rest of the queue is picked up on a future run.")
                 break
             if time.monotonic() >= deadline:
                 print(f"{brand}: reached this run's {DRIVE_BACKFILL_TIME_BUDGET_MINUTES:.0f}-minute "
-                      f"time budget with only {uploaded} confirmed -- stopping cleanly here rather "
-                      f"than risking a run right up against the job's own hard timeout; the rest of "
-                      f"the queue is picked up on a future run.")
+                      f"time budget with {triggered_count} triggered so far -- stopping cleanly here "
+                      f"rather than risking a run right up against the job's own hard timeout; the "
+                      f"rest of the queue is picked up on a future run.")
                 break
             attempted += 1
             row = master_rows[media_id]
@@ -221,12 +242,13 @@ def process_one_brand(
             fragment = parse_refunnel.drive_match_fragment(media_id)
             try:
                 # CONFIRMED REAL gap this closes: a slow Refunnel
-                # transfer that missed the previous run's 30s window
-                # left drive_uploaded_at blank, so this SAME media_id
-                # would otherwise trigger ANOTHER upload here -- a real
-                # duplicate, while the first upload sat in Drive
-                # forever under its raw, unrenamed name. Check for it
-                # first; if it's already there, just rename it.
+                # transfer that missed a previous run's confirmation
+                # window left drive_uploaded_at blank, so this SAME
+                # media_id would otherwise trigger ANOTHER upload here
+                # -- a real duplicate, while the first upload sat in
+                # Drive forever under its raw, unrenamed name. Check
+                # for it first; if it's already there, just rename it
+                # immediately -- it doesn't need the confirm phase.
                 existing = drive_upload.find_existing_upload(drive_service, folder_id, fragment)
                 if existing is not None:
                     drive_upload.rename_file(drive_service, existing["id"], filename)
@@ -237,7 +259,6 @@ def process_one_brand(
                           f"expected earlier run -- renamed it instead of triggering a duplicate.")
                     continue
 
-                trigger_ts = _now_iso()
                 triggered = refunnel_export.trigger_native_drive_upload(
                     page, media_id, drive_folder_name, debug_dir=debug_dir,
                     username=username, created_at=row.get("created_at", ""),
@@ -264,28 +285,49 @@ def process_one_brand(
                     failed += 1
                     continue
 
-                file_id = drive_upload.find_and_rename_uploaded_file(
-                    drive_service, folder_id, fragment, filename,
-                    uploaded_after=trigger_ts, max_wait_seconds=DRIVE_UPLOAD_WAIT_SECONDS,
-                )
-
-                if file_id is None:
-                    print(f"{brand}: triggered the upload for media_id={media_id!r}, but it "
-                          f"hadn't shown up in Drive within {DRIVE_UPLOAD_WAIT_SECONDS:.0f}s -- "
-                          f"leaving it unmarked, will retry on a future run rather than "
-                          f"assume it failed.")
-                    not_yet_confirmed += 1
-                    continue
-
-                # Marked immediately, one at a time -- not batched at
-                # the end -- so a crash partway through a long run
-                # doesn't lose track of videos already confirmed in
-                # Drive.
-                master_client.update_single_cell(media_id, "drive_uploaded_at", _now_iso(), create_if_missing=True)
-                uploaded += 1
+                # Triggered successfully -- don't wait here at all.
+                # Confirmed together with everything else after the
+                # whole trigger phase finishes.
+                pending_confirmation.append((media_id, filename, fragment))
+                triggered_count += 1
             except Exception as e:
                 print(f"{brand}: couldn't process media_id={media_id!r}: {type(e).__name__}: {e}")
                 failed += 1
+
+        # CONFIRM PHASE -- a few rounds, checking every still-pending
+        # item each round, with ONE shared wait between rounds (not one
+        # wait per item). Refunnel's transfers run server-side and keep
+        # progressing during the wait, so later rounds catch items that
+        # weren't ready in earlier ones without ever blocking on any
+        # single item.
+        if pending_confirmation:
+            round_wait = DRIVE_UPLOAD_WAIT_SECONDS / (DRIVE_CONFIRM_ROUNDS - 1) if DRIVE_CONFIRM_ROUNDS > 1 else 0
+            for round_num in range(DRIVE_CONFIRM_ROUNDS):
+                if not pending_confirmation:
+                    break
+                if round_num > 0:
+                    time.sleep(round_wait)
+                still_pending = []
+                for media_id, filename, fragment in pending_confirmation:
+                    existing = drive_upload.find_existing_upload(drive_service, folder_id, fragment)
+                    if existing is not None:
+                        drive_upload.rename_file(drive_service, existing["id"], filename)
+                        # Marked immediately, one at a time -- not
+                        # batched at the very end -- so a crash
+                        # partway through doesn't lose track of videos
+                        # already confirmed in Drive.
+                        master_client.update_single_cell(media_id, "drive_uploaded_at", _now_iso(),
+                                                         create_if_missing=True)
+                        uploaded += 1
+                    else:
+                        still_pending.append((media_id, filename, fragment))
+                pending_confirmation = still_pending
+
+            for media_id, _filename, _fragment in pending_confirmation:
+                print(f"{brand}: triggered the upload for media_id={media_id!r}, but it hadn't "
+                      f"shown up in Drive after {DRIVE_CONFIRM_ROUNDS} check(s) -- leaving it "
+                      f"unmarked, will retry on a future run rather than assume it failed.")
+            not_yet_confirmed = len(pending_confirmation)
 
         print(f"{brand}: confirmed {uploaded}, not yet confirmed {not_yet_confirmed}, "
               f"failed {failed}, status changed since export {status_changed}, "
