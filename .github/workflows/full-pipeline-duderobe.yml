@@ -97,8 +97,33 @@ jobs:
             echo "No cached session and no bootstrap secret -- will fall back to a fresh Gmail-OTP login."
           fi
 
-      - name: "Phases 1+3 - Export all media, then scrape emails (${{ matrix.workspace.name }})"
+      - name: "Phase 1 - Export all media (${{ matrix.workspace.name }})"
         env:
+          PIPELINE_PHASE: "1"
+          REFUNNEL_EMAIL: ${{ secrets.REFUNNEL_EMAIL }}
+          WORKSPACE_NAME: ${{ matrix.workspace.name }}
+          REFUNNEL_WORKSPACE_NAME: ${{ matrix.workspace.refunnel_workspace_name }}
+          KNOWN_WORKSPACE_NAMES: "Duderobe,Swoveralls,Defi Snacks,Kelson"
+          SPREADSHEET_ID: ${{ secrets[matrix.workspace.spreadsheet_id_secret] }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: service_account.json
+          GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          echo "$GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT" > service_account.json
+          python -u run_daily_sync.py
+
+      # No `if: always()` here, deliberately: Phase 3 re-does its own
+      # independent login/navigate/export (see run_daily_sync.py's
+      # _setup_and_parse_media docstring), so if Phase 1 genuinely
+      # failed -- bad credentials, Refunnel down -- Phase 3 would just
+      # hit the exact same failure again. Skipping it when Phase 1
+      # failed matches main()'s own in-process behavior for anyone
+      # still running both phases together by hand.
+      - name: "Phase 3 - Scrape creator emails (${{ matrix.workspace.name }})"
+        env:
+          PIPELINE_PHASE: "3"
           REFUNNEL_EMAIL: ${{ secrets.REFUNNEL_EMAIL }}
           WORKSPACE_NAME: ${{ matrix.workspace.name }}
           REFUNNEL_WORKSPACE_NAME: ${{ matrix.workspace.refunnel_workspace_name }}
@@ -129,4 +154,3 @@ jobs:
           path: downloads/
           retention-days: 7
           if-no-files-found: ignore
-
