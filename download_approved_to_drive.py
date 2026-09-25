@@ -200,16 +200,12 @@ def process_one_brand(
                 # same as Pending review is already treated for email
                 # scraping -- a fresh export corrects this on its own.
                 if triggered is None:
+                    # Not an error, no sheet write, nothing to fix here
+                    # -- the count in the final summary line is enough.
+                    # A genuine status mismatch corrects itself on the
+                    # next full export; there is nothing for this run
+                    # to act on in the meantime.
                     status_changed += 1
-                    # Refunnel's OWN timestamp for this post (not ours)
-                    # -- direct evidence for whether this is a genuine,
-                    # recent change on their side versus something
-                    # else. Printed here rather than inside
-                    # trigger_native_drive_upload since the caller
-                    # already has the full row on hand.
-                    print(f"{brand}: media_id={media_id!r}'s Refunnel-reported updated_at is "
-                          f"{row.get('updated_at', '') or '(not set)'!r} -- compare against when "
-                          f"Master Data was last exported to see how stale this specific row is.")
                     continue
                 if not triggered:
                     print(f"{brand}: couldn't locate media_id={media_id!r} on the page -- "
