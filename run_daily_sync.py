@@ -1,7 +1,32 @@
 """
 run_daily_sync.py
 
-The script GitHub Actions actually runs on a schedule. Ties together:
+Split into two independently runnable phases, so the Actions UI and
+the log itself show, unambiguously, whether the export succeeded on
+its own -- separate from whether email scraping afterward ran into
+trouble. Confirmed real want: a combined "Phases 1+3" step made it
+genuinely hard to tell, from the log alone, whether today's export
+picked up new content at all before scraping's own output took over.
+
+    Phase 1 (main_phase1): log in, export all media from Refunnel, and
+        write Master Data. Fast, and the part that answers "did
+        today's sync actually pick up new content."
+
+    Phase 3 (main_phase3): scrape creator emails, export Payments, and
+        do the full six-tab sync (Master Data again, Usage Rights x3,
+        Human Review, Payments). The slow part -- can take hours on a
+        large backlog.
+
+Both phases run as SEPARATE GitHub Actions steps (separate processes),
+so neither an open browser page nor an in-memory `result` object
+carries over between them. Each phase does its own independent
+login/navigate/scroll/export/parse -- see _setup_and_parse_media's own
+docstring for the full reasoning. Set PIPELINE_PHASE=1 or
+PIPELINE_PHASE=3 to run just that phase; leave it unset to run both in
+one process, one after another -- this script's original, single-step
+behavior, kept for anyone still invoking it directly.
+
+Ties together:
 
     refunnel_auth   -> get a logged-in page (saved session, or fresh
                        login via Gmail-OTP fallback if it expired)
@@ -23,6 +48,7 @@ Required environment variables (set as GitHub Actions secrets):
 Optional:
     SLACK_WEBHOOK_URL         -- if set, posts a message on hard failure
     REFUNNEL_SESSION_FILE     -- defaults to refunnel_session.json
+    PIPELINE_PHASE            -- "1", "3", or unset (runs both)
 
 On any hard failure this script exits non-zero, so the GitHub Actions
 run itself shows as failed (visible in the Actions tab / failure emails)
@@ -39,6 +65,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
+from typing import Optional
 
 import gspread
 
@@ -96,18 +123,11 @@ def _save_debug_snapshot(page, workspace_name: str) -> None:
         print(f"Couldn't save failure page HTML: {e}", file=sys.stderr)
 
 
-def main() -> int:
-    # Belt-and-suspenders alongside `python -u` in the workflow YML --
-    # confirmed real problem: Python fully buffers stdout when it isn't
-    # connected to a real terminal (exactly the case in GitHub Actions),
-    # so every print() in this whole script -- including the new
-    # scraping progress lines -- was silently sitting in a buffer for
-    # 20+ minutes with nothing visible in the live log, not because
-    # anything was stuck, but because nothing had flushed yet. This
-    # keeps working even if this script is ever invoked a different way
-    # (without -u) in the future.
-    sys.stdout.reconfigure(line_buffering=True)
-
+def _load_config() -> Optional[dict]:
+    """Reads and validates every env var either phase needs. Returns
+    None (after calling notify_failure itself) if something required
+    is missing, so main_phase1/main_phase3 share one validation path
+    instead of two copies that could drift apart."""
     email = os.environ.get("REFUNNEL_EMAIL")
     spreadsheet_id = os.environ.get("SPREADSHEET_ID")
     service_account_path = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
@@ -124,61 +144,210 @@ def main() -> int:
             "Missing required env vars: need REFUNNEL_EMAIL, SPREADSHEET_ID, "
             "GOOGLE_SERVICE_ACCOUNT_JSON."
         )
+        return None
+
+    return {
+        "email": email,
+        "spreadsheet_id": spreadsheet_id,
+        "service_account_path": service_account_path,
+        "workspace_name": workspace_name,
+        "refunnel_workspace_name": refunnel_workspace_name,
+        "known_workspace_names": known_workspace_names,
+        "session_file": session_file,
+        "download_dir": download_dir,
+    }
+
+
+def _setup_and_parse_media(config: dict, state: dict):
+    """Shared by both phases: log in, select the workspace, scroll to
+    load every post, export+parse the media CSV, then load and
+    propagate any creator emails already known from a previous run.
+    Returns (page, result, gc, sh, master_client, master_ws).
+
+    CONFIRMED REAL design point: both phases call this independently,
+    each doing its own fresh login/navigate/scroll/export -- not one
+    call whose result is shared between them. GitHub Actions steps are
+    separate process invocations; neither an open Playwright page nor
+    an in-memory `result` object survives from one step to the next.
+    Phase 3 re-exporting the CSV costs a little time, but it also means
+    Phase 3 always works from the freshest possible export rather than
+    Phase 1's, which may be stale by the time a long scraping run
+    finally gets to it.
+
+    state is a plain dict this writes into (state["p"], state["browser"],
+    state["context"], state["page"]) as soon as each resource exists --
+    so if this raises partway through, the caller's own finally block
+    can still find and close whatever was actually created, exactly
+    like the original single-phase main() could when everything lived
+    in one function's local variables.
+    """
+    email = config["email"]
+    session_file = config["session_file"]
+    refunnel_workspace_name = config["refunnel_workspace_name"]
+    known_workspace_names = config["known_workspace_names"]
+    download_dir = config["download_dir"]
+
+    # --- 1. auth ---
+    p, browser, context = refunnel_auth.load_or_refresh_session(
+        email=email, session_file=session_file, headless=True
+    )
+    state["p"], state["browser"], state["context"] = p, browser, context
+    page = context.new_page()
+    state["page"] = page
+
+    # --- 2. select the right workspace, then export media ---
+    refunnel_export.goto_social_listening_for_workspace(page, refunnel_workspace_name, known_workspace_names)
+    refunnel_export.scroll_to_load_all(page)
+    media_csv_path = refunnel_export.export_media_csv(page, download_dir)
+
+    # --- 3. parse media, connect to sheets ---
+    # ALL of this must happen while `page` is STILL on the Social
+    # Listening grid, since scrape_creator_emails() (Phase 3 only)
+    # searches for post cards there. A real run confirmed this the
+    # hard way: the scraper was previously called after navigating to
+    # the Payments page, so every single scroll-search failed -- there
+    # were no post cards to find on that page at all. Payments export
+    # happens after Phase 3's scraping loop, never before it.
+    result = parse_refunnel.parse_media_csv(media_csv_path)
+
+    duplicate_links = parse_refunnel.find_duplicate_post_links(result)
+    if duplicate_links:
+        print(f"WARNING: {len(duplicate_links)} original_post_link value(s) are shared "
+              f"across multiple different ids -- this usually means genuine duplicate "
+              f"content under two ids. Not removed automatically. Examples: "
+              f"{dict(list(duplicate_links.items())[:5])}")
+
+    gc = gspread.service_account(filename=config["service_account_path"])
+    sh = sheets_sync.retry_on_transient_error(gc.open_by_key, config["spreadsheet_id"])
+    master_ws = sheets_sync.get_or_create_worksheet(sh, "Master Data")
+    master_client = sheets_sync.GspreadSheetsClient(master_ws)
+
+    # Don't re-scrape an email we already found on a previous run --
+    # load whatever's already in the sheet's creator_email column
+    # first, so rows_needing_email_scrape() only returns genuinely
+    # still-missing ones.
+    existing_emails = sheets_sync.read_column_values(master_client, "creator_email")
+    preloaded = parse_refunnel.apply_creator_emails(result, existing_emails)
+    if preloaded:
+        print(f"Loaded {preloaded} previously-found creator email(s) from the sheet -- won't re-scrape those.")
+
+    # An email belongs to the creator, not the individual post --
+    # propagate any known email to every other post by that same
+    # username before deciding what still needs scraping. Confirmed
+    # real opportunity: 342 of 1360 unique usernames in a real
+    # export appear on 2+ posts.
+    propagated = parse_refunnel.propagate_emails_by_username(result)
+    if propagated:
+        print(f"Propagated {propagated} creator email(s) to other posts by the same username.")
+
+    return page, result, gc, sh, master_client, master_ws
+
+
+def _close_browser(state: dict) -> None:
+    if state.get("context"):
+        try:
+            state["context"].close()
+        except Exception:
+            pass
+    if state.get("browser"):
+        try:
+            state["browser"].close()
+        except Exception:
+            pass
+    if state.get("p"):
+        try:
+            state["p"].stop()
+        except Exception:
+            pass
+
+
+def main_phase1() -> int:
+    """Phase 1: export all media from Refunnel and write Master Data.
+    Does NOT scrape creator emails, export Payments, or touch Usage
+    Rights / Human Review -- that's all Phase 3. Kept as its own,
+    separate GitHub Actions step (rather than silently bundled into
+    Phase 3, which is how this used to work) specifically so the
+    Actions UI and this step's own log show, unambiguously and on
+    their own, whether the export succeeded and how many rows it saw
+    -- independent of whether email scraping afterward runs into
+    trouble.
+    """
+    sys.stdout.reconfigure(line_buffering=True)
+
+    config = _load_config()
+    if config is None:
         return 1
 
-    p = browser = context = page = None
+    state: dict = {}
     try:
-        print(f"=== Syncing workspace: {workspace_name} (Refunnel workspace: {refunnel_workspace_name}) ===")
-        # --- 1. auth ---
-        p, browser, context = refunnel_auth.load_or_refresh_session(
-            email=email, session_file=session_file, headless=True
+        print(f"=== PHASE 1: Exporting media -- {config['workspace_name']} "
+              f"(Refunnel workspace: {config['refunnel_workspace_name']}) ===")
+
+        page, result, gc, sh, master_client, master_ws = _setup_and_parse_media(config, state)
+
+        # Write Master Data NOW -- this IS Phase 1's actual output.
+        # sort_key/sort_reverse puts newest content at the top, matching
+        # the final full sync pass Phase 3 does later and the actual
+        # Refunnel page's own newest-to-oldest order. never_delete=True:
+        # an id already in the sheet is carried forward even if it's
+        # missing from this run's pull, so a bad export can never
+        # quietly delete real rows -- only add new ones or update
+        # existing ones.
+        existing_ids = set(sheets_sync.read_column_values(master_client, "id"))
+        summary = sheets_sync.sync_tab(
+            master_client, parse_refunnel.MASTER_COLUMNS, result.master, never_delete=True,
+            preserve_columns=parse_refunnel.SHEET_OWNED_COLUMNS,
+            sort_key="created_at", sort_reverse=True,
         )
-        page = context.new_page()
+        new_ids = set(result.master.keys()) - existing_ids
 
-        # --- 2. select the right workspace, then export media ---
-        refunnel_export.goto_social_listening_for_workspace(page, refunnel_workspace_name, known_workspace_names)
-        refunnel_export.scroll_to_load_all(page)
-        media_csv_path = refunnel_export.export_media_csv(page, download_dir)
+        print(
+            f"=== PHASE 1 COMPLETE: {len(result.master)} media row(s) exported "
+            f"({len(new_ids)} new since the last run, {summary['rows_carried_forward']} "
+            f"carried forward unchanged). ==="
+        )
+        return 0
 
-        # --- 3. parse media, connect to sheets, and scrape emails --
-        # ALL of this must happen while `page` is STILL on the Social
-        # Listening grid, since scrape_creator_emails() searches for
-        # post cards there. A real run confirmed this the hard way: the
-        # scraper was previously called after navigating to the
-        # Payments page, so every single scroll-search failed -- there
-        # were no post cards to find on that page at all. Payments
-        # export now happens AFTER this block, not before it.
-        result = parse_refunnel.parse_media_csv(media_csv_path)
+    except Exception as e:
+        notify_failure(f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
+        _save_debug_snapshot(state.get("page"), config["workspace_name"])
+        return 1
 
-        duplicate_links = parse_refunnel.find_duplicate_post_links(result)
-        if duplicate_links:
-            print(f"WARNING: {len(duplicate_links)} original_post_link value(s) are shared "
-                  f"across multiple different ids -- this usually means genuine duplicate "
-                  f"content under two ids. Not removed automatically. Examples: "
-                  f"{dict(list(duplicate_links.items())[:5])}")
+    finally:
+        _close_browser(state)
 
-        gc = gspread.service_account(filename=service_account_path)
-        sh = sheets_sync.retry_on_transient_error(gc.open_by_key, spreadsheet_id)
-        master_ws = sheets_sync.get_or_create_worksheet(sh, "Master Data")
-        master_client = sheets_sync.GspreadSheetsClient(master_ws)
 
-        # Don't re-scrape an email we already found on a previous run --
-        # load whatever's already in the sheet's creator_email column
-        # first, so rows_needing_email_scrape() only returns genuinely
-        # still-missing ones.
-        existing_emails = sheets_sync.read_column_values(master_client, "creator_email")
-        preloaded = parse_refunnel.apply_creator_emails(result, existing_emails)
-        if preloaded:
-            print(f"Loaded {preloaded} previously-found creator email(s) from the sheet -- won't re-scrape those.")
+def main_phase3() -> int:
+    """Phase 3: scrape creator emails, export Payments, and do the full
+    six-tab sync (Master Data again, Usage Rights x3, Human Review,
+    Payments). Runs its own independent login/export/parse first --
+    see _setup_and_parse_media's docstring for why -- so it's never
+    dependent on Phase 1 having just run in the same process.
+    """
+    sys.stdout.reconfigure(line_buffering=True)
 
-        # An email belongs to the creator, not the individual post --
-        # propagate any known email to every other post by that same
-        # username before deciding what still needs scraping. Confirmed
-        # real opportunity: 342 of 1360 unique usernames in a real
-        # export appear on 2+ posts.
-        propagated = parse_refunnel.propagate_emails_by_username(result)
-        if propagated:
-            print(f"Propagated {propagated} creator email(s) to other posts by the same username.")
+    config = _load_config()
+    if config is None:
+        return 1
+
+    email = config["email"]
+    session_file = config["session_file"]
+    refunnel_workspace_name = config["refunnel_workspace_name"]
+    known_workspace_names = config["known_workspace_names"]
+    download_dir = config["download_dir"]
+    workspace_name = config["workspace_name"]
+
+    state: dict = {}
+    try:
+        print(f"=== PHASE 3: Scraping creator emails -- {workspace_name} "
+              f"(Refunnel workspace: {refunnel_workspace_name}) ===")
+
+        page, result, gc, sh, master_client, master_ws = _setup_and_parse_media(config, state)
+        context = state["context"]
+        browser = state["browser"]
+        p = state["p"]
+
+        emails_found_this_run = 0
 
         if refunnel_export.SCRAPE_EMAILS_ENABLED:
             # Write Master Data NOW, before scraping starts, so there
@@ -190,17 +359,6 @@ def main() -> int:
             # lost. The final full sync pass at the end (all 6 tabs,
             # including Master Data again) reconciles everything
             # regardless, so this is a safety net, not the only write.
-            #
-            # CONFIRMED REAL gap this closes: this early write didn't
-            # pass sort_key at all, unlike the final full sync pass
-            # (which correctly sorts Master Data by created_at,
-            # newest first). If a run crashes during scraping --
-            # confirmed to happen repeatedly in this project (browser
-            # crashes, scroll_to_load_all failures) -- the sheet is
-            # left stuck with only this early write's order until the
-            # next successful, complete run. A live comparison against
-            # the actual Refunnel page (sorted newest-to-oldest)
-            # showed the sheet's order not matching it at all.
             print("Writing Master Data once before scraping starts, so progress can be saved incrementally...")
             sheets_sync.sync_tab(master_client, parse_refunnel.MASTER_COLUMNS, result.master, never_delete=True,
                                  preserve_columns=parse_refunnel.SHEET_OWNED_COLUMNS,
@@ -212,8 +370,8 @@ def main() -> int:
             # the full confirmed evidence. No separate call needed
             # here anymore.
 
-            def _save_email_incrementally(media_id: str, email: str) -> None:
-                found = master_client.update_single_cell(media_id, "creator_email", email)
+            def _save_email_incrementally(media_id: str, email_addr: str) -> None:
+                found = master_client.update_single_cell(media_id, "creator_email", email_addr)
                 if not found:
                     print(f"(incremental save: media_id={media_id!r} not found in Master Data yet -- "
                           f"will still be saved in the final full sync at the end)")
@@ -310,6 +468,7 @@ def main() -> int:
                     )
                     already_confirmed_empty |= empty_ids
                     updated = parse_refunnel.apply_creator_emails(result, emails)
+                    emails_found_this_run += updated
                     print(f"Scraped {updated} new creator email(s), confirmed "
                           f"{len(empty_ids)} with no email on file (attempt {attempt + 1}).")
                 except Exception as e:
@@ -380,7 +539,9 @@ def main() -> int:
                 p, browser, context = refunnel_auth.load_or_refresh_session(
                     email=email, session_file=session_file, headless=True
                 )
+                state["p"], state["browser"], state["context"] = p, browser, context
                 page = context.new_page()
+                state["page"] = page
                 refunnel_export.goto_social_listening_for_workspace(page, refunnel_workspace_name, known_workspace_names)
 
                 if attempt >= max_scrape_restarts:
@@ -443,7 +604,7 @@ def main() -> int:
                           "failures for everything that isn't loaded.")
                     continue
 
-        # --- 4. NOW it's safe to navigate away and export payments ---
+        # --- NOW it's safe to navigate away and export payments ---
         # A failure here NO LONGER kills the entire run -- confirmed
         # real: a logged-out session made this Export click time out,
         # and that single exception threw away everything the run had
@@ -479,7 +640,7 @@ def main() -> int:
             f"{len(result.payments)} payment rows."
         )
 
-        # --- 5. push to sheets ---
+        # --- push to sheets ---
         # Read the Human Review tab's CURRENT moved_to_human_review_at
         # values before rebuilding it -- confirmed real want: knowing
         # WHEN something was pushed here, to filter by it, which a full
@@ -531,6 +692,7 @@ def main() -> int:
                 if master_campaigns.get(mid):
                     row["campaigns"] = master_campaigns[mid]
 
+        rows_written_summary = {}
         for title, columns, rows, never_delete, sort_key in tab_plan:
             ws = sheets_sync.get_or_create_worksheet(sh, title)
             client = sheets_sync.GspreadSheetsClient(ws)
@@ -541,24 +703,43 @@ def main() -> int:
                 sort_key=sort_key, sort_reverse=(sort_key is not None),
                 preserve_columns=preserve,
             )
+            rows_written_summary[title] = summary["rows_written"]
             print(f"{title}: wrote {summary['rows_written']} rows "
                   f"(preserved columns: {summary['extra_columns_preserved']}, "
                   f"carried forward: {summary['rows_carried_forward']})")
 
+        still_missing = len(parse_refunnel.rows_needing_email_scrape(result))
+        print(
+            f"=== PHASE 3 COMPLETE: {emails_found_this_run} email(s) found this run, "
+            f"{still_missing} still missing. All 6 tabs written. ==="
+        )
         return 0
 
     except Exception as e:
         notify_failure(f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
-        _save_debug_snapshot(page, workspace_name)
+        _save_debug_snapshot(state.get("page"), workspace_name)
         return 1
 
     finally:
-        if context:
-            context.close()
-        if browser:
-            browser.close()
-        if p:
-            p.stop()
+        _close_browser(state)
+
+
+def main() -> int:
+    """Back-compat entry point: runs Phase 1 then Phase 3 in one
+    process, one after another -- this script's original, single-step
+    behavior. Kept for anyone still invoking this script directly
+    without PIPELINE_PHASE set. The pipeline itself now calls
+    main_phase1() and main_phase3() as two separate GitHub Actions
+    steps instead (see full-pipeline-*.yml)."""
+    phase = os.environ.get("PIPELINE_PHASE")
+    if phase == "1":
+        return main_phase1()
+    if phase == "3":
+        return main_phase3()
+    result = main_phase1()
+    if result != 0:
+        return result
+    return main_phase3()
 
 
 if __name__ == "__main__":
