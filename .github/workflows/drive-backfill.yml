@@ -1,4 +1,3 @@
-```yaml
 name: Drive Video Backfill
 
 # Deliberately separate from Refunnel Sync -- downloading and uploading
