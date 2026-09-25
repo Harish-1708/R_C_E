@@ -466,15 +466,16 @@ def test_sabotage_counting_status_change_as_failed_would_be_caught(monkeypatch, 
     assert "failed 0" in out
 
 
-def test_status_changed_message_shows_refunnels_own_updated_at(monkeypatch, capsys):
-    # CONFIRMED REAL need: when Master Data says GRANTED but the live
-    # page shows Pending review, the open question is how stale that
-    # specific row is. Refunnel's OWN updated_at timestamp for that
-    # post is the most direct evidence available -- not our export
-    # time, theirs.
+def test_status_changed_prints_nothing_per_item_and_writes_nothing_to_the_sheet(monkeypatch, capsys):
+    # CONFIRMED REAL feedback: a status mismatch is not an error and
+    # needs no per-item narration or evidence-gathering -- the count in
+    # the final summary line is enough, matching how a Pending review
+    # skip during email scraping is already handled. It also must
+    # never touch the sheet: the row stays exactly as the last export
+    # set it until a future export naturally corrects it.
     monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
     monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
-    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1", updated_at="2026-09-20T10:00:00Z")])
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1")])
     gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
 
     monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", lambda *a, **kw: None)
@@ -482,13 +483,15 @@ def test_status_changed_message_shows_refunnels_own_updated_at(monkeypatch, caps
     dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
 
     out = capsys.readouterr().out
-    assert "2026-09-20T10:00:00Z" in out
+    assert "media_id='tk_1'" not in out  # no per-item message at all
+    assert "status changed since export 1" in out  # counted once in the summary
+    assert master_ws.rows[1] == _row("tk_1")  # row completely untouched
 
 
-def test_sabotage_dropping_the_updated_at_evidence_would_be_caught(monkeypatch, capsys):
+def test_sabotage_a_per_item_message_reappearing_would_be_caught(monkeypatch, capsys):
     monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
     monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
-    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1", updated_at="2026-09-20T10:00:00Z")])
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1")])
     gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
 
     monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", lambda *a, **kw: None)
@@ -497,5 +500,5 @@ def test_sabotage_dropping_the_updated_at_evidence_would_be_caught(monkeypatch, 
 
     out = capsys.readouterr().out
     with pytest.raises(AssertionError):
-        assert "2026-09-20T10:00:00Z" not in out  # wrong -- would mean dropping the actual evidence
-    assert "2026-09-20T10:00:00Z" in out
+        assert "media_id='tk_1'" in out  # wrong -- would mean the removed noise came back
+    assert "media_id='tk_1'" not in out
