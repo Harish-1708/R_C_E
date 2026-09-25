@@ -78,6 +78,19 @@ MASTER_DATA_TAB = "Master Data"
 DOWNLOAD_DIR = "downloads/drive_backfill"
 BATCH_SIZE = int(os.environ.get("DRIVE_BACKFILL_BATCH_SIZE", "50"))
 DRIVE_UPLOAD_WAIT_SECONDS = float(os.environ.get("DRIVE_UPLOAD_WAIT_SECONDS", "30"))
+# CONFIRMED REAL bug this fixes: target_ids used to be a single, fixed
+# slice of the first BATCH_SIZE ids in the queue, taken once. Any id
+# that fails (couldn't locate, status changed since export) never gets
+# drive_uploaded_at set, so it's still first in line on the very next
+# run -- meaning a persistently-stuck front of the queue was NEVER
+# skipped past. A live run confirmed this exactly: the same 50 ids,
+# same order, same 0 successes, across multiple separate runs and
+# days, while ~410 videos sat unprocessed the whole time. This caps
+# total ATTEMPTS per run (bounding worst-case runtime even if
+# everything fails) while letting the run keep going past
+# failures/skips to actually reach BATCH_SIZE real successes -- or
+# exhaust the queue trying.
+MAX_ATTEMPTS_PER_RUN = int(os.environ.get("DRIVE_BACKFILL_MAX_ATTEMPTS", str(BATCH_SIZE * 8)))
 
 
 def load_workspaces(path: str = CONFIG_PATH) -> list:
@@ -135,9 +148,10 @@ def process_one_brand(
         print(f"{brand}: nothing new to upload -- every Approved video is already in Drive.")
         return
 
-    target_ids = list(to_upload.keys())[:BATCH_SIZE]
+    target_ids = list(to_upload.keys())
     print(f"{brand}: {len(to_upload)} Approved video(s) not yet in Drive -- "
-          f"processing {len(target_ids)} this run (batch size {BATCH_SIZE}), "
+          f"aiming for {BATCH_SIZE} successful upload(s) this run (trying up to "
+          f"{min(MAX_ATTEMPTS_PER_RUN, len(target_ids))} of them if needed), "
           f"target folder {drive_folder_name!r}.")
 
     debug_dir = f"{DOWNLOAD_DIR}/{brand.replace(' ', '_')}/debug"
@@ -162,8 +176,16 @@ def process_one_brand(
         # search (reset_scroll=False below) covers the whole batch.
         refunnel_export.scroll_to_top(page)
 
-        uploaded, not_yet_confirmed, failed, status_changed = 0, 0, 0, 0
+        uploaded, not_yet_confirmed, failed, status_changed, attempted = 0, 0, 0, 0, 0
         for media_id in target_ids:
+            if uploaded >= BATCH_SIZE:
+                break
+            if attempted >= MAX_ATTEMPTS_PER_RUN:
+                print(f"{brand}: reached the {MAX_ATTEMPTS_PER_RUN}-attempt safety cap for this "
+                      f"run with only {uploaded} confirmed -- stopping here rather than risking "
+                      f"an unbounded run; the rest of the queue is picked up on a future run.")
+                break
+            attempted += 1
             row = master_rows[media_id]
             username = row.get("username", "") or "unknown"
             filename = parse_refunnel.build_drive_filename(brand, username, media_id)
@@ -238,7 +260,7 @@ def process_one_brand(
 
         print(f"{brand}: confirmed {uploaded}, not yet confirmed {not_yet_confirmed}, "
               f"failed {failed}, status changed since export {status_changed}, "
-              f"{len(to_upload) - len(target_ids)} still pending for a future run.")
+              f"{len(to_upload) - attempted} still pending for a future run.")
     finally:
         try:
             page.close()
