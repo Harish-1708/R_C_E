@@ -1,3 +1,4 @@
+```yaml
 name: Drive Video Backfill
 
 # Deliberately separate from Refunnel Sync -- downloading and uploading
@@ -5,25 +6,18 @@ name: Drive Video Backfill
 # and never blocks or slows down the main daily export. Runs a couple
 # of hours after the main sync so Master Data reflects the day's
 # Approved-status changes first.
-#
-# Loops over every brand internally in one job (no per-workspace
-# matrix, unlike Refunnel Sync) -- there's no per-video race like the
-# OTP one that motivated serializing that workflow, since this only
-# ever runs as a single job.
 
 on:
   schedule:
     - cron: "0 7 * * *"  # 07:00 UTC daily
+
   workflow_dispatch:
     inputs:
       batch_size:
         description: >
           Max videos to process THIS run, across all brands combined.
-          Leave as the default for a real run; set to 1-3 for a manual
-          smoke test before trusting this against the full backlog --
-          e.g. to confirm DOWNLOAD_BUTTON_SELECTOR in refunnel_export.py
-          actually matches the real page without burning through
-          dozens of videos if it doesn't.
+          Leave at the default for a real run; set to 1-3 for a manual
+          smoke test before trusting this against the full backlog.
         required: false
         default: "50"
         type: string
@@ -31,16 +25,10 @@ on:
 jobs:
   drive-backfill:
     runs-on: ubuntu-latest
-    # CONFIRMED REAL gap this closes: no timeout-minutes here at all,
-    # unlike full-pipeline.yml's explicit 330. Without one, this job
-    # falls back to GitHub's own default job timeout (360 minutes) as
-    # its only backstop -- so if cancellation genuinely doesn't take
-    # effect for some reason, the run sits there for up to 6 hours
-    # regardless. 60 minutes is generous for a real batch (each
-    # video now costs single-digit seconds, not the unbounded waits
-    # the old click flow could hit) while still giving a much shorter
-    # worst case than relying on GitHub's own default alone.
+
+    # Downloading/uploading real video files is slow.
     timeout-minutes: 60
+
     steps:
       - uses: actions/checkout@v4
 
@@ -54,8 +42,7 @@ jobs:
       - name: Install Playwright's browser
         run: python -m playwright install --with-deps chromium
 
-      # Same session-cache pattern as Refunnel Sync -- one Refunnel
-      # login shared across brands.
+      # Same session-cache pattern as Refunnel Sync.
       - name: Restore saved Refunnel session
         id: restore_session
         uses: actions/cache/restore@v4
@@ -68,26 +55,101 @@ jobs:
       - name: Run the Drive backfill
         env:
           REFUNNEL_EMAIL: ${{ secrets.REFUNNEL_EMAIL }}
+
           GOOGLE_SERVICE_ACCOUNT_JSON: service_account.json
           GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-          # Manual runs can override via the batch_size input above;
-          # a scheduled run has no inputs at all, so this falls back to
-          # 50 the same way the script's own default does.
+
           DRIVE_BACKFILL_BATCH_SIZE: ${{ github.event.inputs.batch_size || '50' }}
-          # One Refunnel-export secret per brand, same as Refunnel Sync.
+
           SPREADSHEET_ID_DUDEROBE: ${{ secrets.SPREADSHEET_ID_DUDEROBE }}
           SPREADSHEET_ID_SWOVERALLS: ${{ secrets.SPREADSHEET_ID_SWOVERALLS }}
           SPREADSHEET_ID_DEFI_SNACKS: ${{ secrets.SPREADSHEET_ID_DEFI_SNACKS }}
           SPREADSHEET_ID_KELSON: ${{ secrets.SPREADSHEET_ID_KELSON }}
-          # One Drive folder secret per brand that has this feature
-          # configured (see config/workspaces.yaml's
-          # drive_folder_id_secret) -- currently only Swoveralls.
+
           DRIVE_FOLDER_ID_SWOVERALLS: ${{ secrets.DRIVE_FOLDER_ID_SWOVERALLS }}
+
         run: |
+          set +e
+
+          echo "=============================================="
+          echo "DRIVE BACKFILL: starting diagnostic run"
+          echo "=============================================="
+
+          echo ""
+          echo "Checking required files..."
+          echo "Current directory:"
+          pwd
+
+          echo ""
+          echo "download_approved_to_drive.py:"
+          ls -lh download_approved_to_drive.py
+
+          echo ""
+          echo "drive_upload.py:"
+          ls -lh drive_upload.py
+
+          echo ""
+          echo "config/workspaces.yaml:"
+          ls -lh config/workspaces.yaml
+
+          echo ""
+          echo "Checking environment variables..."
+          echo "GOOGLE_SERVICE_ACCOUNT_JSON = $GOOGLE_SERVICE_ACCOUNT_JSON"
+
+          if [ -n "$GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT" ]; then
+            echo "GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT = SET"
+          else
+            echo "GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT = NOT SET"
+          fi
+
+          if [ -n "$DRIVE_FOLDER_ID_SWOVERALLS" ]; then
+            echo "DRIVE_FOLDER_ID_SWOVERALLS = SET"
+          else
+            echo "DRIVE_FOLDER_ID_SWOVERALLS = NOT SET"
+          fi
+
+          echo "DRIVE_BACKFILL_BATCH_SIZE = $DRIVE_BACKFILL_BATCH_SIZE"
+
+          echo ""
+          echo "Writing Google service-account credentials..."
           echo "$GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT" > service_account.json
+
+          if [ -s service_account.json ]; then
+            echo "service_account.json = CREATED"
+          else
+            echo "service_account.json = EMPTY OR MISSING"
+          fi
+
+          echo ""
+          echo "=============================================="
+          echo "RUNNING download_approved_to_drive.py"
+          echo "=============================================="
+          echo ""
+
           python -u download_approved_to_drive.py
+
+          STATUS=$?
+
+          echo ""
+          echo "=============================================="
+          echo "DRIVE BACKFILL: Python exit code = $STATUS"
+          echo "=============================================="
+
+          echo ""
+          echo "Checking generated download directory..."
+          if [ -d downloads/drive_backfill ]; then
+            find downloads/drive_backfill -maxdepth 3 -type f -print | head -100
+          else
+            echo "downloads/drive_backfill does not exist."
+          fi
+
+          echo ""
+          echo "Diagnostic run complete."
+
+          exit $STATUS
 
       - name: Save Refunnel session for next run
         if: always()
@@ -96,7 +158,7 @@ jobs:
           path: refunnel_session.json
           key: refunnel-session-${{ github.run_id }}
 
-      - name: Upload debug artifacts (7-day retention)
+      - name: Upload debug artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -104,3 +166,4 @@ jobs:
           path: downloads/drive_backfill/
           retention-days: 7
           if-no-files-found: ignore
+```
