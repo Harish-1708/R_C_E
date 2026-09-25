@@ -78,7 +78,15 @@ CONFIG_PATH = "config/workspaces.yaml"
 MASTER_DATA_TAB = "Master Data"
 DOWNLOAD_DIR = "downloads/drive_backfill"
 BATCH_SIZE = int(os.environ.get("DRIVE_BACKFILL_BATCH_SIZE", "50"))
-DRIVE_UPLOAD_WAIT_SECONDS = float(os.environ.get("DRIVE_UPLOAD_WAIT_SECONDS", "30"))
+# CONFIRMED REAL: 30s was consistently too short. A live run showed
+# the exact same media_ids -- fresh, with nothing pre-existing in
+# Drive to find (confirmed: the person had permanently deleted them,
+# including emptying Trash) -- still not landing within 30s, requiring
+# a SECOND separate run before find_existing_upload() could finally
+# catch and confirm them. That's a real, avoidable delay: this run's
+# own DRIVE_BACKFILL_TIME_BUDGET_MINUTES already bounds the whole run
+# regardless, so a longer per-item wait here is safe, not a new risk.
+DRIVE_UPLOAD_WAIT_SECONDS = float(os.environ.get("DRIVE_UPLOAD_WAIT_SECONDS", "90"))
 # CONFIRMED REAL bug this fixes: target_ids used to be a single, fixed
 # slice of the first BATCH_SIZE ids in the queue, taken once. Any id
 # that fails (couldn't locate, status changed since export) never gets
