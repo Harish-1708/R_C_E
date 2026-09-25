@@ -1327,6 +1327,111 @@ def download_approved_video(
     ) from last_error
 
 
+def trigger_native_drive_upload(
+    page: Page,
+    media_id: str,
+    drive_folder_name: str,
+    scroll_container_selector: str = "#scrollableDiv",
+    timeout_ms: int = 15000,
+    username: Optional[str] = None,
+    created_at: Optional[str] = None,
+    debug_dir: Optional[str] = None,
+) -> bool:
+    """Triggers Refunnel's own native "Save to Drive" upload for this
+    media_id by clicking through the card's context menu, selecting the
+    target folder, and confirming the dialog.
+
+    BEST GUESS selectors -- these will very likely need adjusting against
+    the real Refunnel page before this flow works end-to-end. The same
+    pattern applies here as for every other UI-automation feature in this
+    codebase: run a debug snapshot, inspect the actual HTML, then update
+    the selectors that don't match. The structure guessed here is:
+      1. Hover the card to reveal the card-menu icon (three dots / "...").
+      2. Click the card-menu icon to open the card's action menu.
+      3. Click the "Save to Google Drive" menu item.
+      4. A folder-picker modal appears -- click the folder named
+         drive_folder_name in the "All folders" list.
+      5. Confirm/submit the modal.
+
+    Returns True if the whole flow completed without error (the "Uploading
+    to Google Drive -- it will appear shortly" toast appeared or the
+    confirmation click succeeded), False if the card couldn't be found
+    at all. Raises ExportError on unexpected failures after saving a debug
+    snapshot to debug_dir.
+    """
+    scroll_to_top(page, scroll_container_selector)
+    grid_item, _ = _scroll_until_card_found(page, media_id, scroll_container_selector)
+
+    if grid_item is None and username and created_at:
+        fallback = card_selector_for_username_date(username, created_at)
+        if fallback:
+            scroll_to_top(page, scroll_container_selector)
+            grid_item, _ = _scroll_until_card_found(
+                page, media_id, scroll_container_selector, card_selector=fallback
+            )
+            if grid_item is not None:
+                try:
+                    matches = page.locator(fallback).count()
+                except Exception:
+                    matches = 1
+                if matches > 1:
+                    print(f"drive upload: {matches} cards match @{username.lstrip('@')} on "
+                          f"{card_date_label(created_at)} -- skipping media_id={media_id!r} "
+                          f"rather than risk uploading the wrong video.")
+                    return False
+
+    if grid_item is None:
+        return False
+
+    try:
+        # Step 1: hover the card to reveal the card-menu trigger.
+        # BEST GUESS selector -- update if debug snapshots show a
+        # different element or class name on the real page.
+        grid_item.hover()
+
+        # Step 2: click the card's three-dot / "more options" menu icon.
+        # BEST GUESS: Refunnel uses a "..." or kebab icon; this class
+        # name is a reasonable guess based on the download-button pattern
+        # already confirmed real above (DOWNLOAD_BUTTON_SELECTOR).
+        menu_trigger = grid_item.locator(".card-menu-icon, [aria-label='More options'], .more-options-div")
+        menu_trigger.first.click(timeout=timeout_ms)
+
+        # Step 3: click "Save to Google Drive" in the dropdown menu.
+        # BEST GUESS: the menu item text may differ slightly on the real
+        # page -- check a debug snapshot and update the text if needed.
+        page.locator("text=Save to Google Drive").first.click(timeout=timeout_ms)
+
+        # Step 4: the folder-picker modal -- click the target folder.
+        # BEST GUESS: Refunnel shows an "All folders" list; find the
+        # entry matching drive_folder_name and click it.
+        page.locator(f"text={drive_folder_name}").first.click(timeout=timeout_ms)
+
+        # Step 5: confirm/submit the folder selection.
+        # BEST GUESS: the modal has a "Save" or "Upload" confirm button.
+        page.locator("button:has-text('Save'), button:has-text('Upload'), button:has-text('Confirm')").first.click(
+            timeout=timeout_ms
+        )
+
+        return True
+
+    except Exception as e:
+        if debug_dir:
+            try:
+                import pathlib
+                out_dir = pathlib.Path(debug_dir)
+                out_dir.mkdir(parents=True, exist_ok=True)
+                page.screenshot(path=str(out_dir / f"drive_upload_failure_{media_id}.png"), full_page=True)
+                (out_dir / f"drive_upload_failure_{media_id}.html").write_text(page.content(), encoding="utf-8")
+            except Exception:
+                pass
+        raise ExportError(
+            f"Card for media_id={media_id!r} was found, but the native Drive upload flow failed. "
+            f"Original error: {type(e).__name__}: {e}. "
+            f"Selectors in trigger_native_drive_upload() are best guesses -- check the debug "
+            f"snapshot and update them against the real page."
+        ) from e
+
+
 _MEDIA_ID_IN_SRC = re.compile(r"(tk_\d+|ig_[0-9a-f]{32}|ig_\d+)")
 
 
