@@ -5,16 +5,28 @@ Refunnel/Drive access) -- these test the ORCHESTRATION logic: which
 brands get skipped and why, which media_ids get selected and in what
 order, the batch-size cap, incremental marking so an already-uploaded
 id is never reprocessed, that one failed video doesn't stop the rest
-of the batch, and that a triggered-but-not-yet-confirmed upload is
-left unmarked for a retry rather than treated as a failure. See
-README "Testing the Drive backfill" for the manual smoke test still
-required before trusting this against real Refunnel/Drive accounts.
+of the batch, and that a genuinely stale status (Pending review on the
+live page despite GRANTED in the sheet) is counted separately, not as
+a failure. See README "Testing the Drive backfill" for the manual
+smoke test still required before trusting this against real
+Refunnel/Drive accounts.
+
+CONFIRMED REAL, direct decision from live evidence: this project spent
+a long stretch on Refunnel's own native "Save to Drive" feature
+instead of downloading directly. Every piece of that click-through was
+eventually proven correct -- confirmed byte-identical to a version
+that once worked, confirmed against the right Drive folder, confirmed
+accepted by Refunnel's own "Uploading to Google Drive -- it will
+appear shortly" toast -- and the file still never landed, across many
+separate runs, on a transfer that happens entirely on Refunnel's own
+servers once that toast appears. This test file was rewritten
+alongside download_approved_to_drive.py's return to downloading and
+uploading the video itself.
 """
 import gspread.exceptions
 import pytest
 
 import download_approved_to_drive as dad
-import sheets_sync
 
 
 class FakeWorksheet:
@@ -99,15 +111,46 @@ class _FakePage:
         pass
 
     def evaluate(self, *_a, **_kw):
-        # refunnel_export.scroll_to_top() calls this once per batch now
-        # -- see the reset_scroll change to trigger_native_drive_upload.
-        pass
+        pass  # refunnel_export.scroll_to_top() calls this once per batch
 
     def wait_for_timeout(self, *_a, **_kw):
         pass
 
     def close(self):
         pass
+
+
+class _FakePath:
+    """A minimal stand-in for the Path download_approved_video returns --
+    just enough surface (suffix, exists, unlink, str/repr, equality by
+    string) for process_one_brand's own logic to exercise correctly."""
+
+    def __init__(self, path_str):
+        self._s = path_str
+        self.unlinked = False
+
+    @property
+    def suffix(self):
+        import posixpath
+        return posixpath.splitext(self._s)[1]
+
+    def exists(self):
+        return not self.unlinked
+
+    def unlink(self):
+        self.unlinked = True
+
+    def __str__(self):
+        return self._s
+
+    def __repr__(self):
+        return f"_FakePath({self._s!r})"
+
+    def __eq__(self, other):
+        return str(other) == self._s
+
+    def __hash__(self):
+        return hash(self._s)
 
 
 @pytest.fixture(autouse=True)
@@ -118,25 +161,19 @@ def _stub_browser_and_workspace(monkeypatch):
     )
     monkeypatch.setattr(dad.refunnel_auth, "refunnel_social_listening_url", lambda *a, **kw: "https://x")
     monkeypatch.setattr(dad.refunnel_export, "goto_social_listening_for_workspace", lambda *a, **kw: None)
-    # No test in this file should ever need a REAL sleep -- the
-    # confirm phase's between-round wait is stubbed out unconditionally.
+    monkeypatch.setattr(dad.refunnel_export, "scroll_to_top", lambda *a, **kw: None)
+    # No test in this file should ever need a real sleep.
     monkeypatch.setattr(dad.time, "sleep", lambda *a: None)
-    # Default: the native upload trigger succeeds, and find_existing_upload
-    # returns nothing on the FIRST call (the pre-check, before triggering --
-    # nothing uploaded yet) but a match on every call after that (the
-    # confirm phase finding it immediately on its first check). Individual
-    # tests override either half to exercise other paths.
-    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", lambda *a, **kw: True)
-    _find_calls = {}  # keyed by fragment -- each item's OWN first call (its pre-check) must be
-    # None, independent of other items already triggered earlier in the same batch.
-
-    def _default_find_existing_upload(drive_service, folder_id, fragment):
-        _find_calls[fragment] = _find_calls.get(fragment, 0) + 1
-        if _find_calls[fragment] == 1:
-            return None
-        return {"id": "fake_file_id", "name": "raw_refunnel_name.mp4"}
-    monkeypatch.setattr(dad.drive_upload, "find_existing_upload", _default_find_existing_upload)
-    monkeypatch.setattr(dad.drive_upload, "rename_file", lambda *a, **kw: None)
+    # Default: find_existing_upload finds nothing (genuinely new upload
+    # every time), download succeeds with a plain .mp4 file, and
+    # upload_file succeeds. Individual tests override any of these to
+    # exercise other paths.
+    monkeypatch.setattr(dad.drive_upload, "find_existing_upload", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        dad.refunnel_export, "download_approved_video",
+        lambda page, media_id, download_dir, **kw: _FakePath(f"{download_dir}/{media_id}.mp4")
+    )
+    monkeypatch.setattr(dad.drive_upload, "upload_file", lambda *a, **kw: "new_file_id")
 
 
 def _brand_config(name="Swoveralls", spreadsheet_secret="SPREADSHEET_ID_SWOVERALLS", drive_secret="DRIVE_FOLDER_ID_SWOVERALLS"):
@@ -148,333 +185,204 @@ def _brand_config(name="Swoveralls", spreadsheet_secret="SPREADSHEET_ID_SWOVERAL
     return cfg
 
 
+# ---------- basic skip conditions ----------
+
 def test_skips_if_spreadsheet_secret_not_set(monkeypatch, capsys):
     monkeypatch.delenv("SPREADSHEET_ID_SWOVERALLS", raising=False)
-    gc = FakeClient({})
-    dad.process_one_brand(gc, _brand_config(), None, "x@example.com", ["Swoveralls"])
-    assert "skipping" in capsys.readouterr().out
+    dad.process_one_brand(FakeClient({}), _brand_config(), object(), "x@example.com", ["Swoveralls"])
+    assert "SPREADSHEET_ID_SWOVERALLS" in capsys.readouterr().out
 
 
 def test_skips_if_no_drive_secret_configured(monkeypatch, capsys):
     monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
-    gc = FakeClient({})
-    dad.process_one_brand(gc, _brand_config(drive_secret=None), None, "x@example.com", ["Swoveralls"])
-    assert "skipping" in capsys.readouterr().out
+    dad.process_one_brand(FakeClient({}), _brand_config(drive_secret=None), object(), "x@example.com", ["Swoveralls"])
+    assert "no drive_folder_id_secret configured" in capsys.readouterr().out
 
 
 def test_skips_if_drive_secret_configured_but_env_var_missing(monkeypatch, capsys):
     monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
     monkeypatch.delenv("DRIVE_FOLDER_ID_SWOVERALLS", raising=False)
-    gc = FakeClient({})
-    dad.process_one_brand(gc, _brand_config(), None, "x@example.com", ["Swoveralls"])
-    assert "skipping" in capsys.readouterr().out
+    dad.process_one_brand(FakeClient({}), _brand_config(), object(), "x@example.com", ["Swoveralls"])
+    assert "DRIVE_FOLDER_ID_SWOVERALLS" in capsys.readouterr().out
 
 
 def test_skips_if_no_master_data_tab(monkeypatch, capsys):
     monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
     monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
     gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={})})
-    dad.process_one_brand(gc, _brand_config(), None, "x@example.com", ["Swoveralls"])
-    assert "skipping" in capsys.readouterr().out
+    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
+    assert "no 'Master Data' tab yet" in capsys.readouterr().out
 
 
 def test_nothing_to_upload_when_no_approved_rows(monkeypatch, capsys):
     monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
     monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
-    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1", status="REQUESTED")])
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1", status="NONE")])
     gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
-    dad.process_one_brand(gc, _brand_config(), None, "x@example.com", ["Swoveralls"])
+    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
     assert "nothing new to upload" in capsys.readouterr().out
 
 
-def test_happy_path_triggers_the_upload_and_leaves_it_for_a_future_run_to_confirm(monkeypatch):
-    # CONFIRMED REAL simplification: no waiting or confirming within a
-    # run at all now. Triggering is the only thing this run does for a
-    # genuinely new upload -- the row stays unmarked until a FUTURE
-    # run's pre-check (find_existing_upload) finds it landed and
-    # renames it, whenever that turns out to be.
+# ---------- happy path: download, upload, mark the sheet ----------
+
+def test_happy_path_downloads_uploads_and_marks_the_row(monkeypatch):
     monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
     monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
     master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1")])
     gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
 
-    trigger_calls = []
+    download_calls = []
     monkeypatch.setattr(
-        dad.refunnel_export, "trigger_native_drive_upload",
-        lambda page, media_id, folder_name, **kw: trigger_calls.append((media_id, folder_name)) or True
+        dad.refunnel_export, "download_approved_video",
+        lambda page, media_id, download_dir, **kw: download_calls.append(media_id) or _FakePath(f"{download_dir}/{media_id}.mp4")
     )
-    find_calls = []
+    upload_calls = []
     monkeypatch.setattr(
-        dad.drive_upload, "find_existing_upload",
-        lambda service, folder_id, fragment: find_calls.append((folder_id, fragment)) or None
-    )
-    rename_calls = []
-    monkeypatch.setattr(
-        dad.drive_upload, "rename_file",
-        lambda service, file_id, filename: rename_calls.append((file_id, filename))
+        dad.drive_upload, "upload_file",
+        lambda service, local_path, filename, folder_id: upload_calls.append((local_path, filename, folder_id)) or "file_123"
     )
 
     dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
 
-    assert trigger_calls == [("tk_1", "Refunnel - Swoveralls")]
-    assert find_calls == [("folder1", "1")]  # exactly one pre-check, nothing more
-    assert rename_calls == []  # nothing to rename yet -- it hasn't landed
+    assert download_calls == ["tk_1"]
+    assert len(upload_calls) == 1
+    local_path, filename, folder_id = upload_calls[0]
+    assert filename == "Swoveralls | @creatorname | tk_1.mp4"
+    assert folder_id == "folder1"
     header = master_ws.rows[0]
     upload_idx = header.index("drive_uploaded_at")
-    assert not master_ws.rows[1][upload_idx]  # still blank -- confirmed on a future run instead
+    assert master_ws.rows[1][upload_idx]  # non-blank -- marked
 
 
-def test_uses_the_configured_drive_folder_name_not_the_default(monkeypatch):
+def test_filename_uses_the_downloaded_files_real_extension_not_a_hardcoded_mp4(monkeypatch):
+    # CONFIRMED REAL: the filename can only be built once local_path's
+    # REAL extension is known -- matching the original, proven version
+    # of this function, not a hardcoded ".mp4" guess.
     monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
     monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
     master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1")])
     gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
 
-    trigger_calls = []
     monkeypatch.setattr(
-        dad.refunnel_export, "trigger_native_drive_upload",
-        lambda page, media_id, folder_name, **kw: trigger_calls.append(folder_name) or True
+        dad.refunnel_export, "download_approved_video",
+        lambda page, media_id, download_dir, **kw: _FakePath(f"{download_dir}/{media_id}.webm")
+    )
+    upload_calls = []
+    monkeypatch.setattr(
+        dad.drive_upload, "upload_file",
+        lambda service, local_path, filename, folder_id: upload_calls.append(filename) or "file_123"
     )
 
-    cfg = _brand_config()
-    cfg["drive_folder_name"] = "Custom Folder Name"
-    dad.process_one_brand(gc, cfg, object(), "x@example.com", ["Swoveralls"])
+    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
 
-    assert trigger_calls == ["Custom Folder Name"]
+    assert upload_calls == ["Swoveralls | @creatorname | tk_1.webm"]
 
 
-def test_not_triggered_leaves_row_unmarked_for_retry(monkeypatch):
-    # card couldn't be located this run -- not a failure, just "try again later"
+def test_sabotage_hardcoding_mp4_would_be_caught(monkeypatch):
     monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
     monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
     master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1")])
     gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
 
-    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", lambda *a, **kw: False)
-    monkeypatch.setattr(dad.drive_upload, "find_existing_upload", lambda *a, **kw: None)
-
-    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
-
-    header = master_ws.rows[0]
-    upload_idx = header.index("drive_uploaded_at")
-    assert not master_ws.rows[1][upload_idx]  # left unmarked
-
-
-def test_a_new_trigger_leaves_the_row_unmarked_until_a_future_run_confirms_it(monkeypatch):
-    # CONFIRMED REAL, deliberate design: Refunnel's upload happens on
-    # its own servers, not instantly, and this run doesn't wait or
-    # check for it at all -- triggering is all it does. The row stays
-    # unmarked; that's the correct, expected state until some future
-    # run's pre-check finds it landed, not a failure to react to now.
-    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
-    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
-    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1")])
-    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
-
-    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", lambda *a, **kw: True)
-    monkeypatch.setattr(dad.drive_upload, "find_existing_upload", lambda *a, **kw: None)
-
-    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
-
-    header = master_ws.rows[0]
-    upload_idx = header.index("drive_uploaded_at")
-    assert not master_ws.rows[1][upload_idx]  # left unmarked, not treated as failed
-
-
-def test_already_uploaded_row_is_never_reprocessed(monkeypatch):
-    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
-    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
-    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1", uploaded="2026-09-01T00:00:00+00:00")])
-    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
-
-    called = []
-    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload",
-                         lambda *a, **kw: called.append(1) or True)
-
-    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
-
-    assert called == []  # never even attempted
-
-
-def test_batch_size_caps_how_many_are_processed_per_run(monkeypatch):
-    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
-    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
-    monkeypatch.setattr(dad, "BATCH_SIZE", 2)
-
-    rows = [MASTER_HEADER] + [_row(f"tk_{i}") for i in range(5)]
-    master_ws = FakeWorksheet(rows=rows)
-    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
-
-    attempted = []
-    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload",
-                         lambda page, media_id, folder_name, **kw: attempted.append(media_id) or True)
-
-    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
-
-    assert len(attempted) == 2  # capped, not all 5
-
-
-def test_one_failed_video_does_not_stop_the_rest(monkeypatch, capsys):
-    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
-    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
-    rows = [MASTER_HEADER, _row("tk_bad"), _row("tk_good")]
-    master_ws = FakeWorksheet(rows=rows)
-    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
-
-    triggered = []
-
-    def fake_trigger(page, media_id, folder_name, **kw):
-        if media_id == "tk_bad":
-            raise RuntimeError("simulated upload-trigger failure")
-        triggered.append(media_id)
-        return True
-
-    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", fake_trigger)
-    monkeypatch.setattr(dad.drive_upload, "find_existing_upload", lambda *a, **kw: None)
-
-    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
-
-    assert triggered == ["tk_good"]  # tk_bad's failure didn't stop tk_good from being tried
-    out = capsys.readouterr().out
-    assert "failed 1" in out
-    assert "triggered 1 new upload" in out
-
-
-def test_sabotage_reprocessing_an_uploaded_row_would_be_caught(monkeypatch):
-    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
-    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
-    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1", uploaded="2026-09-01T00:00:00+00:00")])
-    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
-
-    called = []
-    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload",
-                         lambda *a, **kw: called.append(1) or True)
+    monkeypatch.setattr(
+        dad.refunnel_export, "download_approved_video",
+        lambda page, media_id, download_dir, **kw: _FakePath(f"{download_dir}/{media_id}.webm")
+    )
+    upload_calls = []
+    monkeypatch.setattr(
+        dad.drive_upload, "upload_file",
+        lambda service, local_path, filename, folder_id: upload_calls.append(filename) or "file_123"
+    )
 
     dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
 
     with pytest.raises(AssertionError):
-        assert len(called) == 1  # wrong -- would mean it got reprocessed
-    assert len(called) == 0  # confirms actual correct behavior
+        assert upload_calls == ["Swoveralls | @creatorname | tk_1.mp4"]  # wrong -- ignores the real extension
+    assert upload_calls == ["Swoveralls | @creatorname | tk_1.webm"]
 
 
-def test_read_column_values_helper_used_correctly(monkeypatch):
-    # confirms this script reads the SAME "drive_uploaded_at" extra
-    # column sync_tab preserves for Master Data elsewhere, not a
-    # differently-named or differently-shaped one
-    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
-    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
-    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1", uploaded="already")])
-    master_client = sheets_sync.GspreadSheetsClient(master_ws)
-    existing = sheets_sync.read_column_values(master_client, "drive_uploaded_at")
-    assert existing == {"tk_1": "already"}
-
-
-def test_a_slow_prior_run_gets_renamed_instead_of_re_triggered(monkeypatch):
-    # end-to-end: media_id was uploaded by a PREVIOUS run that missed
-    # the confirmation window, so drive_uploaded_at is still blank --
-    # this run must find and rename it, NOT trigger Refunnel again
+def test_successful_upload_deletes_the_local_temp_file(monkeypatch):
     monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
     monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
     master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1")])
     gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
 
-    trigger_calls = []
-    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload",
-                        lambda *a, **kw: trigger_calls.append(1) or True)
+    fake_path = _FakePath("downloads/drive_backfill/Swoveralls/tk_1.mp4")
+    monkeypatch.setattr(dad.refunnel_export, "download_approved_video", lambda *a, **kw: fake_path)
+
+    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
+
+    assert fake_path.unlinked is True
+
+
+# ---------- already uploaded by an earlier, crashed run ----------
+
+def test_already_present_from_a_crashed_prior_run_is_marked_without_re_downloading(monkeypatch):
+    # CONFIRMED REAL gap this closes: a run that downloaded and
+    # uploaded successfully but crashed before marking drive_uploaded_at
+    # would otherwise download and upload the SAME media_id again --
+    # a real duplicate file. The final filename already embeds
+    # media_id, so checking for it directly, before ever downloading
+    # anything, catches that case.
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
+    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1")])
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+
     monkeypatch.setattr(dad.drive_upload, "find_existing_upload",
-                        lambda service, folder_id, fragment: {"id": "file_1", "name": "raw.mp4"})
-    rename_calls = []
-    monkeypatch.setattr(dad.drive_upload, "rename_file",
-                        lambda service, file_id, name: rename_calls.append((file_id, name)))
+                        lambda service, folder_id, media_id: {"id": "file_1", "name": "raw.mp4"})
+    download_calls = []
+    monkeypatch.setattr(dad.refunnel_export, "download_approved_video",
+                        lambda *a, **kw: download_calls.append(1) or _FakePath("x.mp4"))
+    upload_calls = []
+    monkeypatch.setattr(dad.drive_upload, "upload_file", lambda *a, **kw: upload_calls.append(1) or "x")
 
     dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
 
-    assert trigger_calls == []  # never triggered a new upload
-    assert rename_calls == [("file_1", "Swoveralls | @creatorname | tk_1.mp4")]
+    assert download_calls == []  # never downloaded again
+    assert upload_calls == []    # never uploaded again
     header = master_ws.rows[0]
     upload_idx = header.index("drive_uploaded_at")
-    assert master_ws.rows[1][upload_idx]  # marked
+    assert master_ws.rows[1][upload_idx]  # still correctly marked
 
 
-def test_sabotage_re_triggering_when_an_upload_already_exists_would_be_caught(monkeypatch):
+def test_sabotage_re_downloading_an_already_present_upload_would_be_caught(monkeypatch):
     monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
     monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
     master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1")])
     gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
 
-    trigger_calls = []
-    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload",
-                        lambda *a, **kw: trigger_calls.append(1) or True)
     monkeypatch.setattr(dad.drive_upload, "find_existing_upload",
-                        lambda service, folder_id, fragment: {"id": "file_1", "name": "raw.mp4"})
-    monkeypatch.setattr(dad.drive_upload, "rename_file", lambda *a, **kw: None)
+                        lambda service, folder_id, media_id: {"id": "file_1", "name": "raw.mp4"})
+    download_calls = []
+    monkeypatch.setattr(dad.refunnel_export, "download_approved_video",
+                        lambda *a, **kw: download_calls.append(1) or _FakePath("x.mp4"))
 
     dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
 
     with pytest.raises(AssertionError):
-        assert len(trigger_calls) == 1  # wrong -- that's the duplicate-upload bug
-    assert len(trigger_calls) == 0
+        assert download_calls == [1]  # wrong -- that would be a genuine duplicate download+upload
+    assert download_calls == []
 
 
-def test_scroll_resets_once_per_batch_not_once_per_item(monkeypatch):
-    # CONFIRMED REAL gap this fixes: trigger_native_drive_upload used
-    # to reset scroll unconditionally on every call, so a batch of
-    # several videos meant a full reset-and-rescroll per item. Now
-    # reset happens ONCE for the whole batch, matching the same proven
-    # pattern already used for email scraping.
-    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
-    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
-    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1"), _row("tk_2"), _row("tk_3")])
-    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
-
-    reset_calls = []
-    monkeypatch.setattr(dad.refunnel_export, "scroll_to_top", lambda *a, **kw: reset_calls.append(1))
-    trigger_calls = []
-    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload",
-                        lambda *a, **kw: trigger_calls.append(kw.get("reset_scroll")) or True)
-
-    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
-
-    assert len(reset_calls) == 1  # once for the whole 3-item batch, not 3 times
-    assert trigger_calls == [False, False, False]  # each item skips its own reset
-
-
-def test_sabotage_resetting_scroll_per_item_would_be_caught(monkeypatch):
-    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
-    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
-    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1"), _row("tk_2"), _row("tk_3")])
-    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
-
-    reset_calls = []
-    monkeypatch.setattr(dad.refunnel_export, "scroll_to_top", lambda *a, **kw: reset_calls.append(1))
-    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", lambda *a, **kw: True)
-
-    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
-
-    with pytest.raises(AssertionError):
-        assert len(reset_calls) == 3  # wrong -- that's the old, per-item reset behaviour
-    assert len(reset_calls) == 1
-
+# ---------- pending review (status changed since export) is not a failure ----------
 
 def test_status_changed_since_export_is_counted_separately_not_as_failed(monkeypatch, capsys):
-    # CONFIRMED REAL distinction: None means trigger_native_drive_upload
-    # found the card but its real status on Refunnel's live page no
-    # longer matches Master Data -- not a failure, and it already
-    # printed its own full explanation, so the caller must not print a
-    # confusing second "couldn't locate" message on top of it.
     monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
     monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
     master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1")])
     gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
 
-    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", lambda *a, **kw: None)
+    monkeypatch.setattr(dad.refunnel_export, "download_approved_video", lambda *a, **kw: None)
 
     dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
 
     out = capsys.readouterr().out
-    assert "couldn't locate media_id" not in out  # no confusing second message
     assert "status changed since export 1" in out
-    assert "failed 0" in out  # NOT counted as a failure
+    assert "failed 0" in out
+    header = master_ws.rows[0]
+    upload_idx = header.index("drive_uploaded_at")
+    assert not master_ws.rows[1][upload_idx]  # left unmarked, corrects itself on a future export
 
 
 def test_sabotage_counting_status_change_as_failed_would_be_caught(monkeypatch, capsys):
@@ -483,63 +391,147 @@ def test_sabotage_counting_status_change_as_failed_would_be_caught(monkeypatch, 
     master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1")])
     gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
 
-    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", lambda *a, **kw: None)
+    monkeypatch.setattr(dad.refunnel_export, "download_approved_video", lambda *a, **kw: None)
 
     dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
 
     out = capsys.readouterr().out
     with pytest.raises(AssertionError):
-        assert "failed 1" in out  # wrong -- would wrongly blame the scraper for stale Master Data
+        assert "failed 1" in out  # wrong -- would wrongly blame the download step for stale Master Data
     assert "failed 0" in out
 
 
-def test_status_changed_prints_nothing_per_item_and_writes_nothing_to_the_sheet(monkeypatch, capsys):
-    # CONFIRMED REAL feedback: a status mismatch is not an error and
-    # needs no per-item narration or evidence-gathering -- the count in
-    # the final summary line is enough, matching how a Pending review
-    # skip during email scraping is already handled. It also must
-    # never touch the sheet: the row stays exactly as the last export
-    # set it until a future export naturally corrects it.
+# ---------- card not found ----------
+
+def test_card_not_found_leaves_row_unmarked_for_retry(monkeypatch, capsys):
     monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
     monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
     master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1")])
     gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
 
-    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", lambda *a, **kw: None)
+    monkeypatch.setattr(dad.refunnel_export, "download_approved_video", lambda *a, **kw: False)
 
     dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
 
     out = capsys.readouterr().out
-    assert "media_id='tk_1'" not in out  # no per-item message at all
-    assert "status changed since export 1" in out  # counted once in the summary
-    assert master_ws.rows[1] == _row("tk_1")  # row completely untouched
+    assert "couldn't locate media_id='tk_1'" in out
+    header = master_ws.rows[0]
+    upload_idx = header.index("drive_uploaded_at")
+    assert not master_ws.rows[1][upload_idx]
 
 
-def test_sabotage_a_per_item_message_reappearing_would_be_caught(monkeypatch, capsys):
+# ---------- exceptions during download/upload ----------
+
+def test_one_failed_video_does_not_stop_the_rest(monkeypatch, capsys):
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
+    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
+    rows = [MASTER_HEADER, _row("tk_bad"), _row("tk_good")]
+    master_ws = FakeWorksheet(rows=rows)
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+
+    downloaded = []
+
+    def fake_download(page, media_id, download_dir, **kw):
+        if media_id == "tk_bad":
+            raise RuntimeError("simulated download failure")
+        downloaded.append(media_id)
+        return _FakePath(f"{download_dir}/{media_id}.mp4")
+
+    monkeypatch.setattr(dad.refunnel_export, "download_approved_video", fake_download)
+
+    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
+
+    assert downloaded == ["tk_good"]  # tk_bad's failure didn't stop tk_good from being tried
+    out = capsys.readouterr().out
+    assert "failed 1" in out
+    assert "uploaded 1" in out
+
+
+def test_a_failed_download_keeps_the_local_file_for_debugging(monkeypatch):
+    # a video that failed partway through is exactly what's worth
+    # inspecting from the debug artifact -- deleting it unconditionally
+    # would leave nothing to debug a failed run with
     monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
     monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
     master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1")])
     gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
 
-    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", lambda *a, **kw: None)
+    fake_path = _FakePath("downloads/drive_backfill/Swoveralls/tk_1.mp4")
+    monkeypatch.setattr(dad.refunnel_export, "download_approved_video", lambda *a, **kw: fake_path)
+    monkeypatch.setattr(dad.drive_upload, "upload_file",
+                        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("simulated upload failure")))
 
     dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
 
-    out = capsys.readouterr().out
+    assert fake_path.unlinked is False
+
+
+# ---------- incremental: an already-marked row is never reprocessed ----------
+
+def test_already_uploaded_row_is_never_reprocessed(monkeypatch):
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
+    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1", uploaded="2026-01-01T00:00:00Z")])
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+
+    download_calls = []
+    monkeypatch.setattr(dad.refunnel_export, "download_approved_video",
+                        lambda *a, **kw: download_calls.append(1) or _FakePath("x.mp4"))
+
+    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
+
+    assert download_calls == []
+
+
+def test_sabotage_reprocessing_an_uploaded_row_would_be_caught(monkeypatch):
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
+    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1", uploaded="2026-01-01T00:00:00Z")])
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+
+    download_calls = []
+    monkeypatch.setattr(dad.refunnel_export, "download_approved_video",
+                        lambda *a, **kw: download_calls.append(1) or _FakePath("x.mp4"))
+
+    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
+
     with pytest.raises(AssertionError):
-        assert "media_id='tk_1'" in out  # wrong -- would mean the removed noise came back
-    assert "media_id='tk_1'" not in out
+        assert download_calls == [1]  # wrong -- would mean re-downloading an already-uploaded video
+    assert download_calls == []
 
+
+# ---------- BATCH_SIZE caps how many successful uploads one run does ----------
+
+def test_batch_size_caps_how_many_are_processed_per_run(monkeypatch):
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
+    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
+    monkeypatch.setattr(dad, "BATCH_SIZE", 2)
+    rows = [MASTER_HEADER] + [_row(f"tk_{i}") for i in range(5)]
+    master_ws = FakeWorksheet(rows=rows)
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+
+    downloaded = []
+    monkeypatch.setattr(
+        dad.refunnel_export, "download_approved_video",
+        lambda page, media_id, download_dir, **kw: downloaded.append(media_id) or _FakePath(f"{download_dir}/{media_id}.mp4")
+    )
+
+    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
+
+    assert len(downloaded) == 2
+
+
+# ---------- keeps going past failures to reach real successes (confirmed real bug fix) ----------
 
 def test_run_keeps_going_past_failures_to_reach_real_successes(monkeypatch):
     # CONFIRMED REAL bug this fixes: a live run showed the exact same
-    # 50 media_ids, same order, same 0 successes, across multiple
-    # separate runs and days -- because target_ids used to be a fixed
-    # slice of the FIRST BATCH_SIZE ids, taken once. Any id that fails
-    # never gets drive_uploaded_at set, so it's still first in line
-    # next time -- the queue was permanently stuck on the same
-    # persistently-failing front, never reaching ids further down that
-    # might actually succeed.
+    # media_ids, same order, same 0 successes, across multiple separate
+    # runs and days -- because target_ids used to be a fixed slice of
+    # the FIRST BATCH_SIZE ids, taken once. Any id that fails never
+    # gets drive_uploaded_at set, so it's still first in line next time
+    # -- the queue was permanently stuck on the same persistently-
+    # failing front, never reaching ids further down that might
+    # actually succeed.
     monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
     monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
     monkeypatch.setattr(dad, "BATCH_SIZE", 2)
@@ -550,19 +542,18 @@ def test_run_keeps_going_past_failures_to_reach_real_successes(monkeypatch):
     master_ws = FakeWorksheet(rows=rows)
     gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
 
-    triggered = []
+    downloaded = []
 
-    def fake_trigger(page, media_id, folder_name, **kw):
-        succeeds = media_id in ("tk_5", "tk_6")
-        if succeeds:
-            triggered.append(media_id)
-        return succeeds
-    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", fake_trigger)
+    def fake_download(page, media_id, download_dir, **kw):
+        if media_id in ("tk_5", "tk_6"):
+            downloaded.append(media_id)
+            return _FakePath(f"{download_dir}/{media_id}.mp4")
+        return False
+    monkeypatch.setattr(dad.refunnel_export, "download_approved_video", fake_download)
 
     dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
 
-    # both real successes reached and triggered, despite 5 failures in front of them
-    assert triggered == ["tk_5", "tk_6"]
+    assert downloaded == ["tk_5", "tk_6"]
 
 
 def test_sabotage_stopping_at_a_fixed_slice_would_be_caught(monkeypatch):
@@ -577,10 +568,12 @@ def test_sabotage_stopping_at_a_fixed_slice_would_be_caught(monkeypatch):
 
     attempted = []
 
-    def fake_trigger(page, media_id, folder_name, **kw):
+    def fake_download(page, media_id, download_dir, **kw):
         attempted.append(media_id)
-        return media_id in ("tk_5", "tk_6")
-    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", fake_trigger)
+        if media_id in ("tk_5", "tk_6"):
+            return _FakePath(f"{download_dir}/{media_id}.mp4")
+        return False
+    monkeypatch.setattr(dad.refunnel_export, "download_approved_video", fake_download)
 
     dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
 
@@ -589,14 +582,31 @@ def test_sabotage_stopping_at_a_fixed_slice_would_be_caught(monkeypatch):
     assert "tk_5" in attempted and "tk_6" in attempted
 
 
+# ---------- MAX_ATTEMPTS_PER_RUN safety cap ----------
+
+def test_max_attempts_stops_a_run_where_nothing_ever_succeeds(monkeypatch, capsys):
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
+    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
+    monkeypatch.setattr(dad, "BATCH_SIZE", 50)
+    monkeypatch.setattr(dad, "MAX_ATTEMPTS_PER_RUN", 3)
+
+    rows = [MASTER_HEADER] + [_row(f"tk_{i}") for i in range(10)]
+    master_ws = FakeWorksheet(rows=rows)
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+
+    attempted = []
+    monkeypatch.setattr(dad.refunnel_export, "download_approved_video",
+                        lambda page, media_id, download_dir, **kw: attempted.append(media_id) or False)
+
+    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
+
+    assert len(attempted) == 3
+    assert "3-attempt safety cap" in capsys.readouterr().out
+
+
+# ---------- time budget safety cap ----------
+
 def test_time_budget_stops_a_run_where_everything_is_slow_not_stuck(monkeypatch):
-    # CONFIRMED REAL risk this closes: "not yet confirmed" (a slow
-    # Drive transfer missing the 30s window) is transient, not a
-    # permanent failure -- but if MANY items in one run hit this same
-    # slow pattern, the "keep going past failures" logic could burn
-    # through attempts one 30s wait at a time well past a single run's
-    # reasonable length. This bounds it, same proven pattern as email
-    # scraping's own time budget.
     monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
     monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
     monkeypatch.setattr(dad, "BATCH_SIZE", 50)
@@ -608,8 +618,8 @@ def test_time_budget_stops_a_run_where_everything_is_slow_not_stuck(monkeypatch)
     gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
 
     attempted = []
-    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload",
-                        lambda page, media_id, folder_name, **kw: attempted.append(media_id) or True)
+    monkeypatch.setattr(dad.refunnel_export, "download_approved_video",
+                        lambda page, media_id, download_dir, **kw: attempted.append(media_id) or True)
 
     dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
 
@@ -628,8 +638,8 @@ def test_sabotage_ignoring_the_time_budget_would_be_caught(monkeypatch):
     gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
 
     attempted = []
-    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload",
-                        lambda page, media_id, folder_name, **kw: attempted.append(media_id) or True)
+    monkeypatch.setattr(dad.refunnel_export, "download_approved_video",
+                        lambda page, media_id, download_dir, **kw: attempted.append(media_id) or True)
 
     dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
 
@@ -638,153 +648,18 @@ def test_sabotage_ignoring_the_time_budget_would_be_caught(monkeypatch):
     assert len(attempted) == 0
 
 
+# ---------- no sleep anywhere in a run ----------
 
 def test_no_sleep_is_ever_called_anywhere_in_a_run(monkeypatch):
-    # CONFIRMED REAL simplification, direct feedback: no waiting or
-    # checking for confirmation within a run at all, at any point.
-    # Trigger, and move on -- a future run's pre-check handles
-    # confirming and renaming whenever it actually lands.
     monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
     monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
     rows = [MASTER_HEADER] + [_row(f"tk_{i}") for i in range(10)]
     master_ws = FakeWorksheet(rows=rows)
     gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
 
-    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", lambda *a, **kw: True)
-    monkeypatch.setattr(dad.drive_upload, "find_existing_upload", lambda *a, **kw: None)
     sleep_calls = []
     monkeypatch.setattr(dad.time, "sleep", lambda *a: sleep_calls.append(a))
 
     dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
 
     assert sleep_calls == []
-
-
-def test_sabotage_adding_a_wait_back_in_would_be_caught(monkeypatch):
-    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
-    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
-    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1")])
-    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
-
-    monkeypatch.setattr(dad.refunnel_export, "trigger_native_drive_upload", lambda *a, **kw: True)
-    monkeypatch.setattr(dad.drive_upload, "find_existing_upload", lambda *a, **kw: None)
-    sleep_calls = []
-    monkeypatch.setattr(dad.time, "sleep", lambda *a: sleep_calls.append(a))
-
-    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
-
-    with pytest.raises(AssertionError):
-        assert len(sleep_calls) > 0  # wrong -- would mean the old waiting complexity came back
-    assert sleep_calls == []
-
-
-# ---------- folder id / folder name mismatch diagnostic ----------
-
-class _FakeDriveServiceForFolderCheck:
-    """Minimal fake supporting drive_service.files().get(fileId=...,
-    fields=...).execute() -- the exact chain the folder-name diagnostic
-    calls. Configurable name so tests can cover both match and mismatch."""
-
-    def __init__(self, actual_name):
-        self._actual_name = actual_name
-
-    def files(self):
-        return self
-
-    def get(self, fileId, fields, supportsAllDrives=None):
-        return self
-
-    def execute(self):
-        return {"name": self._actual_name}
-
-
-def test_folder_diagnostic_reports_a_match(monkeypatch, capsys):
-    # CONFIRMED REAL, checkable hypothesis this verifies: folder_id
-    # (used to search Drive) and drive_folder_name (clicked in
-    # Refunnel's own picker) are two independent values nothing
-    # verifies match. Printing folder_id itself doesn't work --
-    # GitHub Actions masks any log output matching a configured
-    # secret, so querying Drive for that id's own NAME (not a secret)
-    # is the only way to surface a real, readable answer.
-    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
-    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
-    master_ws = FakeWorksheet(rows=[MASTER_HEADER])
-    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
-    fake_service = _FakeDriveServiceForFolderCheck(actual_name="Refunnel - Swoveralls")
-
-    dad.process_one_brand(gc, _brand_config(), fake_service, "x@example.com", ["Swoveralls"])
-
-    out = capsys.readouterr().out
-    assert "MATCHES the name clicked" in out
-    assert "DOES NOT MATCH" not in out
-
-
-def test_folder_diagnostic_reports_a_mismatch(monkeypatch, capsys):
-    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
-    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
-    master_ws = FakeWorksheet(rows=[MASTER_HEADER])
-    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
-    # a completely different folder -- the exact scenario that would
-    # explain uploads genuinely landing while never being found
-    fake_service = _FakeDriveServiceForFolderCheck(actual_name="Some Other Folder")
-
-    dad.process_one_brand(gc, _brand_config(), fake_service, "x@example.com", ["Swoveralls"])
-
-    out = capsys.readouterr().out
-    assert "DOES NOT MATCH the name clicked" in out
-    assert "'Some Other Folder'" in out
-
-
-def test_sabotage_hiding_a_real_mismatch_would_be_caught(monkeypatch, capsys):
-    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
-    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
-    master_ws = FakeWorksheet(rows=[MASTER_HEADER])
-    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
-    fake_service = _FakeDriveServiceForFolderCheck(actual_name="Some Other Folder")
-
-    dad.process_one_brand(gc, _brand_config(), fake_service, "x@example.com", ["Swoveralls"])
-
-    out = capsys.readouterr().out
-    with pytest.raises(AssertionError):
-        assert "MATCHES the name clicked" in out and "DOES NOT" not in out  # wrong -- would hide a real mismatch
-    assert "DOES NOT MATCH" in out
-
-
-def test_evidence_is_captured_only_for_the_first_trigger_each_run(monkeypatch):
-    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
-    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
-    rows = [MASTER_HEADER] + [_row(f"tk_{i}") for i in range(4)]
-    master_ws = FakeWorksheet(rows=rows)
-    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
-
-    evidence_flags = []
-    monkeypatch.setattr(
-        dad.refunnel_export, "trigger_native_drive_upload",
-        lambda page, media_id, folder_name, **kw: evidence_flags.append(kw.get("capture_evidence")) or True
-    )
-    monkeypatch.setattr(dad.drive_upload, "find_existing_upload", lambda *a, **kw: None)
-
-    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
-
-    assert evidence_flags == [True, False, False, False]
-
-
-def test_sabotage_capturing_evidence_for_every_item_would_be_caught(monkeypatch):
-    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
-    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
-    rows = [MASTER_HEADER] + [_row(f"tk_{i}") for i in range(4)]
-    master_ws = FakeWorksheet(rows=rows)
-    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
-
-    evidence_flags = []
-    monkeypatch.setattr(
-        dad.refunnel_export, "trigger_native_drive_upload",
-        lambda page, media_id, folder_name, **kw: evidence_flags.append(kw.get("capture_evidence")) or True
-    )
-    monkeypatch.setattr(dad.drive_upload, "find_existing_upload", lambda *a, **kw: None)
-
-    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
-
-    with pytest.raises(AssertionError):
-        assert all(evidence_flags)  # wrong -- would mean needless overhead on every single item
-    assert evidence_flags == [True, False, False, False]
