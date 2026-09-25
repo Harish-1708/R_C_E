@@ -3202,3 +3202,68 @@ def test_sabotage_downloading_an_ambiguous_match_would_be_caught(monkeypatch, tm
         assert result is not False  # wrong -- would mean risking the wrong video
     assert result is False
     assert "skipping media_id" in capsys.readouterr().out
+
+
+# ---------- DOWNLOAD_BUTTON_SELECTOR, pinned to a REAL card (confirmed from a live failure snapshot) ----------
+#
+# CONFIRMED REAL, exact evidence: a saved failure snapshot's HTML
+# showed the card's action icons in ONE shared wrapper, three items
+# stacked vertically -- a link-share icon, a "+" (add to collection)
+# icon, then the actual download icon, in that order. The earlier
+# broad selector (matching anything with "download" in its class name)
+# matched the OUTER WRAPPER first, since its own class also happens to
+# contain "download" -- hovering that wrapper's bounding box landed on
+# the MIDDLE icon, the "+", which opened Refunnel's own "Add content
+# to collection(s)" dialog. That dialog then sat open, blocking every
+# subsequent hover attempt with a genuine "Timeout 30000ms exceeded...
+# intercepts pointer events" failure -- confirmed directly by a live
+# screenshot showing that exact dialog open, not a flaky selector.
+
+DOWNLOAD_BUTTON_CARD_FIXTURE = Path(__file__).parent / "fixtures" / "refunnel_download_button_card.html"
+
+
+def _download_button_soup():
+    from bs4 import BeautifulSoup
+    return BeautifulSoup(DOWNLOAD_BUTTON_CARD_FIXTURE.read_text(), "html.parser")
+
+
+def test_download_button_selector_matches_exactly_the_real_download_div():
+    from refunnel_export import DOWNLOAD_BUTTON_SELECTOR
+    soup = _download_button_soup()
+    matches = soup.select(DOWNLOAD_BUTTON_SELECTOR)
+    assert len(matches) == 1
+    assert matches[0]["class"] == ["download-media-div"]
+
+
+def test_download_button_selector_is_not_the_shared_wrapper():
+    # the wrapper's own class also contains "download" -- the exact
+    # reason the old, broad selector matched it instead of the real button
+    from refunnel_export import DOWNLOAD_BUTTON_SELECTOR
+    soup = _download_button_soup()
+    button = soup.select_one(DOWNLOAD_BUTTON_SELECTOR)
+    wrapper = soup.select_one(".post_download_content_btn__cpgc")
+    assert button is not None and wrapper is not None
+    assert button is not wrapper
+    assert button in wrapper.descendants
+
+
+def test_download_button_selector_is_not_the_add_to_collection_icon():
+    # CONFIRMED REAL: the "+" icon sits directly above the download
+    # icon, sharing the "add-collection-div" class -- confirming the
+    # fix targets the download div specifically, not just "whichever
+    # icon happens to be nearby"
+    from refunnel_export import DOWNLOAD_BUTTON_SELECTOR
+    soup = _download_button_soup()
+    button = soup.select_one(DOWNLOAD_BUTTON_SELECTOR)
+    add_to_collection_icons = soup.select(".add-collection-div")
+    assert len(add_to_collection_icons) == 2  # the link icon and the "+" icon
+    assert button not in add_to_collection_icons
+
+
+def test_sabotage_matching_the_wrapper_class_would_be_caught():
+    soup = _download_button_soup()
+    with pytest.raises(AssertionError):
+        # wrong -- the old, broad selector that caused this exact bug
+        assert len(soup.select("[class*='download' i]")) == 1
+    from refunnel_export import DOWNLOAD_BUTTON_SELECTOR
+    assert len(soup.select(DOWNLOAD_BUTTON_SELECTOR)) == 1
