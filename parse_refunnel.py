@@ -293,6 +293,25 @@ def build_drive_filename(brand: str, username: str, media_id: str, extension: st
     return f"{brand} | {handle} | {media_id}.{extension}"
 
 
+def drive_match_fragment(media_id: str) -> str:
+    """Returns the substring used to identify a file Refunnel uploaded
+    for this media_id -- the last 8 digits of the numeric part of the
+    id (confirmed real against actual Refunnel upload filenames, e.g.
+    "INSTAGRAM_REEL_tayloredforthekingdom_2026-09-21-UGC_30937735.mp4"
+    where media_id was "ig_18018159830937735"). Used by
+    drive_upload.find_existing_upload and
+    drive_upload.find_and_rename_uploaded_file to search the Drive
+    folder without needing the exact raw filename Refunnel chose.
+
+    Strips the platform prefix (e.g. "ig_", "tk_") and returns the
+    last 8 digits of the numeric part -- short enough to fit cleanly
+    in a Drive query, long enough to be unique in any realistic-sized
+    folder.
+    """
+    numeric = "".join(ch for ch in media_id if ch.isdigit())
+    return numeric[-8:] if len(numeric) >= 8 else numeric
+
+
 CAMPAIGN_SEPARATOR = ", "
 
 
