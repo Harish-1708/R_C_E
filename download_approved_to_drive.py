@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 import traceback
 from datetime import datetime, timezone
 
@@ -91,6 +92,19 @@ DRIVE_UPLOAD_WAIT_SECONDS = float(os.environ.get("DRIVE_UPLOAD_WAIT_SECONDS", "3
 # failures/skips to actually reach BATCH_SIZE real successes -- or
 # exhaust the queue trying.
 MAX_ATTEMPTS_PER_RUN = int(os.environ.get("DRIVE_BACKFILL_MAX_ATTEMPTS", str(BATCH_SIZE * 8)))
+# CONFIRMED REAL risk this closes: a "not yet confirmed" outcome (the
+# 30s Drive-landing wait timing out) is transient, not stuck like a
+# permanent failure -- find_existing_upload() catches it cleanly on a
+# LATER run. But within ONE run, MAX_ATTEMPTS_PER_RUN keeping the loop
+# going past failures means a run where many items hit this same slow-
+# transfer pattern could burn through attempts one 30-second wait at a
+# time, well past what's reasonable for a single run, even though the
+# job-level timeout-minutes cap would eventually force-kill it anyway.
+# Same proven pattern as email scraping's own SCRAPE_TIME_BUDGET_MINUTES:
+# stop cleanly with whatever progress was made, rather than run right up
+# against (or past) the external cap. Comfortably inside
+# drive-backfill.yml's 60-minute job cap.
+DRIVE_BACKFILL_TIME_BUDGET_MINUTES = float(os.environ.get("DRIVE_BACKFILL_TIME_BUDGET_MINUTES", "45"))
 
 
 def load_workspaces(path: str = CONFIG_PATH) -> list:
@@ -177,6 +191,7 @@ def process_one_brand(
         refunnel_export.scroll_to_top(page)
 
         uploaded, not_yet_confirmed, failed, status_changed, attempted = 0, 0, 0, 0, 0
+        deadline = time.monotonic() + DRIVE_BACKFILL_TIME_BUDGET_MINUTES * 60
         for media_id in target_ids:
             if uploaded >= BATCH_SIZE:
                 break
@@ -184,6 +199,12 @@ def process_one_brand(
                 print(f"{brand}: reached the {MAX_ATTEMPTS_PER_RUN}-attempt safety cap for this "
                       f"run with only {uploaded} confirmed -- stopping here rather than risking "
                       f"an unbounded run; the rest of the queue is picked up on a future run.")
+                break
+            if time.monotonic() >= deadline:
+                print(f"{brand}: reached this run's {DRIVE_BACKFILL_TIME_BUDGET_MINUTES:.0f}-minute "
+                      f"time budget with only {uploaded} confirmed -- stopping cleanly here rather "
+                      f"than risking a run right up against the job's own hard timeout; the rest of "
+                      f"the queue is picked up on a future run.")
                 break
             attempted += 1
             row = master_rows[media_id]
