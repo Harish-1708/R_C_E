@@ -663,3 +663,56 @@ def test_no_sleep_is_ever_called_anywhere_in_a_run(monkeypatch):
     dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
 
     assert sleep_calls == []
+
+
+# ---------- simplified periodic progress output (requested directly) ----------
+
+def test_prints_a_periodic_progress_line_every_25_items_not_one_block_per_item(monkeypatch, capsys):
+    # CONFIRMED REAL, direct request: per-item noise for every single
+    # video (checking..., downloaded..., uploading..., marked...) made
+    # a long run's live output unreadable. One line every 25 attempts,
+    # same cadence email scraping already uses, replaces that.
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
+    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
+    rows = [MASTER_HEADER] + [_row(f"tk_{i}") for i in range(30)]
+    master_ws = FakeWorksheet(rows=rows)
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+    monkeypatch.setattr(dad, "BATCH_SIZE", 100)
+
+    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
+
+    out = capsys.readouterr().out
+    assert "25/30 searched -- 25 Uploaded, 0 Pending, 0 Errors" in out
+    assert "30/30 searched -- 30 Uploaded, 0 Pending, 0 Errors" in out
+
+
+def test_sabotage_printing_every_single_item_would_be_caught(monkeypatch, capsys):
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
+    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
+    rows = [MASTER_HEADER] + [_row(f"tk_{i}") for i in range(30)]
+    master_ws = FakeWorksheet(rows=rows)
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+    monkeypatch.setattr(dad, "BATCH_SIZE", 100)
+
+    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
+
+    out = capsys.readouterr().out
+    progress_lines = [line for line in out.splitlines() if "searched --" in line]
+    with pytest.raises(AssertionError):
+        assert len(progress_lines) == 30  # wrong -- that's one block per item, the old noisy output
+    assert len(progress_lines) == 2  # confirms actual correct behavior: every 25, plus the final one
+
+
+def test_failure_message_names_the_media_id_and_the_real_error(monkeypatch, capsys):
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
+    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _row("tk_1")])
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+    monkeypatch.setattr(dad.refunnel_export, "download_approved_video",
+                        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("simulated failure")))
+
+    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
+
+    out = capsys.readouterr().out
+    assert "FAILED media_id='tk_1'" in out
+    assert "RuntimeError: simulated failure" in out
