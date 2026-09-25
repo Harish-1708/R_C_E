@@ -1174,14 +1174,24 @@ def card_selector_for_username_date(username: str, created_at: str) -> Optional[
 # name set immediately (no separate rename step needed at all, unlike
 # the native-upload flow, since the filename is ours from the start).
 #
-# DOWNLOAD_BUTTON_SELECTOR is a reasonable starting guess (an earlier
-# version of this exact function, before the native-upload detour,
-# carried the same honest caveat) -- broad enough to catch a download-
-# labeled button or icon, but not yet confirmed against today's live
-# page. If a debug snapshot shows this selector matching the wrong
-# element (or nothing), that -- not the overall approach -- is what
-# needs adjusting.
-DOWNLOAD_BUTTON_SELECTOR = "button[aria-label*='download' i], [class*='download' i]"
+# DOWNLOAD_BUTTON_SELECTOR -- CONFIRMED REAL, exact evidence from a
+# saved failure snapshot's HTML: the card's action icons sit in one
+# shared wrapper, three items stacked vertically --
+#   .add-collection-div (publicLinkIcon.svg)   -- share link
+#   .add-collection-div (openMenuIconAddIcon.svg) -- "+", add to collection
+#   .download-media-div (downloadIcon.svg)     -- the actual download button
+# The earlier broad guess (matching anything with "download" in its
+# class) matched the OUTER WRAPPER first (its own class also contains
+# "download"), not this specific div -- hovering the wrapper's bounding
+# box landed on the middle icon, the "+", which opens Refunnel's own
+# "Add content to collection(s)" dialog. That dialog then sat open,
+# blocking every subsequent hover attempt with a genuine, confirmed
+# "Timeout 30000ms exceeded... intercepts pointer events" failure --
+# not a flaky selector, the WRONG element, confirmed by a live
+# screenshot showing that exact dialog open. This selector targets the
+# actual download div specifically, not a class-name substring match
+# that happens to also catch its wrapper.
+DOWNLOAD_BUTTON_SELECTOR = ".download-media-div"
 
 
 def download_approved_video(
