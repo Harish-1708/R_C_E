@@ -1287,11 +1287,12 @@ def trigger_native_drive_upload(
     except Exception:
         is_now_pending_review = False
     if is_now_pending_review:
-        print(f"drive upload: media_id={media_id!r} is marked Approved in Master Data, but "
-              f"Refunnel's live page now shows it as {PENDING_REVIEW_TITLE_TEXT!r} -- its status "
-              f"changed since the last export. Skipping rather than retrying against a menu that "
-              f"genuinely doesn't exist for this card; a fresh export will pick up its real "
-              f"current status.")
+        # Not an error -- no print here. The caller already counts
+        # this (status_changed) and reports it once in the final
+        # summary line; a per-item message for every one of these
+        # was pure noise with nothing to act on, matching how a
+        # Pending review skip during email scraping is already
+        # handled (counted, not narrated per item).
         return None
 
     try:
