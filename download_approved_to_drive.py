@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 import traceback
 from datetime import datetime, timezone
 
@@ -77,7 +78,29 @@ CONFIG_PATH = "config/workspaces.yaml"
 MASTER_DATA_TAB = "Master Data"
 DOWNLOAD_DIR = "downloads/drive_backfill"
 BATCH_SIZE = int(os.environ.get("DRIVE_BACKFILL_BATCH_SIZE", "50"))
-DRIVE_UPLOAD_WAIT_SECONDS = float(os.environ.get("DRIVE_UPLOAD_WAIT_SECONDS", "30"))
+# CONFIRMED REAL simplification: no waiting or checking for confirmation
+# within a run AT ALL, at any point -- direct feedback that any amount
+# of within-run waiting (30s, then 90s, then several rounds totaling
+# 90s) was unnecessary complexity for something with a simple answer.
+# Trigger it, and if it's not marked drive_uploaded_at in the sheet
+# yet, that's the only signal that matters: the pre-check below
+# (find_existing_upload) catches it and renames it whenever it
+# actually lands, on whatever future run that turns out to be. No
+# rounds, no sleeps, no per-run confirmation step at all.
+MAX_ATTEMPTS_PER_RUN = int(os.environ.get("DRIVE_BACKFILL_MAX_ATTEMPTS", str(BATCH_SIZE * 8)))
+# CONFIRMED REAL risk this closes: a "not yet confirmed" outcome (the
+# 30s Drive-landing wait timing out) is transient, not stuck like a
+# permanent failure -- find_existing_upload() catches it cleanly on a
+# LATER run. But within ONE run, MAX_ATTEMPTS_PER_RUN keeping the loop
+# going past failures means a run where many items hit this same slow-
+# transfer pattern could burn through attempts one 30-second wait at a
+# time, well past what's reasonable for a single run, even though the
+# job-level timeout-minutes cap would eventually force-kill it anyway.
+# Same proven pattern as email scraping's own SCRAPE_TIME_BUDGET_MINUTES:
+# stop cleanly with whatever progress was made, rather than run right up
+# against (or past) the external cap. Comfortably inside
+# drive-backfill.yml's 60-minute job cap.
+DRIVE_BACKFILL_TIME_BUDGET_MINUTES = float(os.environ.get("DRIVE_BACKFILL_TIME_BUDGET_MINUTES", "45"))
 
 
 def load_workspaces(path: str = CONFIG_PATH) -> list:
@@ -112,6 +135,35 @@ def process_one_brand(
         return
 
     drive_folder_name = brand_config.get("drive_folder_name") or f"Refunnel - {brand}"
+    # CONFIRMED REAL, checkable hypothesis: folder_id (used to SEARCH
+    # Drive for a landed upload) and drive_folder_name (the text
+    # clicked in Refunnel's OWN folder picker) are two completely
+    # separate, independently-configured values -- nothing anywhere
+    # verifies they point at the SAME actual Drive folder. If they
+    # don't, uploads can genuinely succeed, landing somewhere real in
+    # Drive, while this script's own check would never find them --
+    # not slow, never, on every single run.
+    #
+    # Printing folder_id itself doesn't work -- GitHub Actions masks
+    # ANY log output matching a configured secret, including inside a
+    # URL string, so the previous version of this check showed '***'
+    # and told nobody anything. Querying Drive for that id's OWN name
+    # instead is the fix: a folder's name isn't a secret, so it prints
+    # in full, and can be compared directly against drive_folder_name
+    # without ever needing to see the id itself.
+    try:
+        actual_folder_name = drive_service.files().get(
+            fileId=folder_id, fields="name", supportsAllDrives=True
+        ).execute().get("name")
+        match_note = "MATCHES" if actual_folder_name == drive_folder_name else "DOES NOT MATCH"
+        print(f"{brand}: the configured Drive folder id's actual name is "
+              f"{actual_folder_name!r} -- {match_note} the name clicked in Refunnel's own "
+              f"folder picker ({drive_folder_name!r}).")
+    except Exception as e:
+        print(f"{brand}: couldn't look up the configured Drive folder id's own name to verify "
+              f"it against {drive_folder_name!r}: {type(e).__name__}: {e}. If this is a "
+              f"\"not found\" or permission error, the configured folder id itself is very "
+              f"likely the problem.")
 
     sh = sheets_sync.retry_on_transient_error(gc.open_by_key, spreadsheet_id)
     try:
@@ -135,9 +187,10 @@ def process_one_brand(
         print(f"{brand}: nothing new to upload -- every Approved video is already in Drive.")
         return
 
-    target_ids = list(to_upload.keys())[:BATCH_SIZE]
+    target_ids = list(to_upload.keys())
     print(f"{brand}: {len(to_upload)} Approved video(s) not yet in Drive -- "
-          f"processing {len(target_ids)} this run (batch size {BATCH_SIZE}), "
+          f"triggering up to {BATCH_SIZE} of them this run (trying up to "
+          f"{min(MAX_ATTEMPTS_PER_RUN, len(target_ids))} of them if needed to reach that many), "
           f"target folder {drive_folder_name!r}.")
 
     debug_dir = f"{DOWNLOAD_DIR}/{brand.replace(' ', '_')}/debug"
@@ -151,18 +204,53 @@ def process_one_brand(
         refunnel_export.goto_social_listening_for_workspace(
             page, refunnel_workspace_name, known_workspace_names, usage_rights="GRANTED"
         )
+        # Reset to the top ONCE for the whole batch, matching the same
+        # proven pattern already used for email scraping -- CONFIRMED
+        # REAL gap this closes: trigger_native_drive_upload used to
+        # reset scroll unconditionally on every call, so a 50-item
+        # batch meant 50 full resets and 50 full re-scrolls back down,
+        # far more DOM churn per item than necessary. target_ids is
+        # already in the same newest-first feed order the search moves
+        # through, so one reset here plus each item's own forward-only
+        # search (reset_scroll=False below) covers the whole batch.
+        refunnel_export.scroll_to_top(page)
 
-        uploaded, not_yet_confirmed, failed = 0, 0, 0
+        # CONFIRMED REAL simplification, direct feedback: no waiting or
+        # checking for confirmation within a run at all. Trigger it; if
+        # it's already there from an earlier run, rename and mark it
+        # immediately; if it's genuinely pending review, skip it;
+        # otherwise, trigger the upload and move straight to the next
+        # one. The sheet's own drive_uploaded_at is the only thing that
+        # matters -- if it's blank, this queue picks the id up again,
+        # and find_existing_upload (the very next line an id like that
+        # hits) finds and renames it whenever it actually lands, no
+        # matter which future run that turns out to be.
+        renamed_from_prior_run, triggered_count, failed, status_changed, attempted = 0, 0, 0, 0, 0
+        deadline = time.monotonic() + DRIVE_BACKFILL_TIME_BUDGET_MINUTES * 60
         for media_id in target_ids:
+            if triggered_count >= BATCH_SIZE:
+                break
+            if attempted >= MAX_ATTEMPTS_PER_RUN:
+                print(f"{brand}: reached the {MAX_ATTEMPTS_PER_RUN}-attempt safety cap for this "
+                      f"run with {triggered_count} triggered so far -- stopping here rather than "
+                      f"risking an unbounded run; the rest of the queue is picked up on a future run.")
+                break
+            if time.monotonic() >= deadline:
+                print(f"{brand}: reached this run's {DRIVE_BACKFILL_TIME_BUDGET_MINUTES:.0f}-minute "
+                      f"time budget with {triggered_count} triggered so far -- stopping cleanly here "
+                      f"rather than risking a run right up against the job's own hard timeout; the "
+                      f"rest of the queue is picked up on a future run.")
+                break
+            attempted += 1
             row = master_rows[media_id]
             username = row.get("username", "") or "unknown"
             filename = parse_refunnel.build_drive_filename(brand, username, media_id)
             fragment = parse_refunnel.drive_match_fragment(media_id)
             try:
                 # CONFIRMED REAL gap this closes: a slow Refunnel
-                # transfer that missed the previous run's 30s window
-                # left drive_uploaded_at blank, so this SAME media_id
-                # would otherwise trigger ANOTHER upload here -- a real
+                # transfer that missed a previous run left
+                # drive_uploaded_at blank, so this SAME media_id would
+                # otherwise trigger ANOTHER upload here -- a real
                 # duplicate, while the first upload sat in Drive
                 # forever under its raw, unrenamed name. Check for it
                 # first; if it's already there, just rename it.
@@ -171,47 +259,56 @@ def process_one_brand(
                     drive_upload.rename_file(drive_service, existing["id"], filename)
                     master_client.update_single_cell(media_id, "drive_uploaded_at", _now_iso(),
                                                      create_if_missing=True)
-                    uploaded += 1
-                    print(f"{brand}: media_id={media_id!r} was already uploaded by a slower-than-"
-                          f"expected earlier run -- renamed it instead of triggering a duplicate.")
+                    renamed_from_prior_run += 1
+                    print(f"{brand}: media_id={media_id!r} was already uploaded by an earlier "
+                          f"run -- renamed it instead of triggering a duplicate.")
                     continue
 
-                trigger_ts = _now_iso()
                 triggered = refunnel_export.trigger_native_drive_upload(
                     page, media_id, drive_folder_name, debug_dir=debug_dir,
                     username=username, created_at=row.get("created_at", ""),
+                    reset_scroll=False,
+                    # CONFIRMED REAL gap this closes: a click completing
+                    # without a Playwright exception only proves the
+                    # button was clicked -- it says nothing about
+                    # whether Refunnel's own backend actually accepted
+                    # the request. Captured for the first trigger each
+                    # run only, not every item, so this stays cheap.
+                    capture_evidence=(triggered_count == 0),
                 )
+                # CONFIRMED REAL distinction this makes: None means the
+                # card WAS found, but its real current status on
+                # Refunnel's live page no longer matches what our
+                # Master Data says -- trigger_native_drive_upload
+                # already printed the full explanation. Not a failure,
+                # same as Pending review is already treated for email
+                # scraping -- a fresh export corrects this on its own.
+                if triggered is None:
+                    # Not an error, no sheet write, nothing to fix here
+                    # -- the count in the final summary line is enough.
+                    # A genuine status mismatch corrects itself on the
+                    # next full export; there is nothing for this run
+                    # to act on in the meantime.
+                    status_changed += 1
+                    continue
                 if not triggered:
                     print(f"{brand}: couldn't locate media_id={media_id!r} on the page -- "
                           f"leaving it unmarked, will retry on a future run.")
                     failed += 1
                     continue
 
-                file_id = drive_upload.find_and_rename_uploaded_file(
-                    drive_service, folder_id, fragment, filename,
-                    uploaded_after=trigger_ts, max_wait_seconds=DRIVE_UPLOAD_WAIT_SECONDS,
-                )
-
-                if file_id is None:
-                    print(f"{brand}: triggered the upload for media_id={media_id!r}, but it "
-                          f"hadn't shown up in Drive within {DRIVE_UPLOAD_WAIT_SECONDS:.0f}s -- "
-                          f"leaving it unmarked, will retry on a future run rather than "
-                          f"assume it failed.")
-                    not_yet_confirmed += 1
-                    continue
-
-                # Marked immediately, one at a time -- not batched at
-                # the end -- so a crash partway through a long run
-                # doesn't lose track of videos already confirmed in
-                # Drive.
-                master_client.update_single_cell(media_id, "drive_uploaded_at", _now_iso(), create_if_missing=True)
-                uploaded += 1
+                # Triggered, done -- no wait, no check, nothing else
+                # for this run to do with it. Whenever it lands, a
+                # future run's pre-check above renames and marks it.
+                triggered_count += 1
             except Exception as e:
                 print(f"{brand}: couldn't process media_id={media_id!r}: {type(e).__name__}: {e}")
                 failed += 1
 
-        print(f"{brand}: confirmed {uploaded}, not yet confirmed {not_yet_confirmed}, "
-              f"failed {failed}, {len(to_upload) - len(target_ids)} still pending for a future run.")
+        print(f"{brand}: renamed {renamed_from_prior_run} already-landed upload(s) from an "
+              f"earlier run, triggered {triggered_count} new upload(s) this run, failed {failed}, "
+              f"status changed since export {status_changed}, "
+              f"{len(to_upload) - attempted} still pending for a future run.")
     finally:
         try:
             page.close()
