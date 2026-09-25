@@ -1118,24 +1118,6 @@ def _format_progress_line(attempted: int, total: int, found: int, empty_fields: 
             f"{other_failed} Errors")
 
 
-# CONFIRMED REAL from a saved page with the Approved filter applied: an
-# Approved card's footer holds ONLY the usage-rights toggle -- the ARIA
-# disclosure wrapping .usage-rights-approved-card. Upload to Google
-# Drive is in that toggle's dropdown. An earlier selector targeted a
-# dotted "..." icon instead; on the live page that opened the card's
-# other menu (Show content / Mute creator / Delete from library).
-#
-# The toggle is clicked on the CARD ITSELF (.usage-rights-approved-card,
-# see _open_drive_upload_menu), not this wrapper -- the same reversal
-# already confirmed for the email-scraping flow: a live run showed
-# hundreds of failures clicking the wrapper once the grid was deep into
-# a large batch, while clicking the card directly (matched by a
-# proven-working prior version of the email-scraping code) held up.
-DRIVE_UPLOAD_MENU_ITEM_SELECTOR = "text=Upload to Google Drive"
-DRIVE_MODAL_ALL_FOLDERS_TAB_SELECTOR = "button:has-text('All folders')"
-DRIVE_MODAL_SAVE_BUTTON_SELECTOR = "button:has-text('Save to Drive')"
-
-
 _MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
@@ -1177,71 +1159,76 @@ def card_selector_for_username_date(username: str, created_at: str) -> Optional[
             f":has(.post_time__cpgc:text-is('{label}'))")
 
 
-def trigger_native_drive_upload(
+# CONFIRMED REAL, direct decision from live evidence: Refunnel's own
+# native "Save to Drive" feature was tried instead of this for a long
+# stretch of this project. Every piece of the click-through was
+# eventually proven correct -- confirmed byte-identical to a version
+# that once worked, confirmed against the right Drive folder, confirmed
+# accepted by Refunnel's own "Uploading to Google Drive -- it will
+# appear shortly" toast -- and the file still never landed, across
+# many separate runs, on a transfer that happens entirely on Refunnel's
+# own servers once that toast appears. Nothing past that point is
+# something this codebase can see or control. Direct download puts the
+# whole pipeline back in code this project actually owns: download the
+# real file to disk ourselves, upload it ourselves with the correct
+# name set immediately (no separate rename step needed at all, unlike
+# the native-upload flow, since the filename is ours from the start).
+#
+# DOWNLOAD_BUTTON_SELECTOR is a reasonable starting guess (an earlier
+# version of this exact function, before the native-upload detour,
+# carried the same honest caveat) -- broad enough to catch a download-
+# labeled button or icon, but not yet confirmed against today's live
+# page. If a debug snapshot shows this selector matching the wrong
+# element (or nothing), that -- not the overall approach -- is what
+# needs adjusting.
+DOWNLOAD_BUTTON_SELECTOR = "button[aria-label*='download' i], [class*='download' i]"
+
+
+def download_approved_video(
     page: Page,
     media_id: str,
-    drive_folder_name: str,
+    download_dir: str,
     scroll_container_selector: str = "#scrollableDiv",
-    debug_dir: Optional[str] = None,
+    download_button_selector: str = DOWNLOAD_BUTTON_SELECTOR,
     timeout_ms: int = 15000,
     username: Optional[str] = None,
     created_at: Optional[str] = None,
     reset_scroll: bool = True,
-    capture_evidence: bool = False,
-) -> Optional[bool]:
-    """Saves one Approved post's video to Google Drive using Refunnel's
-    OWN native upload -- Refunnel does the file transfer server-side;
-    this only drives the UI and picks the folder.
+    attempts: int = 3,
+    debug_dir: Optional[str] = None,
+) -> Optional[Path]:
+    """Locates the card for media_id and clicks its download button,
+    saving the resulting file under download_dir as "<media_id>.<real
+    extension>". Direct browser download via Playwright's own
+    page.expect_download() -- the same, already-proven mechanism this
+    codebase already uses for CSV exports (export_payments_csv,
+    export_media_csv), not anything new or unverified as a mechanism.
 
-    CONFIRMED REAL flow, from saved pages and screenshots of the live UI:
-      1. On an APPROVED card, "Upload to Google Drive" lives in the
-         "Usage rights approved" status bar's chevron dropdown -- the
-         card footer holds ONLY that toggle (wrapping
-         .usage-rights-approved-card). An earlier version clicked a
-         dotted "..." icon instead; a live run's screenshot showed that
-         opened the card's OTHER menu ("Show content / Mute creator /
-         Delete from library"), so "Upload to Google Drive" never
-         appeared and every attempt timed out.
-      2. The save modal: "All folders" tab -> the brand's folder (a
-         span with its exact name) -> "Save to Drive", which is
-         DISABLED until a folder is picked, so it is waited on rather
-         than clicked blind.
+    This filename is a TEMPORARY, download-step-only name -- the final
+    Drive filename (brand/handle/id) is applied separately at upload
+    time by download_approved_to_drive.py, keeping this function's only
+    job "get the real file onto disk," not "know Drive's naming".
 
     Card lookup: by media id in the thumbnail URL first (works for
-    TikTok and numeric Instagram ids -- confirmed), then, if given,
-    by creator handle + displayed date for the 32-char hex Instagram
-    ids that never appear in thumbnail URLs. The fallback refuses to
-    act when more than one card matches (same creator, same day) --
-    skipping is always safer than uploading the wrong video.
+    TikTok and numeric Instagram ids -- confirmed), then, if given, by
+    creator handle + displayed date for the 32-char hex Instagram ids
+    that never appear in thumbnail URLs. The fallback refuses to act
+    when more than one card matches (same creator, same day) --
+    skipping is always safer than downloading the wrong video.
 
-    Returns True once Save to Drive is clicked, False if the card
-    couldn't be located at all (or was ambiguous), or None if the card
-    WAS found but its actual current status on Refunnel's live page no
-    longer matches what triggered this call -- CONFIRMED REAL, found
-    via a saved debug snapshot: a media_id marked Approved in Master
-    Data can genuinely show as Pending review on the live page if its
-    status changed after the last export. None is a distinct, correct
-    outcome, not a failure -- callers should treat it the same way
-    Pending review is already treated for email scraping (skip
-    cleanly, don't count it as an error, a fresh export picks up the
-    real status). Raises on any other failure in the flow, after
-    saving a debug snapshot if debug_dir is given.
+    Returns the downloaded Path once saved, False if the card couldn't
+    be located at all (or was ambiguous), or None if the card WAS found
+    but its actual current status on Refunnel's live page no longer
+    matches what triggered this call -- CONFIRMED REAL, the same
+    Approved-in-sheet-but-Pending-review-live mismatch already
+    confirmed for the native-upload flow (Refunnel's own team confirmed
+    their Approved filter can include Pending review posts). None is a
+    distinct, correct outcome, not a failure -- callers should treat it
+    the same way Pending review is already treated for email scraping
+    (skip cleanly, don't count it as an error). Raises on any other
+    failure in the flow, after saving a debug snapshot if debug_dir is
+    given.
     """
-    # Reset BEFORE searching -- confirmed real: the search only scrolls
-    # FORWARD, so anything above the current position was unreachable.
-    #
-    # reset_scroll=False lets a caller processing a BATCH skip this for
-    # every individual item, matching the same proven pattern already
-    # used for email scraping: reset ONCE before the whole batch, then
-    # let each item's forward-only search continue from wherever the
-    # last one left off (targets are in the same newest-first feed
-    # order the search already moves through). CONFIRMED REAL gap this
-    # closes: this call used to run unconditionally, so a 50-item batch
-    # meant 50 full resets to the top and 50 full re-scrolls back down
-    # -- far more scrolling/DOM churn per item than email scraping ever
-    # does for a similarly-sized batch, on top of the same virtualized-
-    # list instability that's already been the root cause every other
-    # time it's shown up in this project.
     if reset_scroll:
         scroll_to_top(page, scroll_container_selector)
     grid_item, _ = _scroll_until_card_found(page, media_id, scroll_container_selector)
@@ -1259,28 +1246,14 @@ def trigger_native_drive_upload(
                 except Exception:
                     matches = 1
                 if matches > 1:
-                    print(f"drive upload: {matches} cards match @{username.lstrip('@')} on "
+                    print(f"drive download: {matches} cards match @{username.lstrip('@')} on "
                           f"{card_date_label(created_at)} -- skipping media_id={media_id!r} "
-                          f"rather than risk uploading the wrong video.")
+                          f"rather than risk downloading the wrong video.")
                     return False
 
     if grid_item is None:
         return False
 
-    # CONFIRMED REAL root cause, found via a saved debug snapshot: two
-    # media_ids failed identically across every version of this click
-    # mechanism tried so far (the original ARIA-wrapper approach, this
-    # rewrite's direct-card-click) -- because neither version was ever
-    # the problem. Their card genuinely has no .usage-rights-approved-
-    # card at all; it has .usage-rights-requested-card with a
-    # .urq-title of "Pending review" instead. Their status changed on
-    # Refunnel's live page sometime after Master Data was last
-    # exported -- our sheet still says GRANTED, but the real page
-    # disagrees. No click mechanism can open a menu that doesn't
-    # exist. Checked BEFORE attempting to open anything, same proven
-    # pattern already used for email scraping -- no wasted retries,
-    # no stray menu left open, and a genuinely different, correct
-    # outcome instead of a misleading "menu didn't open" error.
     try:
         is_now_pending_review = grid_item.locator(
             f".urq-title:has-text('{PENDING_REVIEW_TITLE_TEXT}')"
@@ -1288,156 +1261,61 @@ def trigger_native_drive_upload(
     except Exception:
         is_now_pending_review = False
     if is_now_pending_review:
-        # Not an error -- no print here. The caller already counts
-        # this (status_changed) and reports it once in the final
-        # summary line; a per-item message for every one of these
-        # was pure noise with nothing to act on, matching how a
-        # Pending review skip during email scraping is already
-        # handled (counted, not narrated per item).
+        # Not an error -- no print here, matching the same, already-
+        # settled call for the native-upload flow. The caller counts
+        # this once for its own summary line; a fresh export corrects
+        # the sheet's stale status on its own.
         return None
 
-    try:
-        _open_drive_upload_menu(page, media_id, grid_item, scroll_container_selector)
-
-        all_folders_tab = page.locator(DRIVE_MODAL_ALL_FOLDERS_TAB_SELECTOR).first
-        all_folders_tab.wait_for(state="visible", timeout=timeout_ms)
-        all_folders_tab.click()
-
-        folder_row = page.get_by_text(drive_folder_name, exact=True).first
-        folder_row.wait_for(state="visible", timeout=timeout_ms)
-        folder_row.click()
-
-        save_button = page.locator(DRIVE_MODAL_SAVE_BUTTON_SELECTOR).first
-        page.wait_for_selector(f"{DRIVE_MODAL_SAVE_BUTTON_SELECTOR}:not([disabled])", timeout=timeout_ms)
-        save_button.click()
-
-        # CONFIRMED REAL gap this closes: a click completing without a
-        # Playwright exception only proves the BUTTON was clicked -- it
-        # says nothing about whether Refunnel's own backend actually
-        # accepted the request. If Refunnel's connected Google account
-        # has lost permission, or its own "Save to Drive" integration
-        # is broken, this click could still complete cleanly with
-        # nothing ever actually transferring, and nothing about that
-        # would ever surface as an exception here. capture_evidence
-        # (set by the caller for a small sample each run, not every
-        # item) saves what the page genuinely shows right after the
-        # click -- whether the modal closed normally or an error
-        # appeared -- direct evidence instead of another guess.
-        if capture_evidence and debug_dir:
-            try:
-                page.wait_for_timeout(1000)
-                out_dir = Path(debug_dir)
-                out_dir.mkdir(parents=True, exist_ok=True)
-                page.screenshot(path=str(out_dir / f"drive_upload_post_click_{media_id}.png"), full_page=True)
-                (out_dir / f"drive_upload_post_click_{media_id}.html").write_text(page.content(), encoding="utf-8")
-            except Exception:
-                pass
-
-        return True
-    except Exception:
-        if debug_dir:
-            try:
-                out_dir = Path(debug_dir)
-                out_dir.mkdir(parents=True, exist_ok=True)
-                page.screenshot(path=str(out_dir / f"drive_upload_failure_{media_id}.png"), full_page=True)
-                (out_dir / f"drive_upload_failure_{media_id}.html").write_text(page.content(), encoding="utf-8")
-            except Exception:
-                pass
-        raise
-
-
-def _open_drive_upload_menu(page: Page, media_id: str, grid_item, scroll_container_selector: str,
-                            attempts: int = 3) -> None:
-    """Opens an Approved card's status-toggle dropdown and clicks
-    "Upload to Google Drive". Modeled directly on _open_usage_rights_menu
-    (email scraping) -- reusing the exact same proven mechanisms, not a
-    new, separately-guessed approach.
-
-    CONFIRMED REAL bug this fixes: this Drive flow was never updated
-    with ANY of the fixes built for the email-scraping flow across many
-    rounds. It still clicked the ARIA wrapper (.pop-up-menu >
-    [aria-controls]:has(.usage-rights-approved-card)) instead of the
-    card itself, used a bare scroll_into_view_if_needed(timeout=4000)
-    that doesn't even scroll (it only WAITS for the element to already
-    be in view), a plain, unforced click, and no retry loop at all --
-    one attempt, then straight to failure. A live 527-video run showed
-    exactly the errors this predicts: hundreds of consecutive
-    "Locator.scroll_into_view_if_needed: Timeout 4000ms exceeded" and
-    "aria-controls]:has(.usage-rights-approved-card)" failures once the
-    run reached deeper into the grid, the same virtualized-list
-    instability the email flow already had this fixed for.
-    """
-    card_selector = ".usage-rights-approved-card"
     last_error: Optional[Exception] = None
-    early_geometry_note = ""
     for attempt in range(attempts):
         try:
-            card = grid_item.locator(card_selector).first
-            if card.count() == 0:
-                scroll_to_top(page, scroll_container_selector)
-                grid_item, _ = _scroll_until_card_found(page, media_id, scroll_container_selector)
-                if grid_item is None:
-                    raise ExportError(f"card for media_id={media_id!r} left the page and couldn't be re-found")
-                card = grid_item.locator(card_selector).first
+            card = grid_item
+            if attempt > 0:
+                # Re-resolve fresh on retry rather than reusing a
+                # reference that may have gone stale under a
+                # virtualized list -- same reasoning already proven for
+                # the menu-opening flow. The id-based search is tried
+                # again; for the rarer hex-id case where only the
+                # fallback ever matches, a stale reference here simply
+                # fails this attempt and moves to the next one, same as
+                # any other transient failure.
+                grid_item2, _ = _scroll_until_card_found(page, media_id, scroll_container_selector)
+                if grid_item2 is not None:
+                    card = grid_item2
 
-            if attempt == 0:
-                # Diagnostic-only, read ONCE, right here -- the same
-                # approach that turned out to be decisive for the
-                # email-scraping flow after several rounds of guessing
-                # at the cause. CONFIRMED REAL need: the SAME two
-                # media_ids failed identically, with the exact same
-                # 4000ms timing, across multiple independent runs with
-                # different batch sizes -- not random timing variance,
-                # something specific and repeatable about these two
-                # posts. This is the only way to see it directly
-                # instead of continuing to guess.
-                try:
-                    geometry = card.evaluate(_CARD_GEOMETRY_JS, timeout=EVALUATE_TIMEOUT_MS)
-                    early_geometry_note = f" Toggle geometry when first found: {geometry}."
-                except Exception as geometry_error:
-                    early_geometry_note = (
-                        f" Couldn't read toggle geometry even on the first attempt "
-                        f"(gone before we could even measure it): {geometry_error}."
-                    )
+            card.hover()
+            download_button = card.locator(download_button_selector).first
+            download_button.wait_for(state="visible", timeout=timeout_ms)
 
-            card.evaluate(_VERIFY_CARD_JS, _DANGEROUS_BUTTON_PATTERN.pattern, timeout=EVALUATE_TIMEOUT_MS)
+            with page.expect_download(timeout=timeout_ms) as download_info:
+                download_button.click()
+            download = download_info.value
 
-            try:
-                card.click(force=True, timeout=MENU_CLICK_TIMEOUT_MS)
-            except Exception:
-                pass
-
-            page.wait_for_timeout(150)
-            try:
-                expanded = card.evaluate(_MENU_EXPANDED_JS, timeout=EVALUATE_TIMEOUT_MS)
-            except Exception:
-                expanded = None
-
-            upload_item = page.locator(DRIVE_UPLOAD_MENU_ITEM_SELECTOR).first
-            try:
-                already_open = upload_item.is_visible()
-            except Exception:
-                already_open = False
-
-            if expanded != "true" and not already_open:
-                card.evaluate(_POINTER_SEQUENCE_JS, timeout=EVALUATE_TIMEOUT_MS)
-
-            upload_item.wait_for(state="visible", timeout=MENU_OPEN_TIMEOUT_MS)
-            _safe_click(upload_item, timeout_ms=MENU_CLICK_TIMEOUT_MS)
-            return
+            suggested = download.suggested_filename or f"{media_id}.mp4"
+            extension = Path(suggested).suffix or ".mp4"
+            Path(download_dir).mkdir(parents=True, exist_ok=True)
+            dest = Path(download_dir) / f"{media_id}{extension}"
+            download.save_as(str(dest))
+            return dest
         except Exception as e:
             last_error = e
-            try:
-                page.keyboard.press("Escape")
-            except Exception:
-                pass
             if attempt < attempts - 1:
-                page.wait_for_timeout(150)
+                page.wait_for_timeout(300)
+
+    if debug_dir:
+        try:
+            out_dir = Path(debug_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            page.screenshot(path=str(out_dir / f"drive_download_failure_{media_id}.png"), full_page=True)
+            (out_dir / f"drive_download_failure_{media_id}.html").write_text(page.content(), encoding="utf-8")
+        except Exception:
+            pass
     raise ExportError(
-        f"Card for media_id={media_id!r} was found, but its Drive-upload menu didn't open "
-        f"after {attempts} attempts (real forced click, then full pointer sequence, each "
-        f"attempt). Original error: {last_error}.{early_geometry_note}"
+        f"Card for media_id={media_id!r} was found, but its download button never appeared/"
+        f"worked after {attempts} attempts. Original error: {last_error}"
     ) from last_error
+
 
 _MEDIA_ID_IN_SRC = re.compile(r"(tk_\d+|ig_[0-9a-f]{32}|ig_\d+)")
 
