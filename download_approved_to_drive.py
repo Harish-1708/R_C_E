@@ -142,15 +142,28 @@ def process_one_brand(
     # verifies they point at the SAME actual Drive folder. If they
     # don't, uploads can genuinely succeed, landing somewhere real in
     # Drive, while this script's own check would never find them --
-    # not slow, never, on every single run, which is exactly what a
-    # live run of many attempts and zero landed uploads looks like.
-    # Printed plainly so this can be verified directly: open
-    # https://drive.google.com/drive/folders/<the id below> and
-    # confirm it's the SAME folder Refunnel's own "Save to Drive" ->
-    # "All folders" -> <the name below> leads to.
-    print(f"{brand}: uploads will be searched for in Drive folder id {folder_id!r} "
-          f"(https://drive.google.com/drive/folders/{folder_id}) -- clicked in Refunnel's own "
-          f"folder picker as {drive_folder_name!r}. Confirm these are the SAME folder.")
+    # not slow, never, on every single run.
+    #
+    # Printing folder_id itself doesn't work -- GitHub Actions masks
+    # ANY log output matching a configured secret, including inside a
+    # URL string, so the previous version of this check showed '***'
+    # and told nobody anything. Querying Drive for that id's OWN name
+    # instead is the fix: a folder's name isn't a secret, so it prints
+    # in full, and can be compared directly against drive_folder_name
+    # without ever needing to see the id itself.
+    try:
+        actual_folder_name = drive_service.files().get(
+            fileId=folder_id, fields="name", supportsAllDrives=True
+        ).execute().get("name")
+        match_note = "MATCHES" if actual_folder_name == drive_folder_name else "DOES NOT MATCH"
+        print(f"{brand}: the configured Drive folder id's actual name is "
+              f"{actual_folder_name!r} -- {match_note} the name clicked in Refunnel's own "
+              f"folder picker ({drive_folder_name!r}).")
+    except Exception as e:
+        print(f"{brand}: couldn't look up the configured Drive folder id's own name to verify "
+              f"it against {drive_folder_name!r}: {type(e).__name__}: {e}. If this is a "
+              f"\"not found\" or permission error, the configured folder id itself is very "
+              f"likely the problem.")
 
     sh = sheets_sync.retry_on_transient_error(gc.open_by_key, spreadsheet_id)
     try:
