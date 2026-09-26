@@ -1294,24 +1294,44 @@ def download_approved_video(
                 if grid_item2 is not None:
                     card = grid_item2
 
-            card.hover()
+            # CONFIRMED REAL, exact evidence from multiple saved failure
+            # snapshots' HTML: the outer div.rf-virtuoso-item grid-item
+            # wrapper this function locates cards by is NOT the actual
+            # visible card -- it wraps a `.new-content-div` child that
+            # holds the whole visible card (header, badges, download
+            # button, thumbnail). The grid item's own bounding box
+            # includes react-virtuoso's own grid-spacing padding around
+            # that content (confirmed: its parent carries a padding-top
+            # in the tens of thousands of pixels this deep into a long
+            # scroll), so Playwright's hover(), which targets the
+            # CENTER of whatever element it's called on, can land on
+            # that padding rather than the actual card underneath it --
+            # hover() still reports success (the padding area IS
+            # visible, stable, and attached, satisfying Playwright's
+            # own actionability checks), but nothing on the page ever
+            # shows the hover-state icons, exactly matching multiple
+            # saved snapshots where NOT ONE card anywhere on the page
+            # had them, even after retrying. Hovering the inner
+            # .new-content-div specifically, when present, targets the
+            # actual visible card content instead of its wrapper's own
+            # spacing.
+            hover_target = card.locator(".new-content-div").first
+            if hover_target.count() == 0:
+                hover_target = card
+
+            hover_target.hover()
             download_button = card.locator(download_button_selector).first
 
-            # CONFIRMED REAL: a live failure showed hover() succeeding
-            # with no exception raised (Playwright's own actionability
-            # checks were satisfied -- element visible, stable,
-            # attached), yet a saved failure snapshot showed the
-            # hover-state icons weren't present in the DOM for ANY
-            # currently-rendered card on the page, not just this one --
-            # the hover never actually triggered React's own mouseenter
-            # state update at all. A single hover() call is fast enough
-            # that React's re-render can genuinely lag behind
-            # Playwright immediately checking for the button
-            # afterward. Re-hovering a couple more times, each after a
-            # real wait, gives React's own event handling a real chance
-            # to catch up before falling through to the (much heavier)
-            # full card re-resolution the outer retry loop already does
-            # on its next pass.
+            # CONFIRMED REAL: even once hovering the right element, a
+            # live failure separately showed hover() succeeding with no
+            # exception raised, yet the button still hadn't appeared --
+            # a single hover() call is fast enough that React's
+            # re-render can genuinely lag behind Playwright immediately
+            # checking for the button afterward. Re-hovering a couple
+            # more times, each after a real wait, gives React's own
+            # event handling a real chance to catch up before falling
+            # through to the (much heavier) full card re-resolution the
+            # outer retry loop already does on its next pass.
             hover_retries = 2
             for rehover in range(hover_retries + 1):
                 try:
@@ -1323,7 +1343,7 @@ def download_approved_video(
                     if rehover >= hover_retries:
                         raise
                     page.wait_for_timeout(500)
-                    card.hover()
+                    hover_target.hover()
 
             with page.expect_download(timeout=timeout_ms) as download_info:
                 download_button.click()
