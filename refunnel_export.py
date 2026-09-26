@@ -1296,7 +1296,34 @@ def download_approved_video(
 
             card.hover()
             download_button = card.locator(download_button_selector).first
-            download_button.wait_for(state="visible", timeout=timeout_ms)
+
+            # CONFIRMED REAL: a live failure showed hover() succeeding
+            # with no exception raised (Playwright's own actionability
+            # checks were satisfied -- element visible, stable,
+            # attached), yet a saved failure snapshot showed the
+            # hover-state icons weren't present in the DOM for ANY
+            # currently-rendered card on the page, not just this one --
+            # the hover never actually triggered React's own mouseenter
+            # state update at all. A single hover() call is fast enough
+            # that React's re-render can genuinely lag behind
+            # Playwright immediately checking for the button
+            # afterward. Re-hovering a couple more times, each after a
+            # real wait, gives React's own event handling a real chance
+            # to catch up before falling through to the (much heavier)
+            # full card re-resolution the outer retry loop already does
+            # on its next pass.
+            hover_retries = 2
+            for rehover in range(hover_retries + 1):
+                try:
+                    download_button.wait_for(
+                        state="visible", timeout=timeout_ms if rehover == 0 else 4000
+                    )
+                    break
+                except Exception:
+                    if rehover >= hover_retries:
+                        raise
+                    page.wait_for_timeout(500)
+                    card.hover()
 
             with page.expect_download(timeout=timeout_ms) as download_info:
                 download_button.click()
