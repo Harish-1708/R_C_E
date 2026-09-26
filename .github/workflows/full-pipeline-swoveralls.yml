@@ -44,9 +44,9 @@ on:
         default: "150"
         type: string
       drive_batch_size:
-        description: "Max Approved videos to save to Drive this run."
+        description: "Max Approved videos to save to Drive this run. Leave blank for no cap (clears the whole backlog)."
         required: false
-        default: "50"
+        default: ""
         type: string
 
 jobs:
@@ -222,7 +222,7 @@ jobs:
           SPREADSHEET_ID_DUDEROBE: ${{ secrets.SPREADSHEET_ID_DUDEROBE }}
           SPREADSHEET_ID_SWOVERALLS: ${{ secrets.SPREADSHEET_ID_SWOVERALLS }}
           DRIVE_FOLDER_ID_SWOVERALLS: ${{ secrets.DRIVE_FOLDER_ID_SWOVERALLS }}
-          DRIVE_BACKFILL_BATCH_SIZE: ${{ github.event.inputs.drive_batch_size || '50' }}
+          DRIVE_BACKFILL_BATCH_SIZE: ${{ github.event.inputs.drive_batch_size }}
         run: python -u download_approved_to_drive.py
 
       - name: Save Refunnel session for the next run
