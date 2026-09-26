@@ -3003,6 +3003,27 @@ class _FakeDownloadButton:
         self.card.page._triggered_download = _FakeDownload(self.card.suggested_filename)
 
 
+class _FakeInnerContentDiv:
+    """Models card.locator(".new-content-div").first -- present by
+    default (count() == 1), with its own .hover() delegating to the
+    card's own hover(), so existing assertions on card.hovered /
+    card.hover_count keep working unchanged now that hovering happens
+    on this inner element instead of the card directly."""
+
+    def __init__(self, card):
+        self.card = card
+
+    @property
+    def first(self):
+        return self
+
+    def count(self):
+        return 1
+
+    def hover(self):
+        self.card.hover()
+
+
 class _FakeDownloadCard:
     """Models a found grid_item card: hover(), and a .locator() for the
     download button whose visibility/click-success is configurable per
@@ -3018,17 +3039,22 @@ class _FakeDownloadCard:
         self.click_succeeds = click_succeeds
         self.suggested_filename = suggested_filename
         self.now_pending_review = False
+        self.locator_calls = []
 
     def hover(self):
         self.hovered = True
 
     def locator(self, selector):
+        self.locator_calls.append(selector)
         if "urq-title" in selector:
             class _UrqTitle:
                 def count(_s):
                     return 1 if self.now_pending_review else 0
             return _UrqTitle()
+        if "new-content-div" in selector:
+            return _FakeInnerContentDiv(self)
         return _FakeDownloadButton(self, should_click_succeed=self.click_succeeds)
+
 
 
 class _FakeDownloadPage:
@@ -3342,3 +3368,93 @@ def test_sabotage_giving_up_after_a_single_hover_would_be_caught(monkeypatch, tm
     with pytest.raises(AssertionError):
         assert len(scroll_calls) == 2  # wrong -- that's recovery via the outer loop, not the re-hover fix
     assert len(scroll_calls) == 1
+
+
+
+def test_download_hovers_the_inner_new_content_div_not_the_outer_grid_wrapper(monkeypatch, tmp_path):
+    # CONFIRMED REAL, exact evidence from multiple saved failure
+    # snapshots: the outer div.rf-virtuoso-item grid-item wrapper is
+    # NOT the actual visible card -- it wraps a .new-content-div child
+    # that holds the real card content, and the wrapper's own bounding
+    # box includes react-virtuoso's own grid-spacing padding around it
+    # (confirmed: its parent carried a padding-top in the tens of
+    # thousands of pixels this deep into a long scroll). Hovering the
+    # wrapper's center can land on that padding -- Playwright reports
+    # success, but nothing ever shows the hover-state icons, matching
+    # multiple saved snapshots where NOT ONE card anywhere on the page
+    # had them, even after retrying. Confirmed here: the code must
+    # look up .new-content-div specifically before hovering, not hover
+    # the card (outer wrapper) locator directly.
+    import refunnel_export as re_module
+
+    card = _FakeDownloadCard()
+
+    def fake_scroll_found(page, media_id, scroll_container_selector, **kw):
+        card.page = page
+        return card, {}
+    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
+
+    page = _FakeDownloadPage()
+    result = download_approved_video(page, "tk_1", str(tmp_path))
+
+    assert result == tmp_path / "tk_1.mp4"
+    assert ".new-content-div" in card.locator_calls
+    assert card.locator_calls.index(".new-content-div") < card.locator_calls.index(".download-media-div")
+
+
+def test_sabotage_hovering_the_outer_wrapper_directly_would_be_caught(monkeypatch, tmp_path):
+    import refunnel_export as re_module
+
+    card = _FakeDownloadCard()
+
+    def fake_scroll_found(page, media_id, scroll_container_selector, **kw):
+        card.page = page
+        return card, {}
+    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
+
+    page = _FakeDownloadPage()
+    download_approved_video(page, "tk_1", str(tmp_path))
+
+    with pytest.raises(AssertionError):
+        # wrong -- that's the bug this fix corrects: going straight to
+        # the download-button selector without first checking for the
+        # inner content div means hover() lands on the outer wrapper
+        assert ".new-content-div" not in card.locator_calls
+    assert ".new-content-div" in card.locator_calls
+    assert card.locator_calls.index(".new-content-div") < card.locator_calls.index(".download-media-div")
+
+
+def test_falls_back_to_hovering_the_card_itself_if_new_content_div_is_absent(monkeypatch, tmp_path):
+    # a defensive fallback: if a future page structure change ever
+    # removes .new-content-div, this should still hover SOMETHING
+    # rather than silently doing nothing at all.
+    import refunnel_export as re_module
+
+    class _NoInnerDivCard(_FakeDownloadCard):
+        def locator(self, selector):
+            self.locator_calls.append(selector)
+            if "new-content-div" in selector:
+                class _Absent:
+                    @property
+                    def first(_s):
+                        return _s
+
+                    def count(_s):
+                        return 0
+                return _Absent()
+            if "urq-title" in selector:
+                return super().locator(selector)
+            return _FakeDownloadButton(self, should_click_succeed=self.click_succeeds)
+
+    card = _NoInnerDivCard()
+
+    def fake_scroll_found(page, media_id, scroll_container_selector, **kw):
+        card.page = page
+        return card, {}
+    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
+
+    page = _FakeDownloadPage()
+    result = download_approved_video(page, "tk_1", str(tmp_path))
+
+    assert result == tmp_path / "tk_1.mp4"
+    assert card.hovered is True  # fell back to hovering the card itself
