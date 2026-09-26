@@ -3267,3 +3267,78 @@ def test_sabotage_matching_the_wrapper_class_would_be_caught():
         assert len(soup.select("[class*='download' i]")) == 1
     from refunnel_export import DOWNLOAD_BUTTON_SELECTOR
     assert len(soup.select(DOWNLOAD_BUTTON_SELECTOR)) == 1
+
+
+def test_download_button_recovers_from_a_hover_that_did_not_take_visual_effect(monkeypatch, tmp_path):
+    # CONFIRMED REAL, direct evidence: a live failure showed hover()
+    # succeeding with no exception raised, yet a saved failure snapshot
+    # showed the hover-state icons weren't present in the DOM for ANY
+    # currently-rendered card on the page -- the hover never actually
+    # triggered React's own mouseenter state update. Modeled here as a
+    # button that only becomes visible after the card has actually been
+    # hovered twice, confirming the re-hover loop recovers it WITHIN
+    # this one attempt -- not by accidentally falling through to the
+    # outer retry loop's own, much heavier, full card re-resolution
+    # (asserted here via scroll_calls staying at 1).
+    import refunnel_export as re_module
+
+    class _SlowToRenderCard(_FakeDownloadCard):
+        def __init__(self):
+            super().__init__(button_visible=False)
+            self.hover_count = 0
+
+        def hover(self):
+            self.hover_count += 1
+            if self.hover_count >= 2:
+                self.button_visible = True
+
+    card = _SlowToRenderCard()
+    scroll_calls = []
+
+    def fake_scroll_found(page, media_id, scroll_container_selector, **kw):
+        scroll_calls.append(1)
+        card.page = page
+        return card, {}
+    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
+
+    page = _FakeDownloadPage()
+    result = download_approved_video(page, "tk_1", str(tmp_path))
+
+    assert result == tmp_path / "tk_1.mp4"
+    assert card.hover_count == 2
+    assert len(scroll_calls) == 1  # recovered within one attempt, no full card re-resolution needed
+
+
+def test_sabotage_giving_up_after_a_single_hover_would_be_caught(monkeypatch, tmp_path):
+    # models what happens WITHOUT the re-hover fix: the first hover
+    # doesn't take effect, this attempt fails outright, and the outer
+    # retry loop's own re-resolution is what eventually recovers it --
+    # a real, working-but-much-heavier fallback that would otherwise
+    # mask the fact that the re-hover loop itself was never exercised.
+    import refunnel_export as re_module
+
+    class _SlowToRenderCard(_FakeDownloadCard):
+        def __init__(self):
+            super().__init__(button_visible=False)
+            self.hover_count = 0
+
+        def hover(self):
+            self.hover_count += 1
+            if self.hover_count >= 2:
+                self.button_visible = True
+
+    card = _SlowToRenderCard()
+    scroll_calls = []
+
+    def fake_scroll_found(page, media_id, scroll_container_selector, **kw):
+        scroll_calls.append(1)
+        card.page = page
+        return card, {}
+    monkeypatch.setattr(re_module, "_scroll_until_card_found", fake_scroll_found)
+
+    page = _FakeDownloadPage()
+    download_approved_video(page, "tk_1", str(tmp_path))
+
+    with pytest.raises(AssertionError):
+        assert len(scroll_calls) == 2  # wrong -- that's recovery via the outer loop, not the re-hover fix
+    assert len(scroll_calls) == 1
