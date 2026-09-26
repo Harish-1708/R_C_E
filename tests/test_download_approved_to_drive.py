@@ -521,6 +521,83 @@ def test_batch_size_caps_how_many_are_processed_per_run(monkeypatch):
     assert len(downloaded) == 2
 
 
+def test_no_batch_size_set_processes_the_whole_backlog_in_one_run(monkeypatch):
+    # CONFIRMED REAL want, direct request: no default cap on how many
+    # successful uploads one run aims for -- a run should try to clear
+    # the WHOLE backlog by default, not silently stop at some fixed
+    # number. BATCH_SIZE=None (its default when DRIVE_BACKFILL_BATCH_SIZE
+    # isn't set) must mean "no cap", not "cap of zero" or a crash.
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
+    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
+    monkeypatch.setattr(dad, "BATCH_SIZE", None)
+    monkeypatch.setattr(dad, "MAX_ATTEMPTS_PER_RUN", None)
+    rows = [MASTER_HEADER] + [_row(f"tk_{i}") for i in range(73)]
+    master_ws = FakeWorksheet(rows=rows)
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+
+    downloaded = []
+    monkeypatch.setattr(
+        dad.refunnel_export, "download_approved_video",
+        lambda page, media_id, download_dir, **kw: downloaded.append(media_id) or _FakePath(f"{download_dir}/{media_id}.mp4")
+    )
+
+    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
+
+    assert len(downloaded) == 73  # the whole backlog, not capped at 50 or any other fixed number
+
+
+def test_sabotage_a_default_cap_of_50_would_be_caught(monkeypatch):
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet1")
+    monkeypatch.setenv("DRIVE_FOLDER_ID_SWOVERALLS", "folder1")
+    monkeypatch.setattr(dad, "BATCH_SIZE", None)
+    monkeypatch.setattr(dad, "MAX_ATTEMPTS_PER_RUN", None)
+    rows = [MASTER_HEADER] + [_row(f"tk_{i}") for i in range(73)]
+    master_ws = FakeWorksheet(rows=rows)
+    gc = FakeClient({"sheet1": FakeSpreadsheet(worksheets={"Master Data": master_ws})})
+
+    downloaded = []
+    monkeypatch.setattr(
+        dad.refunnel_export, "download_approved_video",
+        lambda page, media_id, download_dir, **kw: downloaded.append(media_id) or _FakePath(f"{download_dir}/{media_id}.mp4")
+    )
+
+    dad.process_one_brand(gc, _brand_config(), object(), "x@example.com", ["Swoveralls"])
+
+    with pytest.raises(AssertionError):
+        assert len(downloaded) == 50  # wrong -- that's the old default cap this removes
+    assert len(downloaded) == 73
+
+
+def test_batch_size_defaults_to_none_when_env_var_is_unset(monkeypatch):
+    # CONFIRMED REAL: the two tests above monkeypatch BATCH_SIZE
+    # directly, which proves the LOOP correctly treats None as "no
+    # cap" -- but says nothing about what the module-level default
+    # actually computes to when DRIVE_BACKFILL_BATCH_SIZE genuinely
+    # isn't set. This re-imports the module fresh, with that env var
+    # explicitly absent, to confirm the default itself is None, not 50.
+    import importlib
+    monkeypatch.delenv("DRIVE_BACKFILL_BATCH_SIZE", raising=False)
+    monkeypatch.delenv("DRIVE_BACKFILL_MAX_ATTEMPTS", raising=False)
+    fresh = importlib.reload(dad)
+    try:
+        assert fresh.BATCH_SIZE is None
+        assert fresh.MAX_ATTEMPTS_PER_RUN is None
+    finally:
+        importlib.reload(dad)  # restore normal module state for any later test
+
+
+def test_sabotage_reintroducing_a_hardcoded_module_level_default_would_be_caught(monkeypatch):
+    import importlib
+    monkeypatch.delenv("DRIVE_BACKFILL_BATCH_SIZE", raising=False)
+    fresh = importlib.reload(dad)
+    try:
+        with pytest.raises(AssertionError):
+            assert fresh.BATCH_SIZE == 50  # wrong -- that's the hardcoded default this removes
+        assert fresh.BATCH_SIZE is None
+    finally:
+        importlib.reload(dad)
+
+
 # ---------- keeps going past failures to reach real successes (confirmed real bug fix) ----------
 
 def test_run_keeps_going_past_failures_to_reach_real_successes(monkeypatch):
