@@ -81,7 +81,14 @@ import sheets_sync
 CONFIG_PATH = "config/workspaces.yaml"
 MASTER_DATA_TAB = "Master Data"
 DOWNLOAD_DIR = "downloads/drive_backfill"
-BATCH_SIZE = int(os.environ.get("DRIVE_BACKFILL_BATCH_SIZE", "50"))
+BATCH_SIZE = int(os.environ["DRIVE_BACKFILL_BATCH_SIZE"]) if os.environ.get("DRIVE_BACKFILL_BATCH_SIZE") else None
+# CONFIRMED REAL want, direct request: no default cap on how many
+# successful uploads one run aims for -- by default, a run tries to
+# clear the WHOLE backlog, not some arbitrary fixed number. Setting
+# DRIVE_BACKFILL_BATCH_SIZE (drive-backfill.yml's own workflow_dispatch
+# input still supports this) caps it for a deliberate, manual test run.
+# DRIVE_BACKFILL_TIME_BUDGET_MINUTES and the job's own timeout-minutes
+# are what actually bound a run's worst-case length now.
 # CONFIRMED REAL bug this fixes: target_ids used to be a single, fixed
 # slice of the first BATCH_SIZE ids in the queue, taken once. Any id
 # that fails (couldn't locate, status changed since export) never gets
@@ -94,7 +101,7 @@ BATCH_SIZE = int(os.environ.get("DRIVE_BACKFILL_BATCH_SIZE", "50"))
 # everything fails) while letting the run keep going past
 # failures/skips to actually reach BATCH_SIZE real successes -- or
 # exhaust the queue trying.
-MAX_ATTEMPTS_PER_RUN = int(os.environ.get("DRIVE_BACKFILL_MAX_ATTEMPTS", str(BATCH_SIZE * 8)))
+MAX_ATTEMPTS_PER_RUN = int(os.environ["DRIVE_BACKFILL_MAX_ATTEMPTS"]) if os.environ.get("DRIVE_BACKFILL_MAX_ATTEMPTS") else None
 # CONFIRMED REAL risk this closes: MAX_ATTEMPTS_PER_RUN keeping the
 # loop going past failures means a run where many items are genuinely
 # slow to download/upload could still run long, even though the
@@ -160,9 +167,11 @@ def process_one_brand(
         return
 
     target_ids = list(to_upload.keys())
+    batch_desc = str(BATCH_SIZE) if BATCH_SIZE is not None else "all"
+    attempts_desc = min(MAX_ATTEMPTS_PER_RUN, len(target_ids)) if MAX_ATTEMPTS_PER_RUN is not None else len(target_ids)
     print(f"{brand}: {len(to_upload)} Approved video(s) not yet in Drive -- "
-          f"aiming for {BATCH_SIZE} successful upload(s) this run (trying up to "
-          f"{min(MAX_ATTEMPTS_PER_RUN, len(target_ids))} of them if needed).")
+          f"aiming for {batch_desc} successful upload(s) this run (trying up to "
+          f"{attempts_desc} of them if needed).")
 
     download_dir = f"{DOWNLOAD_DIR}/{brand.replace(' ', '_')}"
     debug_dir = f"{download_dir}/debug"
@@ -186,9 +195,9 @@ def process_one_brand(
         uploaded, already_present, failed, status_changed, attempted = 0, 0, 0, 0, 0
         deadline = time.monotonic() + DRIVE_BACKFILL_TIME_BUDGET_MINUTES * 60
         for media_id in target_ids:
-            if uploaded >= BATCH_SIZE:
+            if BATCH_SIZE is not None and uploaded >= BATCH_SIZE:
                 break
-            if attempted >= MAX_ATTEMPTS_PER_RUN:
+            if MAX_ATTEMPTS_PER_RUN is not None and attempted >= MAX_ATTEMPTS_PER_RUN:
                 print(f"{brand}: reached the {MAX_ATTEMPTS_PER_RUN}-attempt safety cap for this "
                       f"run with {uploaded} confirmed -- stopping here rather than risking an "
                       f"unbounded run; the rest of the queue is picked up on a future run.")
