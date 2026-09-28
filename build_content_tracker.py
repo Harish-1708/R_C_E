@@ -50,10 +50,19 @@ import sheets_sync
 
 CONFIG_PATH = "config/workspaces.yaml"
 MASTER_DATA_TAB = "Master Data"
-# Every brand's Content Tracker has exactly one tab, and it always uses
-# this name -- unlike the old shared-spreadsheet design, the brand name
-# no longer needs to double as the tab name to keep brands apart, but
-# keeping a fixed, recognizable name is simpler than inventing a new one.
+# Every brand's Content Tracker uses exactly one tab. "Content Tracker"
+# is the default name for a brand with no pre-existing tracker tab of
+# its own -- but a brand that was ALREADY tracking content in a
+# specific, named tab before this tool existed (set via that brand's
+# own tracker_tab_name in config/workspaces.yaml) keeps using that
+# same tab, rather than this tool silently creating a second, separate
+# one alongside it. CONFIRMED REAL bug this fixes: Duderobe's tracker
+# spreadsheet ID was already correct (pointing at the sheet already in
+# use), but this tool still hardcoded the TAB name to "Content
+# Tracker" regardless -- creating a brand-new, redundant tab instead
+# of updating the existing "Duderobe" tab that was already the real
+# one in use (and doubles as that brand's own Asana-project tracking
+# reference).
 TRACKER_TAB = "Content Tracker"
 
 
@@ -140,7 +149,8 @@ def sync_one_brand(gc: "gspread.Client", brand_config: dict) -> None:
     # spreadsheet per brand instead of one shared spreadsheet with a
     # tab per brand.
     tracker_sh = sheets_sync.retry_on_transient_error(gc.open_by_key, tracker_spreadsheet_id)
-    tracker_ws = sheets_sync.get_or_create_worksheet(tracker_sh, TRACKER_TAB)
+    tracker_tab = brand_config.get("tracker_tab_name", TRACKER_TAB)
+    tracker_ws = sheets_sync.get_or_create_worksheet(tracker_sh, tracker_tab)
     tracker_client = sheets_sync.GspreadSheetsClient(tracker_ws)
     tracker_all = tracker_client.read_all()
     tracker_header = tracker_all[0] if tracker_all else list(content_tracker.TRACKER_COLUMNS)
