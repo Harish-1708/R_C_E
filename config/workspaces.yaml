@@ -17,6 +17,18 @@
 # changes for it); a brand with this left unset is skipped for Content
 # Tracker the same way an unset spreadsheet_id_secret already skips it
 # for the main export.
+#
+# tracker_tab_name is the specific TAB within that spreadsheet this
+# tool reads and writes -- defaults to "Content Tracker" when left
+# unset. Set this only for a brand that was already tracking content
+# in a specific, differently-named tab before this tool existed, so
+# this tool updates THAT tab instead of creating a new, separate one
+# alongside it. Confirmed real want, direct fix: Duderobe's tracker
+# spreadsheet ID was already correct, but this tool still hardcoded
+# the tab name to "Content Tracker" regardless of what's actually in
+# use -- creating a redundant new tab instead of updating the existing
+# "Duderobe" tab, which is the real one in use and also doubles as
+# that brand's own Asana-project tracking reference.
 
 # drive_folder_id_secret is the target Google Drive folder's real
 # Drive API id (used to search for and rename the file Refunnel's own
@@ -38,6 +50,7 @@ workspaces:
     refunnel_workspace_name: Duderobe
     spreadsheet_id_secret: SPREADSHEET_ID_DUDEROBE
     tracker_spreadsheet_id_secret: CONTENT_TRACKER_SPREADSHEET_ID_DUDEROBE
+    tracker_tab_name: "DudeRobe"
     schedule_enabled: true
 
   - name: Swoveralls
