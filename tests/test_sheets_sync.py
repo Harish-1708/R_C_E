@@ -17,7 +17,6 @@ from sheets_sync import (
     is_transient_gspread_error,
     retry_on_transient_error,
 )
-import gspread.exceptions
 
 
 class FakeSheetsClient:
@@ -377,50 +376,88 @@ def test_sabotage_never_delete_dropping_a_row_would_be_caught():
 
 # ---------- get_or_create_worksheet tests ----------
 
+class _FakeWorksheetObj:
+    def __init__(self, title):
+        self.title = title
+
+
 class _FakeSpreadsheet:
-    def __init__(self, existing_error=None, worksheet_obj="EXISTING_WORKSHEET"):
-        self._existing_error = existing_error
-        self._worksheet_obj = worksheet_obj
+    """existing_titles: real tab names already on the spreadsheet (used
+    to confirm case-insensitive matching against whatever title the
+    caller passes in). worksheets_error: if set, .worksheets() itself
+    raises this instead of returning a list -- models a genuine,
+    unrelated failure (a transient 503, a permissions error) rather
+    than "nothing found"."""
+
+    def __init__(self, existing_titles=None, worksheets_error=None):
+        self._existing = [_FakeWorksheetObj(t) for t in (existing_titles or [])]
+        self._worksheets_error = worksheets_error
         self.add_worksheet_calls = []
 
-    def worksheet(self, title):
-        if self._existing_error:
-            raise self._existing_error
-        return self._worksheet_obj
+    def worksheets(self):
+        if self._worksheets_error:
+            raise self._worksheets_error
+        return self._existing
 
     def add_worksheet(self, title, rows, cols):
         self.add_worksheet_calls.append((title, rows, cols))
+        new_ws = _FakeWorksheetObj(title)
+        self._existing.append(new_ws)
         return "NEWLY_CREATED_WORKSHEET"
 
 
 def test_get_or_create_worksheet_returns_existing_when_found():
-    spreadsheet = _FakeSpreadsheet(existing_error=None)
+    spreadsheet = _FakeSpreadsheet(existing_titles=["Master Data"])
     result = get_or_create_worksheet(spreadsheet, "Master Data")
-    assert result == "EXISTING_WORKSHEET"
+    assert result.title == "Master Data"
+    assert spreadsheet.add_worksheet_calls == []
+
+
+def test_get_or_create_worksheet_matches_case_insensitively():
+    # CONFIRMED REAL bug this fixes: Google Sheets itself enforces
+    # case-insensitive uniqueness on tab names within one spreadsheet
+    # (you can't have both "DudeRobe" and "Duderobe" side by side) --
+    # but an exact-match lookup missed a real, already-existing tab
+    # purely because of a casing difference, fell through to creating
+    # a "new" one, and Google's own API then rejected THAT for the
+    # very same reason the lookup should have found it in the first
+    # place. A live run hit this exactly: config asked for "DudeRobe",
+    # the real tab was "Duderobe".
+    spreadsheet = _FakeSpreadsheet(existing_titles=["Duderobe"])
+    result = get_or_create_worksheet(spreadsheet, "DudeRobe")
+    assert result.title == "Duderobe"  # the REAL, existing tab -- not a new one
+    assert spreadsheet.add_worksheet_calls == []
+
+
+def test_sabotage_case_sensitive_matching_would_be_caught():
+    spreadsheet = _FakeSpreadsheet(existing_titles=["Duderobe"])
+    get_or_create_worksheet(spreadsheet, "DudeRobe")
+    with pytest.raises(AssertionError):
+        assert len(spreadsheet.add_worksheet_calls) == 1  # wrong -- that's the exact bug this fixes
     assert spreadsheet.add_worksheet_calls == []
 
 
 def test_get_or_create_worksheet_creates_on_genuine_not_found():
-    spreadsheet = _FakeSpreadsheet(existing_error=gspread.exceptions.WorksheetNotFound("nope"))
+    spreadsheet = _FakeSpreadsheet(existing_titles=[])
     result = get_or_create_worksheet(spreadsheet, "Master Data")
     assert result == "NEWLY_CREATED_WORKSHEET"
     assert spreadsheet.add_worksheet_calls == [("Master Data", 1000, 30)]
 
 
 def test_get_or_create_worksheet_propagates_other_errors_instead_of_creating():
-    # this is the real bug a live run hit: a transient 503 from
+    # this is the real bug an earlier version hit: a transient 503 from
     # Google's side was being misread as "doesn't exist yet", causing
     # an attempted duplicate creation that then failed for real
-    spreadsheet = _FakeSpreadsheet(existing_error=RuntimeError("503 Service Unavailable"))
+    spreadsheet = _FakeSpreadsheet(worksheets_error=RuntimeError("503 Service Unavailable"))
     with pytest.raises(RuntimeError, match="503"):
         get_or_create_worksheet(spreadsheet, "Master Data")
     assert spreadsheet.add_worksheet_calls == []  # never attempted a duplicate create
 
 
 def test_sabotage_broad_except_would_be_caught():
-    # proves the fix is actually scoped to WorksheetNotFound, not just
-    # any exception -- a generic error must NOT trigger a create
-    spreadsheet = _FakeSpreadsheet(existing_error=ValueError("some unrelated error"))
+    # proves errors from the lookup are never silently treated as
+    # "not found" -- a generic error must NOT trigger a create
+    spreadsheet = _FakeSpreadsheet(worksheets_error=ValueError("some unrelated error"))
     with pytest.raises(ValueError):
         get_or_create_worksheet(spreadsheet, "Master Data")
     with pytest.raises(AssertionError):
