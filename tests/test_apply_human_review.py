@@ -30,14 +30,20 @@ class FakeWorksheet:
 class FakeSpreadsheet:
     def __init__(self, worksheets=None):
         self._worksheets = dict(worksheets or {})
+        for title, ws in self._worksheets.items():
+            ws.title = title
 
     def worksheet(self, title):
         if title not in self._worksheets:
             raise gspread.exceptions.WorksheetNotFound(title)
         return self._worksheets[title]
 
+    def worksheets(self):
+        return list(self._worksheets.values())
+
     def add_worksheet(self, title, rows, cols):
         ws = FakeWorksheet()
+        ws.title = title
         self._worksheets[title] = ws
         return ws
 
