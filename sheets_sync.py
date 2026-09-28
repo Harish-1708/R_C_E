@@ -34,7 +34,6 @@ import time
 from typing import Dict, List, Optional, Protocol
 
 from gspread.utils import rowcol_to_a1
-import gspread.exceptions
 
 # Confirmed real: a scheduled run failed entirely on a single 503 from
 # Google's own API, at the very first step (connecting to the
@@ -477,17 +476,32 @@ def get_or_create_worksheet(spreadsheet, title: str, cols: int = 30):
     """Fetch a worksheet by title, creating it (blank) if missing. Used
     for the one-time "create the sheet from scratch" setup step.
 
-    Only catches WorksheetNotFound specifically -- confirmed from a real
-    run that catching a bare Exception here is a real bug: a transient
-    503 from Google's side (nothing to do with whether the sheet
-    exists) was being misread as "doesn't exist yet", triggering an
-    attempt to create a duplicate, which then failed for real because
-    the sheet was there all along. Any other error (a genuine outage, a
-    permissions problem, etc.) now propagates and fails the run
-    honestly instead of masking itself as a confusing "already exists"
-    error one level down.
+    Looks up by title CASE-INSENSITIVELY. CONFIRMED REAL bug this
+    fixes: Google Sheets itself enforces case-insensitive uniqueness on
+    tab names within one spreadsheet (you can't have both "DudeRobe"
+    and "Duderobe" side by side) -- but gspread's own worksheet(title)
+    lookup is a case-SENSITIVE exact match. A live run hit exactly this
+    mismatch: config named the target tab "DudeRobe", but the real,
+    already-in-use tab was actually "Duderobe" -- the exact-match
+    lookup failed to find it (WorksheetNotFound), fell through to
+    creating a "new" one, and Google's own API then rejected THAT for
+    the very same reason the lookup should have found it in the first
+    place: "A sheet with the name 'DudeRobe' already exists." Matching
+    case-insensitively here means a real, pre-existing tab is always
+    found regardless of the exact casing configured, consistent with
+    how Google Sheets itself already treats the name.
+
+    Only creates a new sheet when NO case-insensitive match exists at
+    all. Any error other than genuinely finding no match (a transient
+    503 from Google's side, a permissions problem, etc.) propagates
+    and fails the run honestly -- confirmed from an earlier real run
+    that swallowing a bare Exception here is itself a bug: a transient
+    error unrelated to whether the sheet exists was being misread as
+    "doesn't exist yet", triggering an attempt to create a duplicate,
+    which then failed for real because the sheet was there all along.
     """
-    try:
-        return retry_on_transient_error(spreadsheet.worksheet, title)
-    except gspread.exceptions.WorksheetNotFound:
-        return retry_on_transient_error(spreadsheet.add_worksheet, title=title, rows=1000, cols=cols)
+    all_worksheets = retry_on_transient_error(spreadsheet.worksheets)
+    for ws in all_worksheets:
+        if ws.title.lower() == title.lower():
+            return ws
+    return retry_on_transient_error(spreadsheet.add_worksheet, title=title, rows=1000, cols=cols)
