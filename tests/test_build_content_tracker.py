@@ -156,6 +156,84 @@ def test_happy_path_creates_and_populates_the_dedicated_tracker_sheet(monkeypatc
     assert "wrote 2 rows" in capsys.readouterr().out
 
 
+def test_tracker_tab_name_override_writes_to_the_existing_named_tab(monkeypatch, capsys):
+    # CONFIRMED REAL bug this fixes: Duderobe's tracker spreadsheet ID
+    # was already correct (pointing at the sheet already in use), but
+    # this tool still hardcoded the TAB name to "Content Tracker"
+    # regardless -- creating a brand-new, redundant tab instead of
+    # updating the existing "Duderobe" tab that was already the real
+    # one in use (and doubles as that brand's own Asana-project
+    # tracking reference). tracker_tab_name in config/workspaces.yaml
+    # is the fix: a brand can point this tool at whichever tab it was
+    # already using.
+    monkeypatch.setenv("SPREADSHEET_ID_DUDEROBE", "sheet123")
+    monkeypatch.setenv("CONTENT_TRACKER_SPREADSHEET_ID_DUDEROBE", "tracker123")
+    import content_tracker
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _master_row("tk_1")])
+    source_sh = FakeSpreadsheet(worksheets={"Master Data": master_ws})
+    # the pre-existing "DudeRobe" tab, already holding the same kind of
+    # data this tool produces -- exactly the real situation described
+    existing_dude_robe_tab = FakeWorksheet(rows=[list(content_tracker.TRACKER_COLUMNS)])
+    tracker_sh = FakeSpreadsheet(worksheets={"DudeRobe": existing_dude_robe_tab})
+    gc = FakeClient({"sheet123": source_sh, "tracker123": tracker_sh})
+
+    sync_one_brand(gc, {
+        "name": "Duderobe",
+        "spreadsheet_id_secret": "SPREADSHEET_ID_DUDEROBE",
+        "tracker_spreadsheet_id_secret": "CONTENT_TRACKER_SPREADSHEET_ID_DUDEROBE",
+        "tracker_tab_name": "DudeRobe",
+    })
+
+    assert "Content Tracker" not in tracker_sh._worksheets  # no redundant new tab created
+    header = existing_dude_robe_tab.rows[0]
+    id_idx = header.index("id")
+    ids_written = {row[id_idx] for row in existing_dude_robe_tab.rows[1:]}
+    assert ids_written == {"tk_1"}
+
+
+def test_sabotage_ignoring_tracker_tab_name_would_be_caught(monkeypatch):
+    monkeypatch.setenv("SPREADSHEET_ID_DUDEROBE", "sheet123")
+    monkeypatch.setenv("CONTENT_TRACKER_SPREADSHEET_ID_DUDEROBE", "tracker123")
+    import content_tracker
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _master_row("tk_1")])
+    source_sh = FakeSpreadsheet(worksheets={"Master Data": master_ws})
+    existing_dude_robe_tab = FakeWorksheet(rows=[list(content_tracker.TRACKER_COLUMNS)])
+    tracker_sh = FakeSpreadsheet(worksheets={"DudeRobe": existing_dude_robe_tab})
+    gc = FakeClient({"sheet123": source_sh, "tracker123": tracker_sh})
+
+    sync_one_brand(gc, {
+        "name": "Duderobe",
+        "spreadsheet_id_secret": "SPREADSHEET_ID_DUDEROBE",
+        "tracker_spreadsheet_id_secret": "CONTENT_TRACKER_SPREADSHEET_ID_DUDEROBE",
+        "tracker_tab_name": "DudeRobe",
+    })
+
+    with pytest.raises(AssertionError):
+        # wrong -- that's the exact bug this fixes: a redundant new tab
+        # created instead of updating the existing, already-in-use one
+        assert "Content Tracker" in tracker_sh._worksheets
+    assert "DudeRobe" in tracker_sh._worksheets
+
+
+def test_no_tracker_tab_name_set_still_defaults_to_content_tracker(monkeypatch):
+    # confirms every OTHER brand's existing behavior is unchanged --
+    # this is an opt-in override, not a new default for everyone
+    monkeypatch.setenv("SPREADSHEET_ID_SWOVERALLS", "sheet456")
+    monkeypatch.setenv("CONTENT_TRACKER_SPREADSHEET_ID_SWOVERALLS", "tracker456")
+    master_ws = FakeWorksheet(rows=[MASTER_HEADER, _master_row("tk_1")])
+    source_sh = FakeSpreadsheet(worksheets={"Master Data": master_ws})
+    tracker_sh = FakeSpreadsheet()
+    gc = FakeClient({"sheet456": source_sh, "tracker456": tracker_sh})
+
+    sync_one_brand(gc, {
+        "name": "Swoveralls",
+        "spreadsheet_id_secret": "SPREADSHEET_ID_SWOVERALLS",
+        "tracker_spreadsheet_id_secret": "CONTENT_TRACKER_SPREADSHEET_ID_SWOVERALLS",
+    })
+
+    assert "Content Tracker" in tracker_sh._worksheets
+
+
 def test_existing_tracker_row_is_frozen_and_refreshed_correctly(monkeypatch):
     monkeypatch.setenv("SPREADSHEET_ID_DUDEROBE", "sheet123")
     monkeypatch.setenv("CONTENT_TRACKER_SPREADSHEET_ID_DUDEROBE", "tracker123")
