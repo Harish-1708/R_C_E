@@ -50,7 +50,7 @@ workspaces:
     refunnel_workspace_name: Duderobe
     spreadsheet_id_secret: SPREADSHEET_ID_DUDEROBE
     tracker_spreadsheet_id_secret: CONTENT_TRACKER_SPREADSHEET_ID_DUDEROBE
-    tracker_tab_name: "DudeRobe"
+    tracker_tab_name: "Duderobe"
     schedule_enabled: true
 
   - name: Swoveralls
